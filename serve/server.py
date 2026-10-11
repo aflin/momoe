@@ -52,6 +52,7 @@ from typing import Iterator, Protocol
 from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
+SHUTDOWN = threading.Event()                      # set by POST /shutdown (momoe stop)
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
@@ -4844,39 +4845,6 @@ def make_handler(svc: Service):
 
         def do_GET(self):
             path = self.path.split("?")[0].rstrip("/")
-            if path.startswith("/fonts/"):
-                # the web app's font (Outfit, OFL: serve/web/fonts); the page falls back to the system font
-                name = path[len("/fonts/"):]
-                f = ROOT / "serve" / "web" / "fonts" / name
-                if "/" in name or "\\" in name or not name.endswith(".woff2") or not f.is_file():
-                    self._json(404, {"error": {"message": "not found"}})
-                    return
-                body = f.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "font/woff2")
-                self.send_header("Cache-Control", "max-age=86400")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if path.startswith("/web/"):
-                # the web app's own files (serve/web): styles, script, icon sprite - same origin, no CDN
-                name = path[len("/web/"):]
-                types = {".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-                         ".svg": "image/svg+xml"}
-                f = ROOT / "serve" / "web" / name
-                ext = os.path.splitext(name)[1]
-                if "/" in name or "\\" in name or ext not in types or not f.is_file():
-                    self._json(404, {"error": {"message": "not found"}})
-                    return
-                body = f.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", types[ext])
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
             if path == "/metrics/prometheus":
                 if self._authorized():
                     body = svc.prometheus().encode()
@@ -4923,13 +4891,9 @@ def make_handler(svc: Service):
                 if self._authorized():
                     self._json(200, svc.mcp.status() if svc.mcp else {"servers": [], "tools": 0})
                 return
-            if path == "" or (path == "/api-monitor" and svc.api_monitor):
-                body = (ROOT / "serve" / "web" / ("monitor.html" if path else "index.html")).read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+            if path == "":                                  # Momoe has no web page: say where the API is
+                self._json(200, {"service": "momoe", "model": svc.model, "openai": "/v1", "anthropic": "/v1/messages",
+                                 "responses": "/v1/responses", "health": "/health"})
             elif path in ("/health", "/api/health"):
                 self._json(200, {"status": "ok", "max_context": svc.reported_ctx(), "model": svc.model,
                                  "images": svc.vision is not None, "api_key": bool(svc.api_key),
@@ -5007,6 +4971,16 @@ def make_handler(svc: Service):
                 return
             if path == "/config":
                 self._config_post()
+                return
+            if path == "/shutdown":
+                # momoe stop: from this PC only, as JSON (no form from a web page), the key checked above
+                if not self._control_body() or not self._own_page("the server can be stopped"):
+                    return
+                if self.client_address[0] not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                    self._json(403, {"error": {"message": "the server can be stopped only from this PC"}})
+                    return
+                SHUTDOWN.set()                           # before the reply: the main loop stops within a second
+                self._json(200, {"stopping": True})
                 return
             if path in ("/unload", "/load") and not self._control_body():
                 return
@@ -6164,7 +6138,7 @@ def main() -> int:
                                   "(\"0,2\"; also \"gpu\" in the config)")
     ap.add_argument("--tokenizer", default=str(ROOT / "pack/full/tokenizer"),
                     help="pack tokenizer directory (falls back to a byte tokenizer if absent)")
-    ap.add_argument("--open", action="store_true", help="open the local page in the browser once the model is ready")
+    ap.add_argument("--open", action="store_true", help=argparse.SUPPRESS)   # Momoe has no web page: accepted, ignored
     ap.add_argument("--fit-max-tokens", action="store_true",
                     help="clamp max_tokens to the remaining context instead of rejecting the request "
                          "(default: reject with 400, like llama.cpp; also \"fit_max_tokens\": true in the config)")
@@ -6176,7 +6150,7 @@ def main() -> int:
                                          "the config)")
     ap.add_argument("--lazy", action="store_true", help="start the API unloaded (the engine and the vision encoder start with the first request)")
     ap.add_argument("--api-monitor", action="store_true",
-                    help="the API request monitor at /api-monitor: keeps the last 100 requests' prompts and answers in "
+                    help="the API request monitor at /api/requests (JSON): keeps the last 100 requests' prompts and answers in "
                          "memory (also \"api_monitor\": true in the config; off by default)")
     ap.add_argument("--idle-unload", type=float, default=None, metavar="SECONDS",
                     help="unload the model after this many seconds without requests, so other programs (games, other "
@@ -6342,7 +6316,7 @@ def main() -> int:
               else f"[strata] also answers to the host names {', '.join(svc.allowed_hosts)} (allowed_hosts)", flush=True)
     svc.api_monitor = a.api_monitor or cfg.get("api_monitor") is True
     if svc.api_monitor:
-        print("[strata] API request monitor on (/api-monitor): the last 100 requests' prompts and answers are kept in "
+        print("[strata] API request monitor on (/api/requests): the last 100 requests' prompts and answers are kept in "
               "memory" + ("" if svc.api_key else "; anyone who can reach this server can read them (no API key)"),
               flush=True)
     if svc.cors_origins:
@@ -6422,25 +6396,22 @@ def main() -> int:
     print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
           f"context {engine.max_context} tokens{', images on' if vision else ''}"
           f"{', API key required' if svc.api_key else ''})", flush=True)
-    print(f"       open http://{here}:{a.port}/ in a browser to chat; close this window to stop the model", flush=True)
+    print("       stop it with: momoe stop", flush=True)
     if a.host not in ("127.0.0.1", "localhost", "::1"):
         # issue #26: reachable from other devices - say at which address, and what can still block it
         ips = lan_addresses()
         for ip in ips:
-            print(f"       from other devices: http://{ip}:{a.port}/   (API: http://{ip}:{a.port}/v1)", flush=True)
+            print(f"       from other devices: http://{ip}:{a.port}/v1", flush=True)
         if not ips:
-            print("       from other devices: http://<this PC's IP address>:" + str(a.port) + "/", flush=True)
+            print("       from other devices: http://<this PC's IP address>:" + str(a.port) + "/v1", flush=True)
         if not svc.api_key:
             print("       WARNING: no API key - anyone on your network can use this model. Add \"api_key\": \"...\" "
-                  "to the config (clients send it as their API key; the web page asks for it)", flush=True)
+                  "to the config (clients send it as their API key)", flush=True)
         if os.name == "nt":
             print("       nothing arrives? Windows Firewall blocks it until allowed: accept its prompt for Python, or run "
                   "in an admin PowerShell:\n         New-NetFirewallRule -DisplayName \"Strata " + str(a.port) + "\" "
                   "-Direction Inbound -Protocol TCP -LocalPort " + str(a.port) + " -Action Allow -Profile Private\n"
                   "       (and set this network to Private in Windows' network settings)", flush=True)
-    if a.open and cfg.get("open_browser") is not False:   # #609: the config's "open_browser": false wins (an older
-        import webbrowser                                  # run-<model>.bat still passes --open)
-        webbrowser.open(f"http://{'127.0.0.1' if a.host in ('0.0.0.0', '') else a.host}:{a.port}/")
     # #96: docker stop sends SIGTERM, which Python ignores by default, so the container's PID 1 would be killed after
     # the grace period with the engine still running. SIGTERM takes Ctrl+C's path below (QUIT to the engine).
     # SIGINT keeps Python's own handler, so Ctrl+C and a second Ctrl+C work as before.
@@ -6451,8 +6422,9 @@ def main() -> int:
     except (ValueError, OSError, AttributeError):         # not the main thread
         pass
     try:
-        while True:
+        while not SHUTDOWN.is_set():
             time.sleep(1)                               # Windows never delivers Ctrl+C to an untimed Event.wait()
+        raise KeyboardInterrupt                         # POST /shutdown (momoe stop): Ctrl+C's path below
     except KeyboardInterrupt:
         print("\n[strata] stopping (Ctrl+C again to end the engine at once) ...", flush=True)
         closers = [httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,

@@ -534,6 +534,48 @@ def ask(question, choices, default, yes):
         say(f"  please answer one of: {', '.join(choices)}")
 
 
+def config_file_name(name: str) -> str | None:
+    """A config name typed at setup as a file in this folder: ".json" added, None for one with a folder in it."""
+    name = name.strip()
+    if not name or "/" in name or "\\" in name or name in (".", "..") or name.endswith(".shared-settings.json"):
+        return None
+    return name if name.lower().endswith(".json") else name + ".json"
+
+
+def config_path_for(name, tag: str) -> Path:
+    """The config a setup of this model writes: --config-name, else the one it was set up as before, else
+    strata-<tag>.json."""
+    if name:
+        n = config_file_name(name)
+        if n is None:
+            fail(f"--config-name {name!r}: give a file name without a folder, e.g. --config-name ornith-8gb.json")
+        return ROOT / n
+    return tag_config(tag) or ROOT / f"strata-{tag.lower()}.json"
+
+
+def name_config(default: Path, a) -> Path:
+    """Momoe: the config's file name, asked (the default: this model's own). Another model's config of that name is
+    replaced only when confirmed."""
+    if a.config_name or a.yes or not sys.stdin.isatty():
+        return default
+    flush_typed_ahead()
+    while True:
+        try:
+            typed = input(f"Name for this config [{default.name}]: ").strip()
+        except EOFError:
+            return default
+        if not typed:
+            return default
+        n = config_file_name(typed)
+        if n is None:
+            say("  a file name in this folder, without a folder in it (e.g. ornith-8gb.json)")
+            continue
+        path = ROOT / n
+        if path.exists() and path != default and ask(f"  {n} already exists: replace it?", ["y", "n"], "n", False) != "y":
+            continue
+        return path
+
+
 def run(cmd, cwd=None, env=None, check=True, quiet=False):
     say("  > " + " ".join(str(c) for c in cmd))
     r = subprocess.run([str(c) for c in cmd], cwd=cwd, env=env,
@@ -1388,9 +1430,28 @@ def model_choices() -> list:
     return list(dict.fromkeys([*(size_of(m) for m in MODELS), *MODELS]))
 
 
+def config_tag(cfg_path: Path) -> str:
+    """The model tag a config was set up for: its "setup_tag" (a config named at setup, momoe setup), else the name's
+    strata-<tag>.json."""
+    try:
+        tag = json.loads(Path(cfg_path).read_text(encoding="utf-8-sig")).get("setup_tag")
+    except (OSError, ValueError, AttributeError):
+        tag = None
+    return tag if isinstance(tag, str) and tag else Path(cfg_path).stem[len("strata-"):]
+
+
+def tag_config(tag: str):
+    """The installed config set up for this tag: strata-<tag>.json, else the most recently used one named at setup."""
+    own = ROOT / f"strata-{tag.lower()}.json"
+    if own.exists():
+        return own
+    named = [c for c in model_config_files(ROOT) if config_tag(c).lower() == tag.lower() and model_config(c, True)]
+    return max(named, key=lambda c: c.stat().st_mtime, default=None)
+
+
 def config_family(cfg_path: Path) -> str:
-    """The family a strata-<tag>.json was set up for, from its tag (the original model's has no prefix)."""
-    tag = Path(cfg_path).stem[len("strata-"):]
+    """The family a config was set up for, from its tag (the original model's has no prefix)."""
+    tag = config_tag(cfg_path)
     return next((f for f, d in FAMILIES.items() if d["tag"] and tag.startswith(d["tag"])), "qwen")
 
 
@@ -4265,8 +4326,18 @@ def readable_config(path: Path) -> bool:
 
 def model_config_files(folder: Path) -> list:
     """#346: the strata-*.json files of a folder that can be model configs. The server keeps a config's Chat settings
-    next to it as strata-<model>.shared-settings.json: it matches the pattern but is no config (no exe, no args)."""
-    return [p for p in folder.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")]
+    next to it as strata-<model>.shared-settings.json: it matches the pattern but is no config (no exe, no args).
+    Momoe: a config named at setup (any <name>.json) carries "setup_tag"."""
+    found = [p for p in folder.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")]
+    for p in folder.glob("*.json"):
+        if p.name.startswith("strata-") or p.name.endswith(".shared-settings.json"):
+            continue
+        try:
+            if isinstance(json.loads(p.read_text(encoding="utf-8-sig")).get("setup_tag"), str):
+                found.append(p)
+        except (OSError, ValueError, AttributeError):
+            pass
+    return found
 
 
 def previous_config(elsewhere_first: list, settings: dict):
@@ -4283,7 +4354,7 @@ def previous_config(elsewhere_first: list, settings: dict):
 def choices_from_config(cfg_path: Path) -> dict:
     """The setup answers a config was written with (family, size, context, KV, images, projection, network)."""
     cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
-    tag = cfg_path.stem[len("strata-"):]
+    tag = config_tag(cfg_path)
     family = config_family(cfg_path)
     model = (tag[len(FAMILIES[family]["tag"]):] if tag.startswith(FAMILIES[family]["tag"]) else tag).upper()
     if model_key(family, model) is None and model not in MODELS:   # (sizes have no dash except UD-*: the old rule)
@@ -4315,7 +4386,7 @@ def find_in(roots: list, rel: str):
 
 
 # ------------------------------------------------------------------------------------------------ start
-def model_config(path: Path) -> bool:
+def model_config(path: Path, quiet=False) -> bool:
     """#549: a model's run config (a JSON object with "exe" and "args"). Any other strata-*.json in the folder (a
     file of the user's own, a cut-off one) is skipped with a warning naming it instead of stopping setup."""
     try:
@@ -4327,7 +4398,8 @@ def model_config(path: Path) -> bool:
         why = e.strerror or str(e)
     except ValueError:
         why = "not valid JSON"
-    warn(f"skipped {path.name} ({why}): it is not a Strata model config")
+    if not quiet:
+        warn(f"skipped {path.name} ({why}): it is not a Strata model config")
     return False
 
 
@@ -4336,7 +4408,7 @@ def on_this_pc(family: str, model: str, models_dir) -> str:
     finished, but it is not set up), or ""."""
     fam = FAMILIES[family]
     tag = fam["tag"] + size_of(model)
-    if (ROOT / f"strata-{tag.lower()}.json").exists():
+    if tag_config(tag) is not None:
         return "installed"
     folder = Path(models_dir) / tag
     shards = [folder / model_file(fam, model, i) for i in range(1, model_shards(fam, model) + 1)]
@@ -4664,9 +4736,7 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
         if g is not None:
             cfg = ensure_engine_for([g], cfg_path, cfg, yes)
             ok("GPU: " + gpu_name(g))
-    browser = open_browser and cfg.get("open_browser") is not False   # #609: "open_browser": false, --no-browser
-    if browser:
-        cmd.append("--open")
+    browser = False                                    # Momoe has no web page
     gb = 0.0
     if "--native" in cfg["args"]:
         try:
@@ -4685,19 +4755,77 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
         say(f"  Starting {cfg.get('model_name', 'the model')}: it loads {size} into RAM and locks part of it for the "
             "GPU.")
     say("  While it does, YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES (longer the first time after a")
-    say("  restart). That is normal: please wait and don't close this window - " + (
-        "the browser opens when it is ready." if browser else "the server says when it is ready."))
-    say("  Later, closing this window stops the model.")
+    if DETACH:
+        say("  restart). That is normal: please wait - it runs in the background, and this returns when it is ready.")
+        say("  momoe stop ends it.")
+    else:
+        say("  restart). That is normal: please wait and don't close this window - the server says when it is ready.")
+        say("  Later, closing this window stops the model.")
     say("  " + "-" * 100)
     for n, line in enumerate(textwrap.wrap(f"Settings ({cfg_path.name}): {settings_summary(cfg, port)}", 100,
                                            break_on_hyphens=False)):   # #564: what this start uses
         say(("  " if n == 0 else "    ") + line)
+    if DETACH:
+        return start_detached(cmd, cfg_path, cfg, port or cfg.get("port", 8080))
     if not WIN and os.environ.get("STRATA_EXECV"):
         # Replace this process instead of spawning a child. The Docker image sets STRATA_EXECV=1,
         # so there the server is PID 1 and docker stop's SIGTERM reaches the process that can
         # answer the engine with QUIT. Normal Linux starts keep spawning the server as a child.
         os.execv(cmd[0], cmd)
     return subprocess.call(cmd)
+
+
+DETACH = False                                         # momoe: --detach starts the server in the background
+MOMOE_DIR = ROOT / ".momoe"                            # momoe's state: server.json (the running server), its log
+
+
+def start_detached(cmd, cfg_path: Path, cfg: dict, port) -> int:
+    """Momoe: the server in the background (its own session / process group, no window), its output in
+    .momoe/server.log; .momoe/server.json says which one runs.  Returns when the server says it is ready (0), or
+    when it ends first (1).  Ctrl+C while waiting leaves it starting."""
+    MOMOE_DIR.mkdir(exist_ok=True)
+    log = MOMOE_DIR / "server.log"
+    kw = {}
+    if WIN:
+        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    else:
+        kw["start_new_session"] = True                 # a closed terminal's hangup does not reach it
+    with open(log, "wb") as out:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, cwd=str(ROOT),
+                                env={**os.environ, "PYTHONUNBUFFERED": "1"}, **kw)
+    state = {"pid": proc.pid, "port": int(port), "config": str(cfg_path), "host": cfg.get("host") or "127.0.0.1",
+             "model": cfg.get("model_name"), "log": str(log), "started": time.time()}
+    (MOMOE_DIR / "server.json").write_text(json.dumps(state, indent=1), encoding="utf-8")
+    (MOMOE_DIR / "last.json").write_text(json.dumps({"config": str(cfg_path)}), encoding="utf-8")   # momoe run
+    say(f"  started in the background (pid {proc.pid}); its output: {log}")
+    pos = 0
+    try:
+        while True:
+            with open(log, "rb") as f:
+                f.seek(pos)
+                new = f.read()
+            if new.endswith(b"\n") or proc.poll() is not None:   # else a line still being written: whole next time
+                pos += len(new)
+                text = new.decode("utf-8", "replace")
+                for line in text.splitlines():
+                    say("  | " + line)
+                if "ready: http" in text:
+                    say()
+                    ok(f"ready: http://127.0.0.1:{port}/v1 ({cfg.get('model_name', cfg_path.stem)}); momoe stop ends it")
+                    return 0
+            if proc.poll() is not None:
+                say()
+                warn(f"the server ended before it was ready (exit code {proc.returncode}): the lines above and {log}")
+                try:
+                    (MOMOE_DIR / "server.json").unlink()
+                except OSError:
+                    pass
+                return 1
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        say()
+        say("  It goes on starting in the background: momoe status shows when it is ready, momoe stop ends it.")
+        return 0
 
 
 # the draft subsets setup copied before (sha256): replaced by the current one, a subset made by hand is kept
@@ -5164,6 +5292,11 @@ def main() -> int:
     ap.add_argument("--gguf-dir", help="use GGUF files you already have (a folder with every shard: "
                                        "<name>-00001-of-0000N.gguf ... -0000N-of-0000N.gguf)")
     ap.add_argument("--yes", action="store_true", help="accept the recommended answers")
+    ap.add_argument("--config-name", metavar="NAME",
+                    help="the file name of the config this setup writes (default: asked; strata-<model>.json)")
+    ap.add_argument("--config", metavar="FILE", help="start this config (momoe start FILE)")
+    ap.add_argument("--detach", action="store_true",
+                    help="start the server in the background and return once it is ready (momoe; log: .momoe/server.log)")
     ap.add_argument("--setup", action="store_true", help="install another model or change settings")
     ap.add_argument("--no-start", action="store_true", help="install only, do not start the model")
     ap.add_argument("--update", action="store_true",
@@ -5286,6 +5419,21 @@ def main() -> int:
     # choice, and asked once when the PC has cards that could share the model
     run_gpu = start_gpus(a.gpus) or a.gpu
     port = a.port or 8080                              # a new install's port (issue #32: --port for an existing one)
+    global DETACH
+    DETACH = a.detach
+    if a.config:                                       # momoe start FILE
+        cfg_file = Path(a.config)
+        if not cfg_file.is_file() and (ROOT / a.config).is_file():
+            cfg_file = ROOT / a.config
+        if not cfg_file.is_file():
+            fail(f"no config {a.config}", "momoe list shows the configs in " + str(ROOT))
+        if not model_config(cfg_file.resolve()):
+            fail(f"{a.config} is not a model config (no \"exe\" or \"args\")")
+        if not a.build:
+            update_installed_engine(a.prebuilt)
+        return start(cfg_file.resolve(), a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
+                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
+                           "vram_reserve_mib": a.vram_reserve_mib})
     if have and a.calibrate and not (a.setup or a.model or a.family or a.check):
         if not a.build:
             update_installed_engine(a.prebuilt)
@@ -5965,7 +6113,8 @@ def main() -> int:
     mtp = (find_in(roots, "mtp/rt/experts.bin") or data / "mtp/rt/experts.bin").parent.parent
     rt = mtp / "rt"
     # a setup run again without --draft-vocab keeps the subset this model's config chose before (cyrillic, fr, en)
-    draft_vocab = a.draft_vocab or saved_draft_vocab(ROOT / f"strata-{tag.lower()}.json")
+    own_cfg = config_path_for(a.config_name, tag)    # the config this setup writes (asked below unless given)
+    draft_vocab = a.draft_vocab or saved_draft_vocab(own_cfg)
     if own_mtp:
         # Qwen3.6-35B-A3B: the draft layer is the model file's own MTP block (blk.40, "nextn") - nothing is fetched
         # or converted; --mtp names the model file and --mtp-draft-vocab the shipped token subset (the same
@@ -5992,7 +6141,7 @@ def main() -> int:
         say("  " + line)
 
     # ---- 7. the start script
-    step(7, "writing the start script")
+    step(7, "writing the config")
     sys.path.insert(0, str(ROOT / "tools"))
     from gguf_reader import GGUFFile                   # the PLE table's shard: shard 2 (original) or 1 (Swift)
     ple = None                                         # Qwen3.6-35B-A3B has no PLE table: no --ple-gguf
@@ -6058,7 +6207,7 @@ def main() -> int:
         if free is not None and vision == "gpu":   # the encoder starts before the engine and takes its share first
             free -= (VISION_GPU_QWEN36_MIB + VISION["gpu"]["reserve_mib"]) / 1024
             card += f", {free:.1f} GB beside the image encoder"
-        later = (f"  To change it later: \"--kv-resident\", \"32768\" in strata-{tag.lower()}.json's args, or run",
+        later = (f"  To change it later: \"--kv-resident\", \"32768\" in {own_cfg.name}'s args, or run",
                  "  setup again with --kv-streaming on|off.")
         required = free is not None and free < 9.0 and ctx >= 131072
         if required and a.kv_streaming == "off":
@@ -6230,7 +6379,7 @@ def main() -> int:
             cfg["parallel"] = 1
             ok("parallel requests: one at a time (--parallel 1)")
     if vision != "none":
-        old_cfg = ROOT / f"strata-{tag.lower()}.json"
+        old_cfg = own_cfg
         vt = vision_tokens(a.vision_tokens, vision, old_cfg if old_cfg.is_file() else adopted)
         cfg["vision"] = {"exe": str(eng / VEXE), "mmproj": str(mmproj), "model": str(shards[0]),
                          "gpu": vision == "gpu", "max_tokens": vt}
@@ -6238,7 +6387,10 @@ def main() -> int:
             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
     elif a.vision_tokens is not None:
         warn("--vision-tokens: images are off for this model, so it is not used")
-    cfg_path = ROOT / f"strata-{tag.lower()}.json"
+    cfg_path = name_config(own_cfg, a)               # Momoe: the file's name is asked (the default: this model's)
+    if cfg_path.name != f"strata-{tag.lower()}.json":
+        cfg["setup_tag"] = tag                         # setup reads the model from it (not from the name)
+        cfg["log"] = str(cfg_path.with_suffix(".log"))
     cal = setup_calibration(cfg, hip)                  # #566: Linux HIP too; the tuning is offered on NVIDIA only
     if cal is not None:
         sys.path.insert(0, str(ROOT / "tools"))
@@ -6253,7 +6405,6 @@ def main() -> int:
                            small_family(family)):
         say("  " + line)
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
-    script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
     if cal is None and not hip and not a.no_start and not a.yes and ask(
             "Tune Strata for this PC now? It measures a few engine settings (about 15-30 minutes, longer on a slow card; the PC is busy "
@@ -6261,7 +6412,7 @@ def main() -> int:
         tuned = calibrate_config(cfg_path)
     else:
         tuned = None                                   # not asked for: nothing to repeat below
-    ok(f"start script: {script.name}")
+    ok(f"config: {cfg_path.name}")
 
     say()
     say("All set.")
@@ -6270,9 +6421,9 @@ def main() -> int:
     if a.host and a.host not in ("127.0.0.1", "localhost"):
         say(f"  Other devices:    the server window prints this PC's address (http://<IP>:{port}/)"
             + ("" if a.api_key else " - no API key set: anyone on your network can use it"))
-    say(f"  Next time:        just run {'START-HERE.bat' if WIN else './setup.sh'} (or {script.name}) - it starts right away")
+    say(f"  Next time:        momoe start {cfg_path.name}   (momoe stop ends it; momoe run claude|codex|opencode)")
     if vision != "none":
-        say("  Images:           send them in the chat page, in chat.py (/image <path>) or over the API")
+        say("  Images:           over the API, or in chat.py (/image <path>)")
     if a.parallel is None:                             # #465: the opt-in, said once (nothing changes)
         for line in parallel_note(None, [g.get("vram_gb", 0.0) for g in chosen], MODELS[model]["arena_gb"], ctx, kv,
                                   "--kv-resident" in cfg["args"]):

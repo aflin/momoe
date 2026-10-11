@@ -211,20 +211,11 @@ class NoBrowser(unittest.TestCase):
             return call.call_args[0][0], out, json.loads(p.read_text())
 
     def test_on_a_start(self):
-        cmd, out, _ = self.start_cmd({})
-        self.assertIn("--open", cmd)                                      # the default, as before
-        self.assertIn("the browser opens when it is ready", out)
-        cmd, out, _ = self.start_cmd({"open_browser": False})
-        self.assertNotIn("--open", cmd)
-        self.assertNotIn("the browser opens", out)
-        self.assertIn("no browser", out)                                  # the Settings line says so
-        cmd, out, saved = self.start_cmd({}, {"open_browser": False})     # START-HERE --no-browser: kept from now on
-        self.assertNotIn("--open", cmd)
-        self.assertIs(saved["open_browser"], False)
-        self.assertIn("saved for this model: no browser", out)
-        cmd, out, saved = self.start_cmd({"open_browser": False}, {"open_browser": True})
-        self.assertIn("--open", cmd)
-        self.assertIs(saved["open_browser"], True)
+        """Momoe has no web page: no start opens a browser, whatever the config says."""
+        for cfg in ({}, {"open_browser": True}, {"open_browser": False}):
+            cmd, out, _ = self.start_cmd(cfg)
+            self.assertNotIn("--open", cmd)
+            self.assertNotIn("the browser opens", out)
 
 
 class VisionTokens(unittest.TestCase):

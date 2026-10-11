@@ -1,0 +1,13 @@
+#!/bin/sh
+# Momoe (more MoEs, built on Strata): momoe setup | start CONFIG | stop | status | list | run TOOL   (momoe help)
+# Link it into your PATH if you like: sudo ln -s "$PWD/momoe" /usr/local/bin/momoe
+HERE="$(dirname "$(readlink -f "$0")")"
+if [ -x "$HERE/.venv/bin/python" ]; then
+  exec "$HERE/.venv/bin/python" "$HERE/momoe.py" "$@"
+fi
+if [ "$1" = "setup" ]; then        # the first setup: setup.sh makes .venv (and installs Python if needed)
+  shift
+  exec "$HERE/setup.sh" --setup --detach "$@"
+fi
+echo "Momoe is not set up yet: run  $HERE/momoe setup"
+exit 1

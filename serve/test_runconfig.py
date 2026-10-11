@@ -153,13 +153,6 @@ class Http(unittest.TestCase):
         self.assertEqual(self.call("GET")[0], 404)
         self.assertEqual(self.call("POST", {"set": {"fit_max_tokens": True}})[0], 404)
 
-    def test_the_page_has_the_view(self):
-        web = ROOT / "serve" / "web"
-        html, js = (web / "index.html").read_text(encoding="utf-8"), (web / "app.js").read_text(encoding="utf-8")
-        for el in ("cfg-card", "cfg-form", "cfg-save", "cfg-msg"):
-            self.assertIn(f'id="{el}"', html)
-        self.assertIn('fetch("config", {method: "POST", headers: headers(true)', js)
-
 
 if __name__ == "__main__":
     unittest.main()

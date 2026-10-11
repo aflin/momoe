@@ -2892,6 +2892,49 @@ class TemplateCaps(unittest.TestCase):
             self.assertFalse(any(caps.values()))
 
 
+class Shutdown(unittest.TestCase):
+    """POST /shutdown (momoe stop): JSON from this PC, with the key when one is set."""
+
+    def setUp(self):
+        import serve.server as S
+        self.S = S
+        S.SHUTDOWN.clear()
+        tok = ByteTokenizer()
+        self.svc = Service(MockEngine(tok, "hi", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.httpd = serve(self.svc, port=0)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.S.SHUTDOWN.clear()
+
+    def post(self, headers, body=b"{}"):
+        req = urllib.request.Request(self.base + "/shutdown", data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            e.close()
+            return e.code
+
+    def test_json_stops(self):
+        self.assertEqual(self.post({"Content-Type": "application/json"}), 200)
+        self.assertTrue(self.S.SHUTDOWN.is_set())
+
+    def test_a_form_or_a_foreign_page_does_not(self):
+        self.assertEqual(self.post({"Content-Type": "application/x-www-form-urlencoded"}, b"a=1"), 415)
+        self.assertEqual(self.post({"Content-Type": "application/json", "Origin": "http://evil.example"}), 403)
+        self.assertFalse(self.S.SHUTDOWN.is_set())
+
+    def test_the_key(self):
+        self.svc.api_key = "secret"
+        self.assertEqual(self.post({"Content-Type": "application/json"}), 401)
+        self.assertFalse(self.S.SHUTDOWN.is_set())
+        self.assertEqual(self.post({"Content-Type": "application/json", "Authorization": "Bearer secret"}), 200)
+        self.assertTrue(self.S.SHUTDOWN.is_set())
+
+
 class WebApp(unittest.TestCase):
     """The web app (PR #22's dashboard idea, rebuilt): its page and files, and GET /metrics."""
 
@@ -2915,21 +2958,13 @@ class WebApp(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code, e.headers.get("Content-Type", ""), e.read()
 
-    def test_page_and_files(self):
+    def test_no_page(self):
+        """Momoe has no web page: "/" says where the API is, the app's files are gone."""
         code, ctype, body = self.get("/")
         self.assertEqual(code, 200)
-        self.assertIn("text/html", ctype)
-        self.assertIn(b"\"web/app.js\"", body)   # relative since #82 (works behind a path-prefixed proxy)
-        for path, want in (("/web/app.js", "javascript"), ("/web/app.css", "text/css"), ("/web/tokens.css", "text/css"),
-                           ("/web/components.css", "text/css"), ("/web/sprite.svg", "image/svg+xml")):
-            with self.subTest(path=path):
-                code, ctype, _ = self.get(path)
-                self.assertEqual(code, 200)
-                self.assertIn(want, ctype)
-
-    def test_only_the_app_files_are_served(self):
-        for path in ("/web/..%2Fserver.py", "/web/index.html", "/web/test.py", "/fonts/..%2F..%2Fsetup.py",
-                     "/fonts/missing.woff2", "/fonts/x.ttf"):
+        self.assertIn("application/json", ctype)
+        self.assertEqual(json.loads(body)["openai"], "/v1")
+        for path in ("/web/app.js", "/fonts/outfit-latin-wght.woff2", "/api-monitor"):
             with self.subTest(path=path):
                 self.assertEqual(self.get(path)[0], 404)
 
