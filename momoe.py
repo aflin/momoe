@@ -5,7 +5,7 @@
     momoe start CONFIG [setup options]   start the server from a config, in the background
     momoe stop                           stop it
     momoe status                         is it running, which model, where
-    momoe list                           the configs in this folder
+    momoe list                           the configs in config/
     momoe run claude|codex|opencode [their arguments]
                                          start that agent, talking to this server (started first if needed)
     momoe run unsloth|lmstudio           open that app, pointed at this server
@@ -51,10 +51,11 @@ def read_json(path: Path):
 
 
 def configs() -> list:
-    """The model configs in this folder, the most recently started first: strata-*.json, and *.json named at setup
+    """The model configs in config/, the most recently started first: strata-*.json, and *.json named at setup
     (they carry "setup_tag")."""
+    move_configs()
     found = []
-    for p in ROOT.glob("*.json"):
+    for p in config_dir().glob("*.json"):
         if p.name.endswith(".shared-settings.json"):
             continue
         c = read_json(p)
@@ -64,12 +65,30 @@ def configs() -> list:
     return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def config_dir() -> Path:
+    return ROOT / "config"                           # the model configs (setup writes them there)
+
+
+def move_configs() -> None:
+    """Configs left in the top level (before config/) move there: setup.py's move_configs."""
+    if any(ROOT.glob("*.json")):
+        sys.path.insert(0, str(ROOT))
+        try:
+            import setup
+            setup.move_configs(ROOT)
+        except Exception as e:                       # noqa: BLE001 - listing must not fail over it
+            say(f"  could not move the configs into {config_dir()} ({e})")
+
+
 def find_config(name: str) -> Path:
-    for p in (Path(name), ROOT / name, ROOT / (name + ".json"), ROOT / f"strata-{name.lower()}.json"):
+    """A config by its path, or by its name in config/ (".json" and the "strata-" prefix may be left off)."""
+    move_configs()
+    d = config_dir()
+    for p in (Path(name), d / name, d / (name + ".json"), d / f"strata-{name.lower()}.json"):
         if p.is_file():
             return p.resolve()
     have = ", ".join(p.name for p in configs()) or "none yet (momoe setup)"
-    die(f"no config {name!r} (configs here: {have})")
+    die(f"no config {name!r} in {d} (configs: {have})")
 
 
 def state():

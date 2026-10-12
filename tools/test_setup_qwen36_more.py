@@ -169,7 +169,8 @@ class OnThisPc(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(setup, "ROOT", Path(d)):
             models = Path(d) / "models"
             self.assertEqual(setup.on_this_pc("qwen36", "Qwen3.6-UD-IQ1_M", models), "")
-            (Path(d) / "strata-qwen36-ud-iq1_m.json").write_text("{}")
+            (Path(d) / "config").mkdir()
+            (Path(d) / "config" / "strata-qwen36-ud-iq1_m.json").write_text("{}")
             self.assertEqual(setup.on_this_pc("qwen36", "Qwen3.6-UD-IQ1_M", models), "installed")
             f = models / "bartowski-qwen36-Q4_1" / "Qwen_Qwen3.6-35B-A3B-Q4_1.gguf"
             f.parent.mkdir(parents=True)

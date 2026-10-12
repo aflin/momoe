@@ -224,7 +224,7 @@ def install(argv) -> None:
 
     real_ram = S.ram_gb()
     keep = {}                                           # hand-set keys setup does not write: kept across a rerun
-    for p in ROOT.glob("strata-*.json"):
+    for p in [*ROOT.glob("config/strata-*.json"), *ROOT.glob("strata-*.json")]:   # Momoe: config/
         try:
             c = json.loads(p.read_text(encoding="utf-8-sig"))
             keep[p.name] = {k: c[k] for k in ("model_switcher", "sampling") if k in c}

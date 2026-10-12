@@ -135,7 +135,7 @@ def install(ram, found, argv, answers=None, extra=(), avx512=False, configs=()):
                     code = setup.main()
                 except SystemExit as e:
                     code = e.code
-        written = sorted(t.glob("strata-*.json"), key=lambda p: p.stat().st_mtime)
+        written = sorted(t.glob("config/strata-*.json"), key=lambda p: p.stat().st_mtime)
         cfg = None
         if written and code == 0:
             cfg = normalize(json.loads(written[-1].read_text(encoding="utf-8")), t)

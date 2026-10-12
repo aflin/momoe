@@ -98,6 +98,7 @@ class Update(unittest.TestCase):
             p = self.config(Path(d))
             with mock.patch.object(sys, "argv", ["setup.py", "--update"]), \
                     mock.patch.object(setup, "data_folder", return_value=(Path(d), [])), \
+                    mock.patch.object(setup, "move_configs"), \
                     mock.patch.object(setup, "installed_configs", return_value=[p]), \
                     mock.patch.object(setup, "update_install", return_value=0) as up, \
                     mock.patch.object(setup, "start") as start, \

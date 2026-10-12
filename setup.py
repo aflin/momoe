@@ -528,8 +528,28 @@ def ask(question, choices, default, yes):
         say(f"  please answer one of: {', '.join(choices)}")
 
 
+def config_dir() -> Path:
+    """Momoe: the model configs (and their .shared-settings.json) live in config/ of the Momoe folder."""
+    return ROOT / "config"
+
+
+def move_configs(root: Path | None = None) -> None:
+    """Momoe: model configs left in the folder's top level (before config/) move into config/, with the Chat settings
+    the server keeps beside each one."""
+    root = root or ROOT
+    dest = root / "config"
+    for p in [*model_config_files(root, top=True)]:
+        try:
+            dest.mkdir(exist_ok=True)
+            for f in (p, p.with_name(p.stem + ".shared-settings.json")):
+                if f.is_file() and not (dest / f.name).exists():
+                    f.rename(dest / f.name)
+        except OSError as e:
+            warn(f"could not move {p.name} into {dest} ({e.strerror or e})")
+
+
 def config_file_name(name: str) -> str | None:
-    """A config name typed at setup as a file in this folder: ".json" added, None for one with a folder in it."""
+    """A config name typed at setup as a file in config/: ".json" added, None for one with a folder in it."""
     name = name.strip()
     if not name or "/" in name or "\\" in name or name in (".", "..") or name.endswith(".shared-settings.json"):
         return None
@@ -543,8 +563,8 @@ def config_path_for(name, tag: str) -> Path:
         n = config_file_name(name)
         if n is None:
             fail(f"--config-name {name!r}: give a file name without a folder, e.g. --config-name ornith-8gb.json")
-        return ROOT / n
-    return tag_config(tag) or ROOT / f"strata-{tag.lower()}.json"
+        return config_dir() / n
+    return tag_config(tag) or config_dir() / f"strata-{tag.lower()}.json"
 
 
 def name_config(default: Path, a) -> Path:
@@ -562,9 +582,9 @@ def name_config(default: Path, a) -> Path:
             return default
         n = config_file_name(typed)
         if n is None:
-            say("  a file name in this folder, without a folder in it (e.g. ornith-8gb.json)")
+            say("  a file name for config/, without a folder in it (e.g. ornith-8gb.json)")
             continue
-        path = ROOT / n
+        path = config_dir() / n
         if path.exists() and path != default and ask(f"  {n} already exists: replace it?", ["y", "n"], "n", False) != "y":
             continue
         return path
@@ -1436,7 +1456,7 @@ def config_tag(cfg_path: Path) -> str:
 
 def tag_config(tag: str):
     """The installed config set up for this tag: strata-<tag>.json, else the most recently used one named at setup."""
-    own = ROOT / f"strata-{tag.lower()}.json"
+    own = config_dir() / f"strata-{tag.lower()}.json"
     if own.exists():
         return own
     named = [c for c in model_config_files(ROOT) if config_tag(c).lower() == tag.lower() and model_config(c, True)]
@@ -3301,10 +3321,10 @@ def build_engine(gpu, vision, yes, llama, toolkit=None, more=False) -> Path:
 
 
 # ------------------------------------------------------------------------------------------------ the data folder
-# The model files - the GGUFs, the prepared packs and the MTP layer, 70-120 GB - live in a data folder NEXT TO the
-# Strata folder (`Strata-data`), not inside it: updating Strata by unzipping a new copy used to give a new, empty
-# folder and a full download again.  Where it is, and which Strata folders this user ran, is kept in a small
-# per-user file, so every Strata folder on the PC finds the same files.
+# The model files - the GGUFs, the prepared packs and the MTP layer, 20-120 GB - live in a data folder.  Momoe's default
+# is its own folder (models/, packs/, mtp/, ignored by git: a git pull keeps them); --data-dir picks another, kept in a
+# small per-user file (~/.config/momoe) with the Momoe folders this user ran, so every Momoe folder finds the same files.
+# Strata's data folder and settings are its own: Momoe neither reads nor moves them.
 DATA_ITEMS = ("models", "packs", "mtp")
 
 
@@ -3550,16 +3570,23 @@ def ram_ctx(model, ram, low_ram=False) -> int:
     return max(c for c in CONTEXTS if c <= 131072 or (c != 204800 and (ctx_ram_need(model, c, low_ram) or 0) <= ram))
 
 
-def settings_path() -> Path:
+def settings_path(name="momoe") -> Path:
+    """Momoe's own settings (not Strata's: each keeps its own data folder and list of installs, so neither moves the
+    other's model files)."""
     if WIN:
-        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Strata" / "settings.json"
-    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "strata" / "settings.json"
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / name.capitalize() / "settings.json"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / name / "settings.json"
 
 
 def load_settings() -> dict:
     try:
         return json.loads(settings_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        pass
+    try:                                               # first run: Strata's calibrations carry over, nothing else
+        old = json.loads(settings_path("strata").read_text(encoding="utf-8"))
+        return {"calibration": old["calibration"]} if isinstance(old.get("calibration"), dict) else {}
+    except (OSError, ValueError, AttributeError):
         return {}
 
 
@@ -3582,15 +3609,16 @@ def has_data(folder: Path) -> bool:
 
 
 def other_installs(settings: dict) -> list:
-    """Strata folders besides this one that may hold model files: the ones this user ran before, and Strata* folders
-    next to this one (a zip unpacked again lands in e.g. `Strata-main (1)\\Strata-main`)."""
+    """Momoe folders besides this one that may hold model files: the ones this user ran before, and momoe* folders
+    next to this one (a zip unpacked again lands in e.g. `momoe-main (1)\\momoe-main`).  Not Strata's: its model files
+    stay where they are."""
     cands = [Path(p) for p in settings.get("installs", [])]
     for base in dict.fromkeys((ROOT.parent, ROOT.parent.parent)):
         try:
             for d in base.iterdir():
-                if d.is_dir() and d.name.lower().startswith("strata"):
+                if d.is_dir() and d.name.lower().startswith("momoe"):
                     cands.append(d)
-                    cands += [c for c in d.iterdir() if c.is_dir() and c.name.lower().startswith("strata")]
+                    cands += [c for c in d.iterdir() if c.is_dir() and c.name.lower().startswith("momoe")]
         except OSError:
             pass
     found = []
@@ -3661,11 +3689,12 @@ def repoint_config(cfg_file: Path, old: Path, new: Path) -> None:
 
 
 def data_folder(requested: str | None) -> tuple:
-    """(the data folder, folders on other drives that still hold model files).  Moves the model files of this folder
-    and of earlier Strata folders on the same drive into the data folder, and points their configs there."""
+    """(the data folder, folders on other drives that still hold model files).  Moves the model files of earlier Momoe
+    folders on the same drive into the data folder, and points their configs there.  Momoe's default data folder is
+    the Momoe folder itself (models/, packs/, mtp/ in it); --data-dir picks another and is remembered."""
     settings = load_settings()
     dest = Path(requested).expanduser().resolve() if requested else \
-        Path(settings["data_dir"]) if settings.get("data_dir") else ROOT.parent / "Strata-data"
+        Path(settings["data_dir"]) if settings.get("data_dir") else ROOT
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError as e:                                # e.g. no write access next to the Strata folder
@@ -3710,13 +3739,16 @@ def data_folder(requested: str | None) -> tuple:
         else:
             ok(f"model files from {folder} moved to {dest} (a new copy of Momoe finds them there)")
     installs = [str(ROOT)] + [p for p in settings.get("installs", []) if p != str(ROOT) and Path(p).is_dir()]
-    save_settings({**settings, "data_dir": str(dest), "installs": installs[:20]})
+    keep = {"data_dir": str(dest)} if requested or settings.get("data_dir") else {}   # the default is not remembered:
+    save_settings({**{k: v for k, v in settings.items() if k != "data_dir"}, **keep,   # another Momoe folder uses its own
+                   "installs": installs[:20]})
     return dest, elsewhere
 
 
 def write_config(path: Path, cfg: dict):
     """A run config, written whole or not at all (#459): to a temporary file first, then moved over the old one, so
     a setup stopped half-way (a closed window, a full disk) never leaves an empty strata-*.json behind."""
+    path.parent.mkdir(parents=True, exist_ok=True)     # Momoe: config/ on the first setup
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     os.replace(tmp, path)
@@ -3847,19 +3879,24 @@ def readable_config(path: Path) -> bool:
     return False
 
 
-def model_config_files(folder: Path) -> list:
-    """#346: the strata-*.json files of a folder that can be model configs. The server keeps a config's Chat settings
-    next to it as strata-<model>.shared-settings.json: it matches the pattern but is no config (no exe, no args).
+def model_config_files(folder: Path, top=False) -> list:
+    """#346: the strata-*.json files of a Momoe folder that can be model configs, in its config/ and (from before
+    config/) its top level; top=True: the top level only. The server keeps a config's Chat settings next to it as
+    strata-<model>.shared-settings.json: it matches the pattern but is no config (no exe, no args).
     Momoe: a config named at setup (any <name>.json) carries "setup_tag"."""
-    found = [p for p in folder.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")]
-    for p in folder.glob("*.json"):
-        if p.name.startswith("strata-") or p.name.endswith(".shared-settings.json"):
+    found = []
+    for d in ([folder] if top else [folder / "config", folder]):
+        if not d.is_dir():
             continue
-        try:
-            if isinstance(json.loads(p.read_text(encoding="utf-8-sig")).get("setup_tag"), str):
-                found.append(p)
-        except (OSError, ValueError, AttributeError):
-            pass
+        found += [p for p in d.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")]
+        for p in d.glob("*.json"):
+            if p.name.startswith("strata-") or p.name.endswith(".shared-settings.json"):
+                continue
+            try:
+                if isinstance(json.loads(p.read_text(encoding="utf-8-sig")).get("setup_tag"), str):
+                    found.append(p)
+            except (OSError, ValueError, AttributeError):
+                pass
     return found
 
 
@@ -4807,8 +4844,8 @@ def main() -> int:
                          "that uses the API; remembered for this model, also in run-<model>.bat/.sh)")
     ap.add_argument("--browser", dest="browser", action="store_true",
                     help="open the chat page again when the model is ready (the default; undoes --no-browser)")
-    ap.add_argument("--data-dir", help="where the model files go (~70-120 GB): default Strata-data next to this folder, "
-                                       "remembered for every Momoe folder on this PC")
+    ap.add_argument("--data-dir", help="where the model files go (~20-120 GB): default this folder (models/, packs/, "
+                                       "mtp/); a folder given here is remembered for every Momoe folder on this PC")
     ap.add_argument("--models-dir", help="where the GGUF files go (default: <data folder>/models)")
     ap.add_argument("--gguf-dir", help="use GGUF files you already have (a folder with every shard: "
                                        "<name>-00001-of-0000N.gguf ... -0000N-of-0000N.gguf)")
@@ -4893,6 +4930,7 @@ def main() -> int:
     say("Momoe - Qwen3.8-Flash-Next on a normal PC (a GPU + system RAM + CPU)")
     for d in (engine_dir(13), engine_dir(12)):          # Momoe: an engine installed under Strata's names
         momoe_names(d)
+    move_configs()                                     # Momoe: configs from before config/
     data, elsewhere = data_folder(a.data_dir)          # the model files: in the data folder, found from any copy
     roots = [data, *elsewhere]
     if a.models_dir is None:
@@ -4939,10 +4977,11 @@ def main() -> int:
     DETACH = a.detach
     if a.config:                                       # momoe start FILE
         cfg_file = Path(a.config)
-        if not cfg_file.is_file() and (ROOT / a.config).is_file():
-            cfg_file = ROOT / a.config
+        for d in (config_dir(), ROOT):
+            if not cfg_file.is_file() and (d / a.config).is_file():
+                cfg_file = d / a.config
         if not cfg_file.is_file():
-            fail(f"no config {a.config}", "momoe list shows the configs in " + str(ROOT))
+            fail(f"no config {a.config}", "momoe list shows the configs in " + str(config_dir()))
         if not model_config(cfg_file.resolve()):
             fail(f"{a.config} is not a model config (no \"exe\" or \"args\")")
         update_installed_engine()
@@ -5799,7 +5838,7 @@ def main() -> int:
         args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
                  "--cvec-mode", "project", "--cvec-dir", "per-layer"]
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
-           "model_name": f"{fam['name']}-{size_of(model).lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
+           "model_name": f"{fam['name']}-{size_of(model).lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),   # logs: the top level
            "lib_dirs": lib_dirs, "port": port}
     if cuda_tk == 12:                                  # the experimental CUDA 12 engine (engine-cuda12/)
         cfg["cuda"] = 12
@@ -5869,7 +5908,7 @@ def main() -> int:
     cfg_path = name_config(own_cfg, a)               # Momoe: the file's name is asked (the default: this model's)
     if cfg_path.name != f"strata-{tag.lower()}.json":
         cfg["setup_tag"] = tag                         # setup reads the model from it (not from the name)
-        cfg["log"] = str(cfg_path.with_suffix(".log"))
+        cfg["log"] = str(ROOT / (cfg_path.stem + ".log"))
     cal = setup_calibration(cfg, hip)                  # #566: Linux HIP too; the tuning is offered on NVIDIA only
     if cal is not None:
         sys.path.insert(0, str(ROOT / "tools"))

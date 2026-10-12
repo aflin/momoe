@@ -450,8 +450,8 @@ class Strata:
     # ---- paths
     def settings_path(self) -> Path:
         if WIN:
-            return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Strata" / "settings.json"
-        return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "strata" / "settings.json"
+            return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Momoe" / "settings.json"
+        return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "momoe" / "settings.json"
 
     def data_dir(self) -> Path:
         try:
@@ -459,7 +459,7 @@ class Strata:
         except (OSError, ValueError):
             s = {}
         d = s.get("data_dir") if isinstance(s, dict) else None
-        return Path(d) if d else self.root.parent / "Strata-data"
+        return Path(d) if d else self.root                # Momoe: models/, packs/, mtp/ in its own folder
 
     def allowed_roots(self) -> list[Path]:
         return [norm(self.root), norm(self.data_dir())]
@@ -496,7 +496,8 @@ class Strata:
 
     # ---- what is installed
     def configs(self) -> list[Path]:
-        return sorted((p for p in self.root.glob("strata-*.json") if not p.name.endswith(".shared-settings.json")),
+        return sorted((p for p in [*self.root.glob("config/strata-*.json"), *self.root.glob("strata-*.json")]
+                       if not p.name.endswith(".shared-settings.json")),
                       key=lambda p: p.stat().st_mtime, reverse=True)   # #346: the Chat settings file is no config
 
     @staticmethod

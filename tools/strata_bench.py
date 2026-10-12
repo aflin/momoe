@@ -3,7 +3,7 @@
 
     BENCH.bat                      (Windows)        ./bench.sh        (Linux)        python tools/strata_bench.py
 
-It starts the server with your existing settings (the newest strata-*.json of this folder, or --config FILE), or uses
+It starts the server with your existing settings (the newest config in config/, or --config FILE), or uses
 the one already running (it checks the config's port, or --url http://host:port), and sends a fixed suite through the
 real HTTP API, three runs each, medians reported:
 
@@ -601,7 +601,7 @@ def collect_machine(base: str, key: str, cfg: dict | None) -> dict:
 # --------------------------------------------------------------------------------------------------- the server
 def find_configs(folder: Path = ROOT) -> list[Path]:
     out = []
-    for p in folder.glob("strata-*.json"):
+    for p in [*folder.glob("config/*.json"), *folder.glob("strata-*.json")]:   # Momoe: config/ (named configs too)
         if p.name.endswith(".shared-settings.json"):
             continue
         try:
@@ -832,7 +832,7 @@ def write_results(res: dict, parent: Path, red, log_lines: list[str]) -> Path:
 # --------------------------------------------------------------------------------------------------------- main
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Measure this Momoe install and write a shareable report (see the top of this file).")
-    ap.add_argument("--config", help="the model config to run (default: the newest strata-*.json of this folder)")
+    ap.add_argument("--config", help="the model config to run (default: the newest in config/)")
     ap.add_argument("--url", help="use the server already running at this address (http://127.0.0.1:8080) instead of starting one")
     ap.add_argument("--port", type=int, help="the port to start the server on (default: the config's)")
     ap.add_argument("--gpu", help="start the server on this GPU only (as the server's --gpu)")

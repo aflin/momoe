@@ -202,7 +202,7 @@ class Base(unittest.TestCase):
             (eng / setup.EXE).write_bytes(setup.SMALL_ENGINE_MARK + setup.FORMATS_ENGINE_MARK)
             return eng
         found = nvidia() if found is None else found
-        for old in self.t.glob("strata-*.json"):                          # this run's config only
+        for old in self.t.glob("config/strata-*.json"):                          # this run's config only
             old.unlink()
 
         def fake_download(url, dst, what=None):
@@ -250,7 +250,7 @@ class Base(unittest.TestCase):
             for p in patches:
                 st.enter_context(p)
             code, out = quiet(setup.main)
-        cfgs = sorted(self.t.glob("strata-*.json"))
+        cfgs = sorted(self.t.glob("config/strata-*.json"))
         self.assertLessEqual(len(cfgs), 1, cfgs)
         self.cfg_path = cfgs[0] if cfgs else None
         return code, out, (json.loads(cfgs[0].read_text()) if cfgs else None)

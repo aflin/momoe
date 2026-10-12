@@ -29,7 +29,10 @@ td.log
 /.venv/
 /build/
 /third_party/llama.cpp
-/models/
+/models/*
+!/models/.gitkeep
+/config/*
+!/config/.gitkeep
 /packs/
 /mtp/
 /run-*.bat

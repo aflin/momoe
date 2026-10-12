@@ -30,8 +30,8 @@ class Names(unittest.TestCase):
 
 class Setup(q36.Base):
     def written(self, name):
-        p = self.t / name
-        self.assertTrue(p.is_file(), sorted(x.name for x in self.t.glob("*.json")))
+        p = self.t / "config" / name
+        self.assertTrue(p.is_file(), sorted(x.name for x in self.t.glob("**/*.json")))
         return json.loads(p.read_text())
 
     def test_the_default_name_is_unchanged(self):
@@ -48,9 +48,9 @@ class Setup(q36.Base):
         self.assertEqual(code, 0, out)
         cfg = self.written("ornith-8gb.json")
         self.assertEqual(cfg["setup_tag"], "ornith15-IQ4_XS")
-        self.assertEqual(cfg["log"], str(self.t / "ornith-8gb.log"))
+        self.assertEqual(cfg["log"], str(self.t / "ornith-8gb.log"))     # logs stay in the top level
         self.assertIn("momoe start ornith-8gb.json", out)
-        p = self.t / "ornith-8gb.json"
+        p = self.t / "config" / "ornith-8gb.json"
         self.assertEqual(setup.config_tag(p), "ornith15-IQ4_XS")
         self.assertEqual(setup.config_family(p), "ornith")
         with mock.patch.object(setup, "ROOT", self.t):
@@ -115,6 +115,41 @@ class EngineNames(unittest.TestCase):
             self.assertTrue(old.exists())
 
 
+class DataFolder(unittest.TestCase):
+    """Momoe keeps its model files in its own folder (models/, packs/, mtp/) and its settings apart from Strata's, so
+    neither moves the other's files; Strata's calibrations carry over once."""
+
+    def test_own_settings_and_folder(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "strata").mkdir()
+            (d / "strata" / "settings.json").write_text(json.dumps(
+                {"data_dir": str(d / "Strata-data"), "installs": [str(d / "Strata")], "calibration": {"k": {"x": 1}}}))
+            strata = d / "Strata"                       # a Strata folder next to this one, with model files
+            (strata / "models" / "IQ2_XS").mkdir(parents=True)
+            (strata / "models" / "IQ2_XS" / "a.gguf").write_bytes(b"x")
+            (strata / "setup.py").write_text("")
+            root = d / "momoe"
+            root.mkdir()
+            with mock.patch.dict(setup.os.environ, {"XDG_CONFIG_HOME": str(d)}), \
+                    mock.patch.object(setup, "WIN", False), mock.patch.object(setup, "ROOT", root), \
+                    mock.patch.object(setup, "say", lambda *a, **k: None), mock.patch.object(setup, "ok", lambda *a: None):
+                self.assertEqual(setup.settings_path(), d / "momoe" / "settings.json")
+                self.assertEqual(setup.load_settings(), {"calibration": {"k": {"x": 1}}})
+                self.assertEqual(setup.data_folder(None), (root, []))
+                saved = json.loads((d / "momoe" / "settings.json").read_text())
+            self.assertNotIn("data_dir", saved)                          # the default is not remembered
+            self.assertEqual(saved["installs"], [str(root)])
+            self.assertTrue((strata / "models" / "IQ2_XS" / "a.gguf").exists())   # Strata's files stay put
+
+    def test_models_folder_is_kept_empty_in_git(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertTrue((root / "models" / ".gitkeep").is_file())
+        lines = (root / ".gitignore").read_text().splitlines()
+        self.assertIn("/models/*", lines)
+        self.assertIn("!/models/.gitkeep", lines)
+
+
 class Momoe(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -128,11 +163,14 @@ class Momoe(unittest.TestCase):
 
     def test_configs(self):
         cfg = {"exe": "strata", "args": ["--max-context", "32768"]}
-        (self.t / "strata-q2_0.json").write_text(json.dumps(cfg))
-        (self.t / "mine.json").write_text(json.dumps({**cfg, "setup_tag": "ornith15-IQ4_XS"}))
-        (self.t / "other.json").write_text(json.dumps(cfg))              # no setup_tag: not one of setup's
-        (self.t / "strata-q2_0.shared-settings.json").write_text("{}")
+        (self.t / "strata-q2_0.json").write_text(json.dumps(cfg))        # from before config/: moved there
+        (self.t / "strata-q2_0.shared-settings.json").write_text("{}")   # with its Chat settings
+        (self.t / "config").mkdir()
+        (self.t / "config" / "mine.json").write_text(json.dumps({**cfg, "setup_tag": "ornith15-IQ4_XS"}))
+        (self.t / "config" / "other.json").write_text(json.dumps(cfg))   # no setup_tag: not one of setup's
         self.assertEqual(sorted(p.name for p in momoe.configs()), ["mine.json", "strata-q2_0.json"])
+        self.assertTrue((self.t / "config" / "strata-q2_0.shared-settings.json").is_file())
+        self.assertFalse(list(self.t.glob("*.json")))
         self.assertEqual(momoe.find_config("mine").name, "mine.json")
         self.assertEqual(momoe.find_config("q2_0").name, "strata-q2_0.json")
         with self.assertRaises(SystemExit):
