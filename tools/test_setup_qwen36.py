@@ -229,10 +229,8 @@ class Base(unittest.TestCase):
             mock.patch.object(setup, "linux_desktop", lambda env=None: False),
             mock.patch.object(setup, "pip_install", lambda *a, **k: None),
             mock.patch.object(setup, "get_llama_cpp", lambda: self.t / "llama.cpp"),
-            mock.patch.object(setup, "get_prebuilt", lambda *a, **k: eng),
             mock.patch.object(setup, "build_engine_hip", lambda *a, **k: eng),
             mock.patch.object(setup, "build_engine", fake_build),
-            mock.patch.object(setup, "pip_cuda_libs", lambda *a, **k: None),
             mock.patch.object(setup, "hipblaslt_table", lambda *a, **k: None),
             mock.patch.object(setup, "download", fake_download),
             mock.patch.object(setup, "check_shards", lambda shards: None),
@@ -328,23 +326,17 @@ class Install(Base):
         self.assertIn("needs an engine with the qwen35moe support", out)
         self.assertEqual(self.downloads, [])
 
-    def test_ready_made_engine_without_it_is_compiled_here(self):
-        # the published 0.1.40 engines (Windows) predate qwen35moe: setup compiles this checkout's engine instead
-        code, out, cfg = self.main(["--family", "qwen36", "--model", "UD-IQ4_XS"], source="release", runs_small=False)
-        self.assertEqual(code, 0, out)
-        self.assertEqual(len(self.builds), 1)
-        self.assertIn("does not run Qwen3.6-35B-A3B yet: compiling the engine on this PC instead", out)
-        self.assertEqual(cfg["exe"], str(self.t / "engine" / setup.EXE))
-
-    def test_ready_made_engine_with_it_is_used(self):
-        code, out, cfg = self.main(["--family", "qwen36", "--model", "UD-IQ4_XS"], source="release")
-        self.assertEqual(code, 0, out)
-        self.assertEqual(self.builds, [])
-
-    def test_flash_next_keeps_the_ready_made_engine(self):
-        code, out, cfg = self.main(["--family", "qwen", "--model", "IQ2_XS"], source="release", runs_small=False)
-        self.assertEqual(code, 0, out)
-        self.assertEqual(self.builds, [])
+    def test_a_strata_engine_is_compiled_over(self):
+        # Momoe has no ready-made engine: one from Strata's releases (installed before the fork) is compiled over, for
+        # every family, whether it runs the model or not
+        for argv, small in ((["--family", "qwen36", "--model", "UD-IQ4_XS"], False),
+                            (["--family", "qwen36", "--model", "UD-IQ4_XS"], True),
+                            (["--family", "qwen", "--model", "IQ2_XS"], False)):
+            code, out, cfg = self.main(argv, source="release", runs_small=small)
+            self.assertEqual(code, 0, out)
+            self.assertEqual(len(self.builds), 1, argv)
+            self.assertNotIn("ready-made", out)
+            self.assertEqual(cfg["exe"], str(self.t / "engine" / setup.EXE))
 
     def test_images(self):
         code, out, cfg = self.main(["--family", "qwen36", "--model", "UD-IQ4_XS", "--vision", "yes"])

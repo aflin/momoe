@@ -81,8 +81,8 @@ class Setup(q36.Base):
 
 
 class EngineNames(unittest.TestCase):
-    """The engine is momoe(.exe) and the encoder momoe-vision(.exe): an engine folder set up under Strata's names, or
-    a ready-made engine (Strata's release), is renamed, and a config pointing at the old names follows."""
+    """The engine is momoe(.exe) and the encoder momoe-vision(.exe): an engine folder set up under Strata's names is
+    renamed, and a config pointing at the old names follows."""
 
     def test_rename_and_config(self):
         with tempfile.TemporaryDirectory() as d:

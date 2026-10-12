@@ -1,5 +1,5 @@
 """Older NVIDIA GPUs (experimental): Pascal / Volta run a second engine built with CUDA 12 (engine-cuda12/), chosen per
-model config by its oldest card; --cuda 12|13 overrides it.  A PC whose cards the ready-made CUDA 13 engine runs on
+model config by its oldest card; --cuda 12|13 overrides it.  A PC whose cards the CUDA 13 engine runs on
 gets exactly what it got before.  No GPU, no downloads.
 
     python -m unittest tools.test_setup_older_gpus
@@ -119,11 +119,6 @@ class Libraries(unittest.TestCase):
                         self.assertEqual(got12, ["cublas/lib", "cuda_runtime/lib"])
                         self.assertEqual(got13, ["cu13/lib"])
 
-    def test_wheels_pinned_to_12(self):
-        self.assertTrue(all("-cu12==12." in w for w in setup.CUDA12_WHEELS))
-        self.assertEqual(setup.CUDA12_ASSET, "strata-windows-x64-cuda12.zip" if setup.WIN else
-                         "strata-linux-x64-cuda12.zip")
-
 
 class BuildTools(unittest.TestCase):
     """The compile path: a CUDA 12 engine looks for a 12.x toolkit (STRATA_NVCC picks one), sm_120 needs 12.8+."""
@@ -154,42 +149,41 @@ class BuildTools(unittest.TestCase):
             self.tools({"arch": "70", "archs": [70, 120]}, lambda below: ("nvcc12", (12, 6)) if below else (None, None))
 
 
-def fake_prebuilt(calls):
-    """get_prebuilt that installs an engine in the folder of the toolkit it is asked for (and says which)."""
-    def get(url_base, gpu, vision, updating=False, toolkit=13):
+def fake_build(calls):
+    """build_engine that compiles an engine in the folder of the toolkit it is asked for (and says which)."""
+    def build(gpu, vision, yes, llama, toolkit=13, more=False):
         calls.append(toolkit)
         eng = setup.engine_dir(toolkit)
         eng.mkdir(exist_ok=True)
-        (eng / "BUILD.json").write_text(json.dumps({"version": "0.1.39", "source": "release", "archs": [86], "ptx": True,
-                                                    "cuda": "12.9" if toolkit == 12 else "13.0", "vision": "gpu"}))
+        (eng / "BUILD.json").write_text(json.dumps({"version": "0.1.39", "source": "local", "archs": [86],
+                                                    "cuda": "12.9" if toolkit == 12 else "13.0", "vision": vision}))
         (eng / setup.EXE).write_bytes(b"")
         return eng
-    return get
+    return build
 
 
 class Install(unittest.TestCase):
     """setup.main() on mocked PCs (tools/test_setup_golden.py's harness)."""
 
     def run_setup(self, ram, found, argv, env=None):
-        calls, libs = [], []
-        extra = [mock.patch.object(setup, "get_prebuilt", fake_prebuilt(calls)),
-                 mock.patch.object(setup, "pip_cuda_libs", lambda tk=13: libs.append(tk)),
+        calls = []
+        extra = [mock.patch.object(setup, "build_engine", fake_build(calls)),
                  mock.patch.object(setup, "OLD_GPUS", None),
                  mock.patch.dict(os.environ, {"STRATA_EXPERIMENTAL_SM60": "", "STRATA_CUDA": "", **(env or {})})]
         code, out, cfg, asked = install(ram, found, argv, extra=extra)
-        return code, out, cfg, calls, libs
+        return code, out, cfg, calls
 
     def test_a_v100_alone_gets_the_cuda12_engine(self):
-        code, out, cfg, calls, libs = self.run_setup(95.0, [V100], argv_for("qwen", "IQ3_XXS"))
+        code, out, cfg, calls = self.run_setup(95.0, [V100], argv_for("qwen", "IQ3_XXS"))
         self.assertEqual(code, 0, out[-3000:])
-        self.assertEqual((calls, libs), ([12], [12]))
+        self.assertEqual(calls, [12])
         self.assertEqual(cfg["cuda"], 12)
         self.assertEqual(cfg["exe"], "<T>/engine-cuda12/<EXE>")
         self.assertIn("sm_70 is older than CUDA 13 supports", out)
         self.assertIn("experimental", out)
 
     def test_a_p40_with_an_older_driver(self):
-        code, out, cfg, calls, _ = self.run_setup(95.0, [P40], argv_for("qwen", "IQ3_XXS"))
+        code, out, cfg, calls = self.run_setup(95.0, [P40], argv_for("qwen", "IQ3_XXS"))
         self.assertEqual(code, 0, out[-3000:])                 # driver 535: enough for CUDA 12
         self.assertEqual(calls, [12])
 
@@ -197,10 +191,10 @@ class Install(unittest.TestCase):
         """The RTX 3090 is recommended as before; the V100 is listed with how to choose it."""
         rtx = card(0, "NVIDIA GeForce RTX 3090", 24.0, "86")
         found = [rtx, {**V100, "index": 1}]
-        code, out, cfg, calls, libs = self.run_setup(95.0, found, argv_for("qwen", "IQ3_XXS"))
+        code, out, cfg, calls = self.run_setup(95.0, found, argv_for("qwen", "IQ3_XXS"))
         code0, _, cfg0, _ = install(95.0, [rtx], argv_for("qwen", "IQ3_XXS"))
         self.assertEqual(code, 0, out[-3000:])
-        self.assertEqual((calls, libs), ([13], [13]))
+        self.assertEqual(calls, [13])
         self.assertNotIn("cuda", cfg)
         self.assertEqual(cfg["exe"], "<T>/engine/<EXE>")
         self.assertIn("choose it with --gpu 1", out)
@@ -209,7 +203,7 @@ class Install(unittest.TestCase):
 
     def test_naming_the_v100_beside_a_newer_card(self):
         found = [card(0, "NVIDIA GeForce RTX 3090", 24.0, "86"), {**V100, "index": 1}]
-        code, out, cfg, calls, _ = self.run_setup(95.0, found, argv_for("qwen", "IQ3_XXS") + ["--gpu", "1"])
+        code, out, cfg, calls = self.run_setup(95.0, found, argv_for("qwen", "IQ3_XXS") + ["--gpu", "1"])
         self.assertEqual(code, 0, out[-3000:])
         self.assertEqual(calls, [12])
         self.assertEqual((cfg["cuda"], cfg["gpu"]), (12, 1))
@@ -219,24 +213,24 @@ class Install(unittest.TestCase):
         ram, found = PROFILES["128GB-1x24GB"]
         for argv, env in ((["--cuda", "12"], None), ([], {"STRATA_CUDA": "12"})):
             with self.subTest(argv=argv, env=env):
-                code, out, cfg, calls, _ = self.run_setup(ram, found, argv_for("qwen", "IQ3_XXS") + argv, env)
+                code, out, cfg, calls = self.run_setup(ram, found, argv_for("qwen", "IQ3_XXS") + argv, env)
                 self.assertEqual(code, 0, out[-3000:])
                 self.assertEqual((calls, cfg["cuda"]), ([12], 12))
                 self.assertIn("--cuda 12 (as you chose", out)
 
     def test_an_old_driver_is_told_about_cuda12(self):
-        code, out, _, _, _ = self.run_setup(127.8, [card(0, "NVIDIA GeForce RTX 4090", 24.0, "89", "550.54")],
+        code, out, _, _ = self.run_setup(127.8, [card(0, "NVIDIA GeForce RTX 4090", 24.0, "89", "550.54")],
                                             argv_for("qwen", "IQ3_XXS"))
         self.assertEqual(code, 1)
         self.assertIn("580 or newer is needed", out)
         self.assertIn("--cuda 12", out)
-        code, out, cfg, calls, _ = self.run_setup(127.8, [card(0, "NVIDIA GeForce RTX 4090", 24.0, "89", "550.54")],
+        code, out, cfg, calls = self.run_setup(127.8, [card(0, "NVIDIA GeForce RTX 4090", 24.0, "89", "550.54")],
                                                   argv_for("qwen", "IQ3_XXS") + ["--cuda", "12"])
         self.assertEqual(code, 0, out[-3000:])
         self.assertEqual(calls, [12])
 
     def test_cuda13_forced_on_a_v100_is_said(self):
-        code, out, cfg, calls, _ = self.run_setup(95.0, [V100], argv_for("qwen", "IQ3_XXS") + ["--cuda", "13"])
+        code, out, cfg, calls = self.run_setup(95.0, [V100], argv_for("qwen", "IQ3_XXS") + ["--cuda", "13"])
         self.assertIn("will not run on that card", out)
 
 
@@ -251,8 +245,8 @@ class Start(unittest.TestCase):
             cfg = {"exe": str(root / "engine" / setup.EXE), "args": [], "lib_dirs": ["<cu13>"]}
             calls = []
             with mock.patch.object(setup, "ROOT", root), \
-                    mock.patch.object(setup, "get_prebuilt", fake_prebuilt(calls)), \
-                    mock.patch.object(setup, "pip_cuda_libs", lambda tk=13: None), \
+                    mock.patch.object(setup, "build_engine", fake_build(calls)), \
+                    mock.patch.object(setup, "get_llama_cpp", lambda: root / "llama.cpp"), \
                     mock.patch.object(setup, "cuda_lib_dirs", lambda tk=13: [f"<cu{tk}>"]), \
                     mock.patch.object(setup, "gpu_info", lambda i=None: None):
                 got, text = quiet(setup.ensure_engine_for, [card(0, "RTX 3090", 24.0, "86"), {**V100, "index": 1}],
@@ -269,17 +263,17 @@ class Start(unittest.TestCase):
             seen = []
             real = setup.update_installed_engine
 
-            def spy(url_base, toolkit=None):
+            def spy(toolkit=None):
                 if toolkit is None:
-                    return real(url_base, toolkit)
+                    return real(toolkit)
                 seen.append(toolkit)
             with mock.patch.object(setup, "ROOT", root), mock.patch.object(setup, "update_installed_engine", spy):
-                spy("u")
+                spy()
                 self.assertEqual(seen, [13])
                 (root / "engine-cuda12").mkdir()
                 (root / "engine-cuda12" / "BUILD.json").write_text("{}")
                 seen.clear()
-                spy("u")
+                spy()
                 self.assertEqual(seen, [13, 12])
 
 

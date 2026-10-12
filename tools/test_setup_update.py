@@ -30,7 +30,7 @@ class Update(unittest.TestCase):
         return p
 
     def run_update(self, have, argv=()):
-        a = mock.Mock(**{"build": False, "prebuilt": "URL", **dict(argv)})
+        a = mock.Mock(**{"build": False, **dict(argv)})
         out = io.StringIO()
         with mock.patch.object(setup, "pip_install") as pip, \
                 mock.patch.object(setup, "update_installed_engine") as eng, \
@@ -47,19 +47,20 @@ class Update(unittest.TestCase):
             rc, pip, eng, dv, start, call, out = self.run_update([p])
         self.assertEqual(rc, 0)
         pip.assert_called_once()
-        eng.assert_called_once_with("URL")
+        eng.assert_called_once_with()
         dv.assert_called_once()
         self.assertEqual(dv.call_args[0][1], "en")                 # the model's own subset is kept
         start.assert_not_called()
         call.assert_not_called()
         self.assertIn("Momoe is updated", out)
 
-    def test_build_keeps_the_compiled_engine_path(self):
+    def test_build_changes_nothing(self):
+        # Momoe always compiles its engine: --build (kept for old scripts) still updates it
         with tempfile.TemporaryDirectory() as d:
             p = self.config(Path(d))
             rc, pip, eng, dv, *_ = self.run_update([p], {"build": True})
         self.assertEqual(rc, 0)
-        eng.assert_not_called()
+        eng.assert_called_once_with()
         self.assertEqual(dv.call_args[0][1], "cjk")
 
     def test_nothing_installed(self):

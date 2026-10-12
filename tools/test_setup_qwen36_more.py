@@ -143,17 +143,12 @@ class Install(q36.Base):
         self.assertIn("UD-Q4_K_XL", out)                                  # listed after the regular two
         self.assertLess(out.index("UD-IQ3_S"), out.index("UD-IQ1_M"))
 
-    def test_engine_without_the_formats_is_compiled_here(self):
-        # a ready-made engine with qwen35moe (#1402's) but not these formats: this checkout's is compiled
-        code, out, cfg = self.main(["--family", "qwen36", "--model", "MXFP4_MOE"], source="release", runs_more=False)
-        self.assertEqual(code, 0, out)
-        self.assertEqual(len(self.builds), 1)
-        self.assertIn("does not run Qwen3.6-35B-A3B MXFP4_MOE (its expert formats) yet", out)
-
-    def test_regular_size_keeps_that_engine(self):
-        code, out, cfg = self.main(["--family", "qwen36", "--model", "UD-IQ4_XS"], source="release", runs_more=False)
-        self.assertEqual(code, 0, out)
-        self.assertEqual(self.builds, [])
+    def test_a_strata_engine_is_compiled_over(self):
+        # Momoe has no ready-made engine: one from Strata's releases is compiled over, these formats or not
+        for m in ("MXFP4_MOE", "UD-IQ4_XS"):
+            code, out, cfg = self.main(["--family", "qwen36", "--model", m], source="release", runs_more=False)
+            self.assertEqual(code, 0, out)
+            self.assertEqual(len(self.builds), 1, m)
 
     def test_older_checkout_stops_before_the_download(self):
         code, out, cfg = self.main(["--family", "qwen36-bartowski", "--model", "Q6_K"], runs_more=False)

@@ -350,68 +350,7 @@ class WindowsDetection(unittest.TestCase):
         self.assertAlmostEqual(g[1]["vram_gb"], 24.0)
 
 
-class WindowsZip(unittest.TestCase):
-    """get_prebuilt_hip never installs a zip with no code for the card; for a Strix Halo it says why and what to do."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        self.warnings: list[str] = []
-        for p in (mock.patch.object(setup, "ROOT", self.root), mock.patch.object(setup, "warn", self.warnings.append),
-                  mock.patch.object(setup, "say", lambda *a, **k: None), mock.patch.object(setup, "ok", lambda *a, **k: None),
-                  mock.patch.object(setup, "download", self.fake_download),
-                  mock.patch.object(setup, "engine_digest", self.fake_digest),
-                  mock.patch.object(setup.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(b"")),
-                  mock.patch.object(setup, "hip_runtime_beside_exe", lambda eng: None)):
-            p.start()
-            self.addCleanup(p.stop)
-        self.archs = ["gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201", "gfx1030"]      # the 0.1.39 zip
-
-    def fake_download(self, url, dest, label=""):
-        with zipfile.ZipFile(dest, "w") as z:
-            z.writestr("BUILD.json", json.dumps({"source": "prebuilt", "backend": "hip", "platform": "windows-x64",
-                                                  "version": ".".join(map(str, setup.MIN_ENGINE)), "archs": self.archs, "lib_dirs": []}))
-            z.writestr(setup.EXE, "x")
-
-
-    def fake_digest(self, asset, base):
-        """The size and SHA-256 of whatever the mocked download just wrote.
-
-        The engine archive is checked against a published digest before it is unpacked, so a test that
-        mocks the download has to say what the hash is or it never reaches the part it is about. This
-        hashes the real bytes the fake download produced, so the check still runs.
-        """
-        p = self.root / "engine" / asset
-        data = p.read_bytes() if p.exists() else b""
-        return len(data), hashlib.sha256(data).hexdigest()
-
-    def halo(self):
-        return {"index": 0, "name": setup.AMD_NAMES["gfx1151"], "vram_gb": 52.0, "arch": "gfx1151", "uma": True,
-                "dedicated_gb": 4.0, "shared_gb": 48.0, "vendor": "amd", "driver": "amd"}
-
-    def test_zip_without_gfx1151_is_refused_with_the_reason(self):
-        self.assertIsNone(setup.get_prebuilt_hip("https://example.invalid/", self.halo()))
-        self.assertEqual(len(self.warnings), 1)
-        msg = self.warnings[0]
-        self.assertIn("no gfx1151 code", msg)
-        self.assertIn("docs/STRIX_HALO.md", msg)
-        self.assertIn("build_windows.bat", msg)
-        self.assertFalse((self.root / "engine" / "strata-windows-x64-hip.zip").exists())   # dropped
-        self.assertFalse((self.root / "engine" / setup.EXE).exists())                      # nothing installed
-
-    def test_zip_with_gfx1151_is_installed(self):
-        self.archs = self.archs + ["gfx1151"]
-        eng = setup.get_prebuilt_hip("https://example.invalid/", self.halo())
-        self.assertEqual(eng, self.root / "engine")
-        self.assertEqual(self.warnings, [])
-        meta = json.loads((eng / "BUILD.json").read_text(encoding="utf-8"))
-        self.assertIn("gfx1151", meta["archs"])
-
-    def test_a_7900_xtx_still_takes_the_old_zip(self):
-        g = {"index": 0, "name": "x", "vram_gb": 24.0, "arch": "gfx1100", "vendor": "amd", "driver": "amd"}
-        self.assertIsNotNone(setup.get_prebuilt_hip("https://example.invalid/", g))
-
+class WindowsBuildScript(unittest.TestCase):
     def test_windows_build_script_lists_gfx1151(self):
         bat = (ROOT / "tools/hip/build_windows.bat").read_text(encoding="utf-8")
         m = re.search(r'if not defined STRATA_HIP_ARCHS set "STRATA_HIP_ARCHS=([^"]+)"', bat)

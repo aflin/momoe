@@ -13,9 +13,8 @@ What the first run does (each step is skipped when it is already done):
   1. checks your PC: NVIDIA or AMD GPU and driver, RAM, CPU, free disk space
   2. asks the questions
   3. installs the Python packages it needs into .venv (numpy, jinja2, ..., and NVIDIA's CUDA libraries)
-  4. gets the Strata engine: a ready-made build for RTX 20/30/40/50 cards (no compiler needed); if none fits your PC,
-     it installs the build tools (asks first) and compiles the engine for your GPU.  AMD (--backend hip, chosen by
-     itself on a PC with no usable NVIDIA card): the ready-made HIP engine on Windows, compiled here on Linux
+  4. compiles the Momoe engine for your GPU, installing the build tools first if they are missing (asks first).  AMD
+     (--backend hip, chosen by itself on a PC with no usable NVIDIA card): compiled here, Linux only for now
   5. downloads the model from Hugging Face (resumable), and the vision encoder if you want images
   6. prepares the model for Strata and fetches the MTP draft layer (~5 GB, from the original Qwen checkpoint)
   7. writes run-<model>.bat / run-<model>.sh and starts the model
@@ -29,8 +28,7 @@ at least 1 - an explicit --rope-scaling none is refused for such a context), --v
 answers, no questions), --setup (install another model / change settings instead of starting), --no-start,
 --host 0.0.0.0 --api-key KEY (reach it from other devices on your network), --experimental-speed-projection on|off
 (EXPERIMENTAL, off by default),
---models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --build (compile instead of the ready-made
-engine), --check (only check this PC), --resident-budget-gib N (UD-Q4_K_XL's or UD-IQ4_XS's experts in RAM),
+--models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --check (only check this PC), --resident-budget-gib N (UD-Q4_K_XL's or UD-IQ4_XS's experts in RAM),
 --kv-streaming on|off|auto.
 
 Setup recommends, it never forces: the recommended answers are the defaults (--yes, or Enter), and a bigger choice
@@ -172,30 +170,13 @@ HF = hf("ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF")
 LLAMA_CPP_COMMIT = "3cf03257f219afbe7334045ff7c6a06ac68c627d"
 LLAMA_CPP_ZIP = f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_CPP_COMMIT}.zip"
 
-# The ready-made engine: <PREBUILT_URL><asset>, a zip with strata(.exe), strata-vision(.exe) and BUILD.json, built
-# by tools/make_release.py.  Set this to the GitHub release download folder when publishing, e.g.
-# "https://github.com/<you>/Strata/releases/latest/download/" (or pass --prebuilt / set STRATA_PREBUILT_URL).
-# With the default, the release of this checkout's own version (PREBUILT_TAG_URL, CMakeLists.txt's version) is
-# tried first and the latest release is the fallback (#214): an older checkout keeps the engine it shipped with.
-PREBUILT_URL = "https://github.com/Niko1221/Strata/releases/latest/download/"
-# The repository the release assets and their SHA-256 come from; `engine_digest` reads the API here even
-# when --prebuilt points the download somewhere else, because the hash is only worth having if it comes
-# from somewhere the download does not.
-REPO = "Niko1221/Strata"
-PREBUILT_TAG_URL = "https://github.com/Niko1221/Strata/releases/download/v{version}/"
-PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"
-# the CUDA libraries the ready-made engine loads (the same CUDA 13.0 it is built with), from NVIDIA's pip packages
-CUDA_WHEELS = ["nvidia-cublas==13.0.2.14", "nvidia-cuda-runtime==13.0.96"]
 MIN_DRIVER = 580                       # CUDA 13.0
 # Older NVIDIA GPUs (experimental): CUDA 13 dropped Pascal (sm_60/61) and Volta (sm_70), so a model whose GPUs include
-# one runs a second engine, built with CUDA 12.9 (-DSTRATA_EXPERIMENTAL_SM60=ON) and kept in its own folder: the
-# ready-made one is CUDA12_ASSET (Windows; on Linux it is compiled here with a CUDA 12.x toolkit).  One engine runs per
-# model, so the choice is per model config, by its oldest GPU; --cuda 12|13 overrides it (docs/OLDER_GPUS.md).
+# one runs a second engine, compiled with a CUDA 12.x toolkit (-DSTRATA_EXPERIMENTAL_SM60=ON) and kept in its own
+# folder.  One engine runs per model, so the choice is per model config, by its oldest GPU; --cuda 12|13 overrides it (docs/OLDER_GPUS.md).
 CUDA13_MIN_ARCH = 75                   # the oldest compute capability CUDA 13 compiles for (sm_75, RTX 20)
-CUDA12_ASSET = "strata-windows-x64-cuda12.zip" if WIN else "strata-linux-x64-cuda12.zip"
-CUDA12_WHEELS = ["nvidia-cublas-cu12==12.9.1.4", "nvidia-cuda-runtime-cu12==12.9.79"]
-# CUDA 12.x minor-version compatibility (NVIDIA's table: Linux 525.60.13, Windows 527.41); the wheels match the 12.9.1
-# toolkit the CUDA 12 zip is built with (cuBLAS 12.9.1.4, runtime 12.9.79).  Not tested on such an old driver here.
+# CUDA 12.x minor-version compatibility (NVIDIA's table: Linux 525.60.13, Windows 527.41).  Not tested on such an old
+# driver here.
 CUDA12_MIN_DRIVER = 528 if WIN else 525
 ENGINE12_DIR = "engine-cuda12"
 MIN_ENGINE = (0, 1, 43)                # versions compare all numbers; v0.1.43: adaptive-tier copies overlap on CUDA, P100 (sm_60) kernel tables, RDNA4 (gfx1200/gfx1201) defaults (route tail skip, measured PCIe share, 16K prompt chunks, fused IQ3 prompt experts); v0.1.42.1: the GGUF-in-place file tier on Windows unmaps every shard, dual-socket starts judge each NUMA node and STRATA_DROP_CACHE_ON_EXIT, tools/strata_bench.py; v0.1.42: STRATA_ROUTE_TAIL_SKIP=7 default on CUDA (+13-16% decode), the AMD 2-GPU checkpoint fix (H13), Phase 2 fixes and opt-ins; v0.1.41.1 (folded into 0.1.42): the #1576 card order, #1616 stage size, #1595 CPU share, #1630/#1607 Windows HIP chunk cap and commit-limit warning, #1603 parallel-request bookkeeping; v0.1.41: CPU prefill share on by default (NVIDIA, chunks < 1024), --batch-groups auto, the file tier read in batches on Windows, Pascal decode fix, per-arch tables; v0.1.40.3: the #1357 MTP router guard, the #1376 Windows HIP cache floor, #461 runtime DLLs, Intel A750 first-request fix; v0.1.40.2: F4 verify windows, the Linux file tier (#1194), the stager wait (#1057), #1264/#1201/#1139 fixes, opt-in CPU share (#1282), Intel Arc; v0.1.40: --resident-experts on a layer split with the split+resident variant (#848), --kv k8v4 with KV streaming (#711); v0.1.39: the #577 file-tier regression fixed, the OpenAI Responses API (#451, Codex), a reply stuck on one token ended (#606), the head before the arena (#620), effort_position (#458), --vram-reserve hot resize opt-in (#533), PR batch; v0.1.38: prompts faster (one gather per expert group #372, the first chunk's PLE rows beside layer 0 #374, DeltaNet three heads per thread #413), --kv q4_0 prompts on tensor cores (#452), Q5_0 experts on the GPU (#473), IQ4_XS on AVX-2 (#415), unbuffered expert loading on Windows (#357 #362), --peer-device (#531), a 6 GB card starts (#496), PR batch; v0.1.37: a silent engine is restarted (#481), Windows AMD counts the desktop's VRAM (#380 #377 #497), a steadier PCIe probe (#485), fixes #496 #495 #498 #505 #493; v0.1.36: a cancelled prompt logged as read so far (#471), the draft-head hint (#474), UPDATE.bat (#475), --expert-profile-save (#477); v0.1.35: Windows AMD uses its bundled HIP runtime (#468 #461), the low-RAM resident mode on Windows 32 GB (#467), fixes #460 #459 #446 #447 #457 #448 #444; v0.1.34: AMD on Windows (a ready-made HIP engine), an MCP server for AI assistants (tools/strata_mcp.py), a shorter README; v0.1.33: a portable image encoder again (#411 #412), setup recommends instead of forcing (#406 #403 #364 #384), fixes #352 #365 #369 #371 #375 #393 #408 #414; v0.1.32: split prompts faster (#340), AMD router +12%, Unsloth Q4 in setup, faster Q4 prompts, #326/#327/#342/#344 fixes, PR batch; v0.1.31: Unsloth UD-Q4_K_XL (experimental), GGUF-in-place low-RAM mode, Windows GGUF load 2x, server race + tokenizer fixes, AMD intrinsics; v0.1.30: short prompts faster (streaming from 1024 tokens), resident low-RAM variant, multi-GPU session carve, RDNA4; v0.1.29: sampled answers faster (split top-k), #154 correctness fixes; v0.1.28: the expert cache reserves the draft head, a cancelled request no longer fails the next; v0.1.27: RTX 20 (sm_75) in the ready-made engine, the HIP build without CUDA headers; v0.1.26: the draft layer's prompt pass in batches; v0.1.25: faster prompts (grouping off the copy engine, fused hyper-connection kernels), AMD HIP backend, --kv k8v4; v0.1.24: long prompts faster (QSA select on tensor cores); v0.1.23: image requests honor sampling, 8 GB cards start, batched verify window; v0.1.22: faster prompts (tensor-core attention), multi-GPU across images/steering/KV streaming; v0.1.21: multi-GPU layer split (--gpus); v0.1.20: system-prompt checkpoint, PCIe probe, hit rate; v0.1.19: penalties
@@ -205,8 +186,8 @@ PY_PACKAGES = ["numpy", "jinja2", "regex", "pyyaml", "tqdm", "requests", "cmake"
 REQUIREMENTS = ROOT / "requirements.txt"   # the same packages and their dependencies, pinned (#214)
 
 # The first engine that runs Qwen3.6-35B-A3B (general.architecture qwen35moe): this source tree's version
-# (CMakeLists.txt).  The ready-made 0.1.40 engines were built before the qwen35moe support, so the version alone does
-# not tell them apart: setup looks for SMALL_ENGINE_MARK in the engine itself (engine_runs_small).
+# (CMakeLists.txt).  Strata's ready-made 0.1.40 engines were built before the qwen35moe support, so the version alone
+# does not tell them apart: setup looks for SMALL_ENGINE_MARK in the engine itself (engine_runs_small).
 QWEN36_ENGINE = (0, 1, 43)
 # A GGUF key only the engine's own qwen35moe support names (src/core/layout.cpp).  Not the bare architecture name: the
 # image encoder links llama.cpp, whose table of architectures has it.
@@ -471,7 +452,7 @@ VISION = {"gpu": {"max_tokens": 1024, "reserve_mib": 700},
           "cpu": {"max_tokens": 300, "reserve_mib": 700}}
 EXE = "momoe.exe" if WIN else "momoe"
 VEXE = "momoe-vision.exe" if WIN else "momoe-vision"
-# Momoe: Strata's names for them - a ready-made engine (Strata's release) and an engine folder set up before the rename
+# Momoe: Strata's names for them, in an engine folder set up before the rename
 STRATA_NAMES = {("strata.exe" if WIN else "strata"): EXE, ("strata-vision.exe" if WIN else "strata-vision"): VEXE}
 
 
@@ -1164,7 +1145,7 @@ def sm60_card(arch) -> bool:
 def old_gpus_opt_in(found, named=(), cuda=None, other=False):
     """Why this run may use Pascal / Volta cards (the experimental CUDA 12 engine), or None.  The cards are an opt-in:
     the user named one (`named`: --gpu / --gpus), asked for --cuda 12, set STRATA_EXPERIMENTAL_SM60=1, or the PC has
-    no card the ready-made engine runs on and no supported AMD card (`other`; it used to stop there).  A PC with a
+    no card the CUDA 13 engine runs on and no supported AMD card (`other`; it used to stop there).  A PC with a
     newer card keeps recommending it."""
     old = [g for g in found if sm60_card(g["arch"])]
     if not old:
@@ -1192,7 +1173,7 @@ def named_gpus(gpu, gpus) -> list:
 
 
 def cuda_choice(archs, cuda=None):
-    """The CUDA toolkit of one model's engine: (12 or 13, why).  13 (the ready-made engine) unless a card is older
+    """The CUDA toolkit of one model's engine: (12 or 13, why).  13 unless a card is older
     than CUDA 13 supports (Pascal / Volta: CUDA 13 cannot compile for them) - one engine runs per model, so its oldest
     card decides.  `cuda` (--cuda 12|13) overrides it; setup recommends, it does not refuse (the caller warns)."""
     archs = sorted({int(x) for x in archs})
@@ -2353,7 +2334,7 @@ def gfx1103_notes(gpu, ram) -> list[str]:
     notes = [f"  Radeon 780M / 760M class (gfx1103, Ryzen 7040 / 8040): the CPU and the GPU share one memory pool ({ram:.0f} GB "
              f"seen by the OS + a {gpu.get('dedicated_gb', 0.0):.1f} GB BIOS carve-out), so the model's experts live in "
              "that pool and the expert cache is sized from the memory the OS can give back."]
-    notes.append("  " + ("The engine is compiled here for gfx1103" if not WIN else "This GPU has no ready-made Windows engine")
+    notes.append("  " + ("The engine is compiled here for gfx1103" if not WIN else "Momoe has no AMD engine on Windows")
                  + " (experimental opt-in, STRATA_EXPERIMENTAL_GFX1103=1; measured on one machine, not validated on a real "
                  "card): see docs/AMD_HIP.md. This is not a Strix Halo.")
     if not WIN and gpu.get("shared_gb", 0) < 0.75 * ram - 1:
@@ -2378,8 +2359,7 @@ def strix_halo_notes(gpu, ram) -> list[str]:
     notes = [f"  Strix Halo (gfx1151, Ryzen AI Max): the CPU and the GPU share one memory pool ({ram:.0f} GB seen by the "
              f"OS + a {gpu.get('dedicated_gb', 0.0):.1f} GB BIOS carve-out), so the model's experts live in that pool "
              "and the expert cache is sized from the memory the OS can give back, not from the carve-out."]
-    notes.append("  " + ("The engine is compiled here for gfx1151" if not WIN else "Windows uses the ready-made AMD engine, "
-                                                                                     "which must be built for gfx1151")
+    notes.append("  " + ("The engine is compiled here for gfx1151" if not WIN else "Momoe has no AMD engine on Windows")
                  + " (experimental, measured on one machine): see docs/STRIX_HALO.md.")
     if not WIN and gpu.get("shared_gb", 0) < 0.75 * ram - 1:
         notes.append(f"!the GPU can reach {gpu.get('shared_gb', 0):.0f} GB of shared memory (the GTT pool; the kernel's "
@@ -2539,8 +2519,6 @@ def amd_parse_gpus(text, amd) -> list:
 # loads, built by tools/hip/build_windows.bat); it needs only the AMD driver.  Once it is installed, the cards are
 # numbered as the HIP runtime numbers them (`strata-device --list-devices`): an integrated Radeon takes HIP's device 0
 # and pushes the discrete card to 1, which the display-adapter order does not show (#325).
-WIN_HIP_ASSET = "strata-windows-x64-hip.zip"
-WIN_HIP_MIN_ENGINE = max(MIN_ENGINE, (0, 1, 33))         # the first release with a Windows HIP engine
 WIN_AMD_DRIVER = "https://www.amd.com/en/support/download/drivers.html"
 # PCI device ids (VEN_1002) of the cards the AMD backend knows; the names below cover a card whose id is not listed
 _WIN_AMD_DID = {0x744C: "gfx1100", 0x7448: "gfx1100", 0x745E: "gfx1100",            # RX 7900 XTX/XT/GRE, W7900, W7800
@@ -2789,84 +2767,6 @@ def hip_card(eng: Path, gpu: dict, listed: list[dict]) -> dict:
     return {**gpu, "index": m["index"], "count": len(hip), "vram_gb": vram, "driver": "hip"}
 
 
-def get_prebuilt_hip(url_base, gpu, updating=False) -> Path | None:
-    """The ready-made Windows HIP engine (WIN_HIP_ASSET) in engine/, kept between runs; None when it cannot be had
-    (not published for this version, no internet) or has no code for the card."""
-    eng = ROOT / "engine"
-    info = eng / "BUILD.json"
-    if info.exists() and (eng / EXE).exists():
-        try:
-            meta = json.loads(info.read_text(encoding="utf-8"))
-        except ValueError:
-            meta = {}
-        ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit())
-        if meta.get("backend") == "hip" and meta.get("source") == "prebuilt" and ver >= WIN_HIP_MIN_ENGINE and \
-                gpu["arch"] in meta.get("archs", []) and not updating:
-            ok("ready-made AMD engine already installed")
-            return eng
-    if not url_base:
-        return None
-    eng.mkdir(exist_ok=True)
-    z = eng / WIN_HIP_ASSET
-    bases = prebuilt_bases(url_base)
-    for i, base in enumerate(bases):
-        if not base.startswith(("http://", "https://")):
-            break
-        try:
-            req = urllib.request.Request(base + WIN_HIP_ASSET, method="HEAD", headers={"User-Agent": "strata-setup"})
-            urllib.request.urlopen(req, timeout=60).close()
-            break
-        except OSError as e:
-            if i + 1 < len(bases):
-                say(f"  No ready-made AMD engine for v{source_version()} ({e}): the latest release instead")
-                continue
-            warn(f"no ready-made AMD engine at {base} ({e})")
-            return None
-    say("  Downloading the ready-made Strata engine for AMD GPUs (with the ROCm libraries it uses) ...")
-    download(base + WIN_HIP_ASSET, z, "Strata AMD engine")
-    try:
-        verify_engine_archive(z, WIN_HIP_ASSET, base)
-    except UnverifiedEngine as e:
-        engine_refused(WIN_HIP_ASSET, e, updating)
-        return None
-    tmp = eng / "_unpack"
-    shutil.rmtree(tmp, ignore_errors=True)
-    with zipfile.ZipFile(z) as f:
-        f.extractall(tmp)
-    momoe_names(tmp)
-    try:
-        meta = json.loads((tmp / "BUILD.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        meta = {}
-    ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit())
-    why = None
-    if meta.get("backend") != "hip" or not (tmp / EXE).exists():
-        why = "it is not a HIP engine"
-    elif ver < WIN_HIP_MIN_ENGINE:
-        why = f"it is version {meta.get('version')}; this setup needs {'.'.join(map(str, WIN_HIP_MIN_ENGINE))}"
-    elif gpu["arch"] not in meta.get("archs", []):
-        why = (f"it is built for {', '.join(meta.get('archs', []))}; your GPU is {gpu['arch']}.  A card it has no code "
-               "for runs from a self-build of the engine: see docs/AMD_HIP.md (--build)")   # #881
-        if is_strix_halo(gpu):                         # never a zip without gfx1151 code: say so, and what to do
-            why = (f"it is built for {', '.join(meta.get('archs', [])) or 'other GPUs'} and has no gfx1151 code: your "
-                   f"{gpu['name']} (Strix Halo) needs a ready-made engine from Strata 0.1.40 or newer, whose zip is "
-                   "built for gfx1151 too.  Until then: the Linux guide docs/STRIX_HALO.md, or compile the engine "
-                   "here with tools\\hip\\build_windows.bat (its default list has gfx1151) and start setup with "
-                   "--prebuilt <its dist folder>")
-    if why:
-        warn(f"the ready-made AMD engine at {base} cannot be used: {why}")
-        shutil.rmtree(tmp, ignore_errors=True)
-        drop_archive(z)
-        return None
-    install_unpacked(tmp, eng)
-    shutil.rmtree(tmp, ignore_errors=True)
-    drop_archive(z)
-    hip_runtime_beside_exe(eng)                        # #468 #461
-    ok(f"ready-made AMD engine {meta.get('version', '')} for {', '.join(meta.get('archs', []))} "
-       f"(ROCm {meta.get('rocm', '?')})")
-    return eng
-
-
 def rocm_version(root):
     """(major, minor) of a ROCm install, from rocm-core's header; None when it has none."""
     try:
@@ -3061,343 +2961,6 @@ def driver_major(gpu):
         return 0
 
 
-class UnverifiedEngine(Exception):
-    """The engine archive could not be verified, with the reason.
-
-    Raised rather than `fail()`-ed on purpose.  The engine-UPDATE paths wrap their download in
-    `except Exception` and fall back to the engine already installed, so a refusal has to be an Exception:
-    `fail()` ends in `sys.exit(1)`, and SystemExit is a BaseException, so it flies past that guard and
-    kills the start instead.  Measured on this change before the fix - a wrong hash, a wrong size and a
-    missing digest each escaped get_prebuilt(updating=True) as SystemExit(1).
-    """
-
-
-def release_of(base: str) -> tuple[str, str | None] | None:
-    """("github", tag) for a GitHub release URL, or None when the URL is not one.
-
-    `base` is one of the bases from `prebuilt_bases`: a `releases/download/v0.1.40/` URL (which names its
-    tag), the `releases/latest/download/` URL, or something else entirely - a local folder, a plain mirror.
-    That last case matters: it has no published digest, so treating it as "latest" would check the file
-    against a release the user did not ask for, over the network, which is wrong twice over.
-
-    The repository comes out of the URL when it names one, so a fork's own releases are checked against
-    the fork rather than against Niko1221/Strata (which never has the fork's tags, so the check would
-    always fail).
-    """
-    m = re.search(r"https?://(?:www\.)?github\.com/([^/]+)/([^/]+)/releases/(?:download/v([^/]+)|latest)/",
-                  base)
-    if not m:
-        return None
-    return f"https://api.github.com/repos/{m.group(1)}/{m.group(2)}/releases", m.group(3)
-
-
-def is_local(base: str) -> bool:
-    """True for a path on this machine - `C:/mirror`, `/mnt/mirror`, `//share/engine`, `file://...`.
-
-    A local folder is the user's own file on their own disk, the same trust decision as `--gguf-dir`, and
-    there is no published digest for it to be checked against.  It is treated differently from a remote
-    mirror on purpose: nothing is between the file and setup, whereas a remote mirror has a network in the
-    middle and still no release to check it against.
-    """
-    b = base.strip()
-    if b.lower().startswith("file://"):
-        return True
-    return not re.match(r"^[a-z][a-z0-9+.\-]*://", b, re.I)
-
-
-def engine_digest(asset: str, base: str) -> tuple[int, str] | None:
-    """(size, "sha256:<hex>") for `asset` in the release `base` points at, or None if GitHub will not say.
-
-    The size and hash come from the releases API - a different origin from the download, which is the
-    whole point: a mirrored, substituted or TLS-intercepted download does not come with a matching digest,
-    while a compromised release does (see `verify_engine_archive` for what that leaves uncovered).
-
-    GitHub populates `digest` for every asset, including ones uploaded before the field existed
-    (measured on v0.1.34 through v0.1.40.1).  None means no answer - no network, a rate limit, or a
-    release that does not publish one - and the caller warns and installs anyway (never refuses).
-    """
-    where = release_of(base)
-    if where is None:                  # a local folder or a plain mirror: nothing published to check against
-        return None
-    releases, tag = where
-    url = f"{releases}/tags/v{tag}" if tag else f"{releases}/latest"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "strata-setup",
-                                                   "Accept": "application/vnd.github+json"})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            rel = json.loads(r.read().decode("utf-8"))
-    except Exception:
-        return None                     # offline, rate-limited, or the release is not there
-    for a in rel.get("assets") or []:
-        if a.get("name") == asset and a.get("digest") and str(a.get("digest")).startswith("sha256:"):
-            return int(a.get("size") or 0), str(a["digest"]).split(":", 1)[1]
-    return None
-
-
-def drop_download(z: Path) -> None:
-    """The archive and its finish mark. A refused engine is not left where a later run would reuse it."""
-    z.unlink(missing_ok=True)
-    z.with_name(z.name + ".done").unlink(missing_ok=True)
-
-
-def verify_engine_archive(z: Path, asset: str, base: str) -> None:
-    """The downloaded engine archive against the published size and SHA-256, before it is unpacked.
-
-    Without this, a ready-made engine is installed on nothing more than the byte count matching the
-    server's Content-Length - and a substituted file of the same length passes that.  It runs before the
-    archive is opened, so a wrong engine never reaches `_unpack`, let alone the engine directory.
-
-    Raises UnverifiedEngine on a refusal; the caller decides whether that stops setup (a first install,
-    with nothing to fall back to) or keeps the engine that is already there (an update).
-
-    Where the hash comes from, and where it cannot:
-
-    - a GitHub release URL: the tag is read out of the URL, so the exact release the bytes claim to come
-      from is the one checked rather than "latest" (setup tries the checkout's own release first, #214),
-      and the repository comes out of the URL too, so a fork's releases are checked against the fork;
-    - a local folder (`--prebuilt D:/mirror`): nothing published to check against.  This warns and goes
-      ahead - it is the user's own file, the same trust decision as `--gguf-dir`, and there is nothing an
-      API could say about it;
-    - any other remote mirror: nothing published to check against either, but a network is in the middle,
-      so it warns and installs anyway (no digest is never a reason to refuse).
-
-    What a digest from the API does NOT cover, stated plainly: it proves the bytes are the ones GitHub
-    published for that asset, so it catches a corrupted transfer, a mirror or proxy that substituted the
-    file, and a hostile network.  It does not make a malicious RELEASE safe - if whoever can publish a
-    release publishes a hostile engine, the digest matches it.  Only a hash pinned in this file closes
-    that, at the cost of a commit per release; a dict of tag -> sha next to `engine_digest` is where one
-    would go.
-
-    The size and the hashing below are spelled out rather than delegated to `verify_sha256`, for two
-    reasons, both measured here.  That function ends in `fail()`, and a refusal has to be an Exception so
-    the update paths can fall back.  And it keeps a `.done` mark so 111 GB of Unsloth shards is hashed
-    once; the engine archive is 190 MB, which hashes in 0.79 s at 242 MB/s on this machine, against 3.0 s
-    to download the same file.  A mark that saves 0.8 s is not worth a class of hole - anything that
-    changes the file after it was verified, at any length - so there is no mark here.
-    """
-    if os.environ.get("STRATA_SKIP_SHA256") == "1":
-        warn(f"STRATA_SKIP_SHA256=1: NOT checking {asset} against its SHA-256. If the file is corrupt or "
-             f"tampered with, it will be installed anyway. Unset it to get the check back.")
-        return
-    want = engine_digest(asset, base)          # one API call: this is a rate-limited API
-    if not want:
-        # no published digest (offline, rate limit, a mirror or folder): install anyway, never refuse
-        warn(f"could not get a SHA-256 for {asset} from GitHub (offline, rate limited, or not a release "
-             f"URL), so it was NOT verified. Installing it as it is.")
-        return
-    size, sha = want
-    have = z.stat().st_size if z.exists() else -1
-    if have != size:
-        drop_download(z)
-        raise UnverifiedEngine(f"{z.name} is {have:,} bytes, not the published {size:,}")
-    h = hashlib.sha256()
-    with open(z, "rb") as f:
-        while True:
-            b = f.read(16 << 20)
-            if not b:
-                break
-            h.update(b)
-    if h.hexdigest() != sha:
-        got = h.hexdigest()
-        drop_download(z)
-        raise UnverifiedEngine(f"{z.name} has the wrong SHA-256 ({got}, expected {sha})")
-    ok(f"{z.name}: SHA-256 checksum verified against GitHub's ({sha[:12]}...)")
-
-
-def engine_refused(asset: str, e: Exception, updating: bool) -> None:
-    """Report a refusal and either stop setup or keep the engine that is installed.
-
-    A first install has nothing to fall back to, so it stops.  An update does: the engine already in
-    place is untouched by a refusal (nothing has been unpacked), it works, and stopping the model from
-    starting over a hash is worse than keeping what is there - which is the whole reason that call site
-    catches what the download can throw.
-    """
-    if not updating:
-        fail(f"the downloaded Strata engine does not match GitHub's checksum: {e}",
-             "the bad download has been deleted (corrupt or tampered), so the next run fetches the "
-             "published file again. Set STRATA_SKIP_SHA256=1 only if you insist on installing it anyway")
-        return
-    warn(f"keeping the engine that is installed: {e}")
-    say("       Nothing was replaced. The bad download was deleted; run setup again to fetch it afresh.")
-
-
-def prebuilt_bases(url_base) -> list[str]:
-    """Where to look for the ready-made engine, in order (each ending in a slash).  The default: the release of this
-    checkout's version first, then the latest (#214); an explicit --prebuilt / STRATA_PREBUILT_URL: only that."""
-    base = url_base if url_base.endswith(("/", "\\")) else url_base + "/"
-    if base != PREBUILT_URL:
-        return [base]
-    return [PREBUILT_TAG_URL.format(version=source_version()), base]
-
-
-PREVIOUS_ENGINE = ".previous"
-
-
-def engine_version_of(folder: Path) -> str:
-    try:
-        return str(json.loads((folder / "BUILD.json").read_text(encoding="utf-8")).get("version", "?"))
-    except (OSError, ValueError):
-        return "?"
-
-
-def install_unpacked(tmp: Path, eng: Path) -> None:
-    """#670: the unpacked engine (tmp) replaces the installed one in `eng`, which is kept, one generation, in
-    eng/.previous (about 210 MiB): a new engine that turns out bad has a way back (`setup.py --rollback-engine`).  The
-    swap is all or nothing: a failure part-way puts the old files back instead of leaving a mix of old and new."""
-    prev = eng / PREVIOUS_ENGINE
-    new = list(tmp.iterdir())
-    old = [eng / p.name for p in new if p.name != PREVIOUS_ENGINE and (eng / p.name).exists()]
-    shutil.rmtree(prev, ignore_errors=True)
-    moved, placed = [], []
-    try:
-        if old:
-            prev.mkdir()
-        for dst in old:
-            shutil.move(str(dst), str(prev / dst.name))
-            moved.append(dst)
-        for p in new:
-            p.replace(eng / p.name)
-            placed.append(eng / p.name)
-    except OSError:
-        for dst in placed:                             # back to the old engine, whole
-            shutil.rmtree(dst) if dst.is_dir() else dst.unlink(missing_ok=True)
-        for dst in moved:
-            shutil.move(str(prev / dst.name), str(dst))
-        shutil.rmtree(prev, ignore_errors=True)
-        raise
-    # #1403 debt: get_prebuilt moved the old BUILD.json aside (BUILD.json.prev) instead of deleting it; it goes with the
-    # engine it describes, so engine_version_of(.previous) says the version instead of "?"
-    kept = eng / "BUILD.json.prev"
-    if kept.exists():
-        try:
-            if moved and not (prev / "BUILD.json").exists():
-                shutil.move(str(kept), str(prev / "BUILD.json"))
-            else:
-                kept.unlink()
-        except OSError:
-            pass
-    if moved:
-        ok(f"the engine it replaced ({engine_version_of(prev)}) is kept in {prev}; "
-           "setup.py --rollback-engine puts it back")
-
-
-def rollback_engine(toolkit=13) -> int:
-    """#670: `setup.py --rollback-engine`: the engine kept in engine/.previous becomes the installed one again, and the
-    one it replaces is kept in its place (run it again to go forward)."""
-    eng = engine_dir(toolkit)
-    prev = eng / PREVIOUS_ENGINE
-    if not prev.is_dir() or not any(prev.iterdir()):
-        warn(f"no earlier engine is kept in {prev} (one is kept when an update replaces the engine)")
-        return 1
-    swap = eng / ".swap"
-    shutil.rmtree(swap, ignore_errors=True)
-    swap.mkdir()
-    was = engine_version_of(eng)
-    for p in list(prev.iterdir()):                     # what the earlier engine has: the current copy goes aside
-        cur = eng / p.name
-        if cur.exists():
-            shutil.move(str(cur), str(swap / p.name))
-        shutil.move(str(p), str(cur))
-    for p in list(swap.iterdir()):
-        shutil.move(str(p), str(prev / p.name))
-    shutil.rmtree(swap, ignore_errors=True)
-    ok(f"engine {engine_version_of(eng)} is installed again (it replaced {was}, which is kept in {prev})")
-    return 0
-
-
-def get_prebuilt(url_base, gpu, vision, updating=False, toolkit=13) -> Path | None:
-    """The ready-made engine in engine/ (kept between runs), or None when there is none for this PC.
-    updating: called to replace an installed engine, which starts instead when this fails (no compile).
-    toolkit 12: the experimental CUDA 12 engine (CUDA12_ASSET) in engine-cuda12/."""
-    eng = engine_dir(toolkit)
-    asset = CUDA12_ASSET if int(toolkit) == 12 else PREBUILT_ASSET
-    info = eng / "BUILD.json"
-    if info.exists() and (eng / EXE).exists() and json.loads(info.read_text(encoding="utf-8")).get("backend") != "hip":
-        meta = json.loads(info.read_text(encoding="utf-8"))
-        ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit())
-        if meta.get("source") == "local":              # compiled here: build_engine checks its source and cards
-            return None
-        have = [int(a) for a in meta.get("archs", [])]
-        miss = [int(x) for x in gpu.get("archs", [gpu["arch"]])
-                if have and int(x) not in have and not (meta.get("ptx") and int(x) > max(have))]
-        if miss:                                       # a card it has no code for (#128): compiled here instead
-            warn(f"the installed engine is built for {', '.join(str(a) for a in have)}; your GPU is "
-                 f"{', '.join(str(x) for x in miss)}: compiling instead")
-            return None
-        if ver >= MIN_ENGINE:
-            ok("ready-made engine already installed")
-            return eng
-        say(f"  Updating the ready-made engine ({meta.get('version')} -> {'.'.join(map(str, MIN_ENGINE))} or newer) ...")
-        info.replace(eng / "BUILD.json.prev")   # kept for the .previous copy
-    if not url_base:
-        return None
-    eng.mkdir(exist_ok=True)
-    z = eng / asset
-    bases = prebuilt_bases(url_base)
-    for i, base in enumerate(bases):
-        if not base.startswith(("http://", "https://")):
-            break
-        try:                                           # not published (yet), or no internet: compile instead
-            req = urllib.request.Request(base + asset, method="HEAD", headers={"User-Agent": "strata-setup"})
-            urllib.request.urlopen(req, timeout=60).close()
-            break
-        except OSError as e:
-            if i + 1 < len(bases):                     # #214: this checkout's release is not published (yet)
-                say(f"  No ready-made engine for v{source_version()} ({e}): the latest release instead")
-                continue
-            warn(f"no ready-made engine at {base} ({e})" + ("" if updating else ": compiling instead"))
-            return None
-    say("  Downloading the ready-made Strata engine" + (" (CUDA 12, experimental)" if int(toolkit) == 12 else "") + " ...")
-    download(base + asset, z, "Strata engine")
-    try:
-        verify_engine_archive(z, asset, base)
-    except UnverifiedEngine as e:
-        engine_refused(asset, e, updating)
-        return None
-    tmp = eng / "_unpack"
-    shutil.rmtree(tmp, ignore_errors=True)
-    try:
-        with zipfile.ZipFile(z) as f:
-            f.extractall(tmp)
-        momoe_names(tmp)
-    except zipfile.BadZipFile:                         # not a zip, or a damaged one: a kept .done mark would make
-        drop_archive(z)                                # every later run fail on it instead of downloading it again
-        raise
-    meta = json.loads((tmp / "BUILD.json").read_text(encoding="utf-8"))
-    if tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit()) < MIN_ENGINE:
-        need = ".".join(map(str, MIN_ENGINE))
-        if updating:                                   # these files are newer than the published release (#58)
-            warn(f"engine {need} is not published yet (the release may still be uploading): run this again "
-                 f"in a few minutes to update it")
-        else:
-            warn(f"the ready-made engine at {base} is version {meta.get('version')}; this setup needs "
-                 f"{need}: compiling instead")
-        shutil.rmtree(tmp, ignore_errors=True)
-        drop_archive(z)
-        return None
-    archs = [int(a) for a in meta.get("archs", [])]
-    miss = [int(x) for x in gpu.get("archs", [gpu["arch"]])
-            if int(x) not in archs and not (meta.get("ptx") and int(x) > max(archs))]
-    if miss:
-        warn(f"the ready-made engine is built for {', '.join(str(a) for a in archs)}; your GPU is "
-             f"{', '.join(str(x) for x in miss)}" + ("" if updating else ": compiling instead"))
-        shutil.rmtree(tmp, ignore_errors=True)
-        drop_archive(z)
-        return None
-    install_unpacked(tmp, eng)
-    shutil.rmtree(tmp, ignore_errors=True)
-    drop_archive(z)
-    if not (eng / EXE).exists():
-        fail("the ready-made engine archive has no " + EXE)
-    if not WIN:
-        for x in (EXE, VEXE):
-            if (eng / x).exists():
-                (eng / x).chmod(0o755)
-    ok(f"ready-made engine {meta.get('version', '')} for {', '.join('sm_' + str(a) for a in archs)} (CUDA "
-       f"{meta.get('cuda', '?')})")
-    return eng
-
-
 def update_engine_gpu(toolkit=13):
     """#1485: the card an engine update is for.  Not simply the one with the most VRAM: a Tesla V100 (32 GB) beside two
     RTX 4090s was taken, and CUDA 13 cannot compile for it.  The cards the installed models are set up for come
@@ -3422,38 +2985,25 @@ def update_engine_gpu(toolkit=13):
     return {**g, "count": len(found)}
 
 
-def update_installed_engine(url_base, toolkit=None) -> None:
-    """An installed ready-made engine older than MIN_ENGINE is replaced before the model starts, so a plain
-    START-HERE.bat on an existing install picks up a new release.  If that cannot happen (no internet, the model
-    still running, no ready-made engine for this GPU) the installed engine is kept and starts as before.
+def update_installed_engine(toolkit=None) -> None:
+    """The installed engine is compiled again before the model starts when its source changed (a git pull), so a plain
+    START-HERE.bat on an existing install runs the new code.  Momoe has no ready-made engine: one that was not compiled
+    from this source (Strata's ready-made one, from before the fork) is compiled here as well.  If that cannot happen
+    (the model still running, no compiler, a failed build) the installed engine is kept and starts as before.
     toolkit None: engine/, then the experimental CUDA 12 engine in engine-cuda12/ when one is installed."""
     if toolkit is None:
-        update_installed_engine(url_base, 13)
+        update_installed_engine(13)
         if (engine_dir(12) / "BUILD.json").exists():
-            update_installed_engine(url_base, 12)
+            update_installed_engine(12)
         return
     eng = engine_dir(toolkit)
     info = eng / "BUILD.json"
     if not info.exists() or not (eng / EXE).exists():
         return
-    meta_text = info.read_text(encoding="utf-8")
-    meta = json.loads(meta_text)
-    if meta.get("backend") == "hip" and WIN:           # AMD on Windows: the ready-made HIP engine, when older
-        ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit())
-        if meta.get("source") == "prebuilt" and ver < WIN_HIP_MIN_ENGINE:
-            try:
-                g = next((x for x in amd_gpus() if amd_problem(x) is None), None)
-                if g is None:
-                    raise RuntimeError("no supported AMD GPU found")
-                say(f"  Updating the ready-made AMD engine ({meta.get('version')} -> "
-                    f"{'.'.join(map(str, WIN_HIP_MIN_ENGINE))} or newer) ...")
-                if get_prebuilt_hip(url_base, g, updating=True) is None:
-                    raise RuntimeError("not published yet")
-            except (Exception, SystemExit) as e:
-                warn(f"could not update the AMD engine{'' if isinstance(e, SystemExit) else f' ({e})'}: "
-                     "starting the installed one")
-        return
+    meta = json.loads(info.read_text(encoding="utf-8"))
     if meta.get("backend") == "hip":                   # AMD: compiled here, again when its source changed
+        if WIN:                                        # Strata's ready-made Windows AMD engine: Momoe compiles none
+            return
         if meta.get("src") != source_hash(ENGINE_SOURCES):
             try:
                 usable = [x for x in amd_gpus() if amd_problem(x) is None]
@@ -3467,15 +3017,10 @@ def update_installed_engine(url_base, toolkit=None) -> None:
                 warn(f"could not compile the updated engine{'' if isinstance(e, SystemExit) else f' ({e})'}: "
                      "starting the installed one")
         return
-    ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit())
-    local = meta.get("source") == "local"
     vision = meta.get("vision") or "none"
-    if local:                                          # compiled here: is it older than the source (a git pull)?
-        if meta.get("src") == source_hash(ENGINE_SOURCES) and \
-                (vision == "none" or meta.get("vision_src") == source_hash(VISION_SOURCES)):
-            return
-    elif ver >= MIN_ENGINE:
-        return
+    if meta.get("source") == "local" and meta.get("src") == source_hash(ENGINE_SOURCES) and \
+            (vision == "none" or meta.get("vision_src") == source_hash(VISION_SOURCES)):
+        return                                         # compiled here from this source
     try:                                               # a running engine cannot be replaced (Windows keeps it locked)
         for x in (EXE, VEXE):
             if (eng / x).exists():
@@ -3484,41 +3029,18 @@ def update_installed_engine(url_base, toolkit=None) -> None:
     except OSError:
         warn(f"engine {meta.get('version') or ''} is in use: close the model window and run this again to update it")
         return
+    if meta.get("source") != "local":
+        say(f"  The installed engine ({meta.get('version')}) was not compiled from this source: compiling it here")
     gpu = update_engine_gpu(toolkit)
-    if local:
-        try:                                           # a failed compile must not stop the model from starting
-            if gpu is None:
-                raise RuntimeError("no NVIDIA GPU found")
-            gpu = {**gpu, "archs": sorted({int(gpu["arch"]), *(int(x) for x in meta.get("archs", []))})}
-            if int(toolkit) == 12:                     # the cards it was compiled for (the main GPU may be newer)
-                gpu["archs"] = sorted({int(x) for x in meta.get("archs", [])}) or gpu["archs"]
-            build_engine(gpu, vision, False, get_llama_cpp(), toolkit=toolkit)
-        except (Exception, SystemExit) as e:
-            warn(f"could not compile the updated engine{'' if isinstance(e, SystemExit) else f' ({e})'}: starting the installed one")
-        return
-    new = None
-    if gpu is not None:
-        try:
-            if int(toolkit) == 12:                     # the cards the CUDA 12 engine serves, not the newest one
-                gpu = {**gpu, "archs": [x for x in (int(a) for a in meta.get("archs", [])) if x < CUDA13_MIN_ARCH]
-                       or [int(gpu["arch"])]}
-            new = get_prebuilt(url_base, gpu, "gpu", updating=True, toolkit=toolkit)
-        except Exception as e:                         # a failed download must not stop the model from starting
-            warn(f"updating the engine failed ({e})")
-    if new is None:
-        if not info.exists():
-            info.write_text(meta_text)                 # get_prebuilt drops it before downloading: put it back
-        warn(f"could not update the engine: starting the installed {meta.get('version')}")
-        return
-    pip_cuda_libs(toolkit)
-
-
-def pip_cuda_libs(toolkit=13) -> None:
-    """NVIDIA's cuBLAS and CUDA runtime for a ready-made engine, from pip: CUDA 13's, or the CUDA 12 engine's."""
-    if int(toolkit) == 12:
-        pip_install(CUDA12_WHEELS, "NVIDIA CUDA 12 libraries for the experimental engine (cuBLAS, CUDA runtime; ~0.7 GB)")
-    else:
-        pip_install(CUDA_WHEELS, "NVIDIA CUDA libraries (cuBLAS, CUDA runtime; ~0.4 GB)")
+    try:                                               # a failed compile must not stop the model from starting
+        if gpu is None:
+            raise RuntimeError("no NVIDIA GPU found")
+        gpu = {**gpu, "archs": sorted({int(gpu["arch"]), *(int(x) for x in meta.get("archs", []))})}
+        if int(toolkit) == 12:                         # the cards it was compiled for (the main GPU may be newer)
+            gpu["archs"] = sorted({int(x) for x in meta.get("archs", [])}) or gpu["archs"]
+        build_engine(gpu, vision, False, get_llama_cpp(), toolkit=toolkit)
+    except (Exception, SystemExit) as e:
+        warn(f"could not compile the updated engine{'' if isinstance(e, SystemExit) else f' ({e})'}: starting the installed one")
 
 
 CUDA_SM120_SUSPECT = (13, 2)   # #892 #968: nvcc 13.2.0 / 13.2.1 (build 13.2.51) for sm_120 made garbage answers (IQ1_S / IQ2_S / IQ3_S) and prompts
@@ -3550,7 +3072,7 @@ def sm120_nvcc(nvcc, cuda_v, archs):
     warn("CUDA 13.2.0 and 13.2.1's compiler (nvcc) made garbage prompts and answers for RTX 50 cards (sm_120) in two "
          "reports (#892, #968): the same source compiled with CUDA 13.0, 13.1 or 13.2.2 is right. If the engine answers "
          "with nonsense, update to CUDA 13.2.2 or install CUDA 13.0 next to it (https://developer.nvidia.com/cuda-toolkit-archive) "
-         "and set STRATA_NVCC to its nvcc; the ready-made engine is built with 13.0")
+         "and set STRATA_NVCC to its nvcc")
     return nvcc, cuda_v
 
 
@@ -3563,7 +3085,7 @@ def install_build_tools(gpu, yes):
     need12 = (12, 8) if max(archs) >= 120 else (12, 0)     # sm_120 needs CUDA 12.8 or newer
     if old and max(archs) >= 120:
         warn("an RTX 50 card (sm_120) in a CUDA 12 engine: engines built with CUDA 12.8 crashed on long prompts there "
-             "(#220, #224); the RTX 50 card alone (--gpu N) runs the ready-made CUDA 13 engine")
+             "(#220, #224); the RTX 50 card alone (--gpu N) runs the CUDA 13 engine")
     nvcc, cuda_v = find_nvcc(below=(13, 0)) if old else find_nvcc()
     if old and (nvcc is None or cuda_v < need12):
         fail("the experimental CUDA 12 engine (Pascal / Volta, or --cuda 12) is compiled here with the NVIDIA CUDA "
@@ -3706,22 +3228,8 @@ def toolkit_root_defs(nvcc) -> list:
 
 def engine_defs(archs, toolkit=13) -> list:
     """Extra CMake definitions for the engine: the experimental Pascal/Volta build (#295) for cards below sm_75, and
-    for every CUDA 12 engine (the same build as the ready-made CUDA 12 one: it admits the older cards)."""
+    for every CUDA 12 engine (it admits the older cards)."""
     return ["-DSTRATA_EXPERIMENTAL_SM60=ON"] if min(int(x) for x in archs) < 75 or int(toolkit) == 12 else []
-
-
-def prebuilt_vision(meta: dict, gpu: dict, vision: str) -> str:
-    """The image encoder to use with a ready-made engine (`meta`: its BUILD.json).  The encoder can cover fewer cards
-    than the engine (0.1.30/0.1.31: no RTX 20 code, #331): such a card gets the CPU encoder - the same program - instead
-    of compiling one, which fails on most Windows PCs (no Visual Studio / CUDA toolkit); --build compiles it."""
-    if vision != "gpu":
-        return vision
-    va = [int(x) for x in meta.get("vision_archs", meta.get("archs", []))]
-    if va and int(gpu["arch"]) not in va and not (meta.get("ptx") and int(gpu["arch"]) > max(va)):
-        warn(f"the ready-made image encoder has no code for your GPU (sm_{gpu['arch']}): it runs on the CPU instead "
-             "(images take longer; setup --build compiles one for your GPU)")
-        return "cpu"
-    return vision
 
 
 def build_engine(gpu, vision, yes, llama, toolkit=None, more=False) -> Path:
@@ -4601,8 +4109,8 @@ def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
 
 def update_install(have: list, a) -> int:
     """#475: `setup.py --update` (UPDATE.bat / update.sh, after their git pull): what a plain START-HERE.bat does to
-    an install before it starts the model, without starting it - the Python packages, the ready-made engine when this
-    setup needs a newer one (MIN_ENGINE; a compiled engine when its source changed), each installed model's config
+    an install before it starts the model, without starting it - the Python packages, the engine compiled again when its
+    source changed, each installed model's config
     upgrades and its draft subset.  No question is asked and the model files are not touched; a model still running
     keeps its engine (update_installed_engine says to close it and run this again)."""
     have = [p for p in have if model_config(p)]        # #549: a strata-*.json that is no model config is skipped
@@ -4612,8 +4120,7 @@ def update_install(have: list, a) -> int:
         return 0
     pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
                 "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
-    if not a.build:
-        update_installed_engine(a.prebuilt)
+    update_installed_engine()
     for cfg_path in have:
         cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
         if "--mtp" in cfg["args"][:-1]:
@@ -5144,15 +4651,9 @@ def ensure_engine_for(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
     return cfg
 
 
-def get_cuda12_engine(url_base, gpu, vision, yes, build=False) -> Path:
-    """The experimental CUDA 12 engine for these cards (gpu["archs"]): the ready-made one (Windows) with NVIDIA's
-    CUDA 12 libraries, or compiled here with a CUDA 12.x toolkit (Linux, --build, or no ready-made one)."""
-    eng = None if build else get_prebuilt(url_base, gpu, vision, toolkit=12)
-    if eng is not None and json.loads((eng / "BUILD.json").read_text(encoding="utf-8")).get("source") != "local":
-        pip_cuda_libs(12)
-        if vision != "none" and not (eng / VEXE).exists():
-            eng = None
-    return eng if eng is not None else build_engine(gpu, vision, yes, get_llama_cpp(), toolkit=12)
+def get_cuda12_engine(gpu, vision, yes) -> Path:
+    """The experimental CUDA 12 engine for these cards (gpu["archs"]), compiled here with a CUDA 12.x toolkit."""
+    return build_engine(gpu, vision, yes, get_llama_cpp(), toolkit=12)
 
 
 def engine_lib_dirs(eng: Path, toolkit=13) -> list:
@@ -5170,8 +4671,7 @@ def use_cuda12(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
          "CUDA 12 engine (docs/OLDER_GPUS.md; START-HERE.bat --setup --cuda 13 and newer cards only moves it back)")
     main = gpu_info(cards[0]["index"]) or cards[0]
     vision = "gpu" if cfg.get("vision") else "none"
-    eng = get_cuda12_engine(os.environ.get("STRATA_PREBUILT_URL", PREBUILT_URL),
-                            {**main, "archs": sorted({int(g["arch"]) for g in cards})}, vision, yes)
+    eng = get_cuda12_engine({**main, "archs": sorted({int(g["arch"]) for g in cards})}, vision, yes)
     cfg["exe"] = str(eng / EXE)
     cfg["cuda"] = 12
     cfg["lib_dirs"] = engine_lib_dirs(eng, 12)
@@ -5244,9 +4744,9 @@ def sycl_setup(argv) -> int:
     say("  Intel Arc (--backend sycl): supported since 0.1.40.2 on Linux, tested on an Arc Pro B70 (xe) and an Arc A750 "
         "(i915); other Arc cards and driver versions are untested, and reports help (docs/INTEL.md).")
     if WIN:
-        fail("the Intel Arc engine has no Windows setup yet (no ready-made Intel engine either)",
+        fail("the Intel Arc engine has no Windows setup yet",
              "run it on Linux (Ubuntu 24.04 with Intel's GPU driver and oneAPI): docs/INTEL_ARC.md")
-    say("  There is no ready-made Intel engine: it is built from source with Intel oneAPI (icpx + oneMKL),")
+    say("  The Intel engine is built from source with Intel oneAPI (icpx + oneMKL),")
     say("  docs/INTEL_ARC.md. Setup continues with sycl/setup_intel.py.")
     rest, skip = [], False
     for x in argv:                                     # setup_intel.py drives this setup through its AMD path
@@ -5323,9 +4823,7 @@ def main() -> int:
     ap.add_argument("--update", action="store_true",
                     help="update the installed engine, Python packages and model settings as a start would, without "
                          "starting the model (UPDATE.bat / update.sh run it after a git pull)")
-    ap.add_argument("--rollback-engine", action="store_true",
-                    help="put back the engine an update replaced (kept in engine/.previous), and keep the current one there")
-    ap.add_argument("--build", action="store_true", help="compile the engine instead of using the ready-made one")
+    ap.add_argument("--build", action="store_true", help=argparse.SUPPRESS)   # Momoe always compiles its engine
     ap.add_argument("--source", choices=SOURCES, default=None,
                     help="where the model files come from: auto (default: Hugging Face), huggingface or modelscope "
                          "(mainland China: the same files, checked against ModelScope's published SHA-256; "
@@ -5334,11 +4832,8 @@ def main() -> int:
                     help="what a GGUF is and whether Momoe runs it, from its headers only (no download): a file, a "
                          "folder, a URL, ms:owner/repo (ModelScope) or hf:owner/repo, and optionally a variant name")
     ap.add_argument("--cuda", choices=["12", "13", "auto"], default=os.environ.get("STRATA_CUDA") or None,
-                    help="NVIDIA: the CUDA toolkit of this model's engine. auto (default): CUDA 13, the ready-made "
-                         "engine; CUDA 12 (experimental) when a chosen card is older than CUDA 13 supports (Pascal, "
+                    help="NVIDIA: the CUDA toolkit of this model's engine. auto (default): CUDA 13; CUDA 12 (experimental) when a chosen card is older than CUDA 13 supports (Pascal, "
                          "Volta). 12 also runs with an older driver (Windows 528+, Linux 525+). docs/OLDER_GPUS.md")
-    ap.add_argument("--prebuilt", default=os.environ.get("STRATA_PREBUILT_URL", PREBUILT_URL),
-                    help="where the ready-made engine is (a URL folder or a local folder)")
     ap.add_argument("--check", action="store_true", help="only check this PC and exit")
     ap.add_argument("--calibrate", action="store_true",
                     help="tune the engine's settings for this PC (about 15-30 minutes, longer on a slow card), then start the model")
@@ -5403,8 +4898,6 @@ def main() -> int:
     if a.models_dir is None:
         a.models_dir = str(data / "models")
 
-    if a.rollback_engine:                              # #670
-        return rollback_engine(12 if a.cuda == "12" else 13)
 
     # ---- 0. already installed: just start it
     have = installed_configs()
@@ -5452,14 +4945,12 @@ def main() -> int:
             fail(f"no config {a.config}", "momoe list shows the configs in " + str(ROOT))
         if not model_config(cfg_file.resolve()):
             fail(f"{a.config} is not a model config (no \"exe\" or \"args\")")
-        if not a.build:
-            update_installed_engine(a.prebuilt)
+        update_installed_engine()
         return start(cfg_file.resolve(), a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib})
     if have and a.calibrate and not (a.setup or a.model or a.family or a.check):
-        if not a.build:
-            update_installed_engine(a.prebuilt)
+        update_installed_engine()
         pick_cfg = have[0]
         if len(have) > 1:
             say()
@@ -5474,8 +4965,7 @@ def main() -> int:
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
     if have and not (a.setup or a.model or a.family or a.check or a.no_start):
-        if not a.build:
-            update_installed_engine(a.prebuilt)
+        update_installed_engine()
         if len(have) == 1:
             return start(have[0], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
@@ -5503,7 +4993,7 @@ def main() -> int:
              "built with CUDA 12 (docs/OLDER_GPUS.md)")
     nv_ok = any(gpu_problem(g) is None for g in found)
     hip = a.backend == "hip" or (a.backend is None and not nv_ok and bool(amd_ok))
-    if a.backend is None and nv_ok and amd_ok:
+    if a.backend is None and nv_ok and amd_ok and not WIN:   # Momoe: no AMD engine on Windows
         # both kinds of card: asked (a first run on such a PC used to take NVIDIA without mentioning the Radeon)
         say()
         say("  This PC has NVIDIA and AMD cards Momoe can use:")
@@ -5511,15 +5001,15 @@ def main() -> int:
             + "   (recommended)")
         say("  2) AMD: " + ", ".join(f"{g['name']} ({g['vram_gb']:.0f} GB{', unified memory' if g.get('uma') else ''})"
                                for g in amd_ok)
-            + f"   ({'the ready-made AMD engine, no images' if WIN else 'compiled here, images on the CPU'}"
-              " - docs/AMD_HIP.md)")
+            + "   (compiled here, images on the CPU - docs/AMD_HIP.md)")
         hip = ask("Which cards?", ["1", "2"], "1", a.yes or a.check) == "2"
         if a.check and not hip:
             say(f"  (the AMD card: {'START-HERE.bat' if WIN else './setup.sh'} --backend hip)")
     cuda_tk = 13                                       # NVIDIA: the toolkit of this model's engine (cuda_choice)
-    if hip:                                            # AMD: compiled here; Windows: ready-made
-        if WIN and a.gpus:
-            fail("several AMD cards sharing one model (--gpus) is Linux-only for now", "use one card: --gpu N")
+    if hip:                                            # AMD: compiled here, on Linux
+        if WIN:                                        # Strata's Windows AMD engine is its ready-made one: Momoe has none
+            fail("Momoe runs AMD cards on Linux only for now: on Windows there is no AMD engine to compile",
+                 "use Linux for the AMD card (docs/AMD_HIP.md), or an NVIDIA card")
         say("  Your AMD GPUs:" if amd else "  No AMD GPU found (" + ("Windows lists no AMD display adapter)." if WIN
                                                                    else "the amdgpu driver's KFD topology is empty)."))
         for g in amd:
@@ -5645,7 +5135,7 @@ def main() -> int:
     if floor == "unsupported":
         fail("this CPU has neither AVX2 nor SSE4.2; Momoe needs at least SSE4.2 (Intel Nehalem, 2008, or newer)")
     if not avx2:
-        # #394 #595 #623: the ready-made engine is AVX2; an older CPU gets one compiled here, whose CPU experts run on
+        # #394 #595 #623: the engine is AVX2 by default; an older CPU gets one for its ISA, whose CPU experts run on
         # ggml-cpu's kernels for this CPU.  Experimental: measured only on newer CPUs with the older path forced, and by
         # users on a few Xeons.  A warning, not a stop.
         warn(f"this CPU has no AVX2: Momoe support for it is EXPERIMENTAL and slow. Setup compiles the engine on this "
@@ -6004,48 +5494,14 @@ def main() -> int:
                 "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
 
     # ---- 4. the engine
-    step(4, "the Strata engine")
+    step(4, "the Momoe engine")
     llama = get_llama_cpp()
     ok(f"llama.cpp {LLAMA_CPP_COMMIT[:7]} (gguf-py, ggml, mtmd)")
-    if hip and WIN:                                    # AMD on Windows: the ready-made HIP engine (no compiler)
-        eng = None if a.build else get_prebuilt_hip(a.prebuilt, gpu)
-        if eng is None:
-            fail("no ready-made AMD engine for this Strata version" + (" (--build)" if a.build else ""),
-                 "compiling it on Windows: tools\\hip\\build_windows.bat makes strata-windows-x64-hip.zip, then run "
-                 "START-HERE.bat --backend hip --prebuilt <its dist folder> (docs/AMD_HIP.md)")
-        gpu = hip_card(eng, gpu, amd)
-        a.gpu = gpu["index"] if gpu["count"] > 1 else a.gpu
-    else:
-        eng = None if a.build or hip else get_prebuilt(a.prebuilt, gpu, vision, **({"toolkit": 12} if cuda_tk == 12
-                                                                                    else {}))
-    if eng is not None and own_mtp and not engine_runs_model(eng, model):
-        # Qwen3.6 / Ornith: no ready-made engine runs them yet (the published ones predate qwen35moe), so this PC
-        # compiles the engine from this checkout, as it does for a card the ready-made one has no code for; that
-        # engine runs every family.  A ready-made engine that has it is used as is.  The MORE_SIZES files need the
-        # expert formats added for them as well (FORMATS_ENGINE_MARK).
-        ver = json.loads((eng / "BUILD.json").read_text(encoding="utf-8")).get("version", "?")
-        if hip and WIN:
-            fail(f"the ready-made AMD engine ({ver}) does not run {fam['title']} yet",
-                 "compiling it on Windows: tools\\hip\\build_windows.bat (docs/AMD_HIP.md), or choose another model")
-        what = fam['title'] if not engine_runs_small(eng) else f"{fam['title']} {size_of(model)} (its expert formats)"
-        say(f"  The ready-made engine ({ver}) does not run {what} yet: compiling the engine on this PC instead")
-        eng = None
-    if eng is not None and not hip and json.loads((eng / "BUILD.json").read_text(encoding="utf-8")).get("source") != "local":
-        pip_cuda_libs(cuda_tk)
-        if vision != "none" and not (eng / VEXE).exists():
-            warn("the ready-made engine has no image encoder: compiling it")
-            eng = None
-        else:
-            vision = prebuilt_vision(json.loads((eng / "BUILD.json").read_text(encoding="utf-8")), gpu, vision)
-    if eng is None:
-        more = own_mtp and bool(MODELS[model].get("more"))
-        eng = build_engine_hip(gpu, llama, vision, more=more) if hip else \
-            build_engine(gpu, vision, a.yes, llama, toolkit=cuda_tk, more=more)
+    more = own_mtp and bool(MODELS[model].get("more"))
+    eng = build_engine_hip(gpu, llama, vision, more=more) if hip else \
+        build_engine(gpu, vision, a.yes, llama, toolkit=cuda_tk, more=more)
     meta = json.loads((eng / "BUILD.json").read_text(encoding="utf-8"))
-    if hip and WIN:                                    # the ready-made engine's rocm/bin, first on the engine's PATH
-        lib_dirs = [str(d) for d in hip_lib_dirs(eng)]
-    else:
-        lib_dirs = meta.get("lib_dirs") or meta.get("cuda_dirs") or cuda_lib_dirs(cuda_tk)
+    lib_dirs = meta.get("lib_dirs") or meta.get("cuda_dirs") or cuda_lib_dirs(cuda_tk)
     engine_ver = tuple(int(x) for x in str(meta.get("version", "0")).split(".")[:4] if x.isdigit())
     need_engine = MODELS[model].get("engine", UNSLOTH_ENGINE)
     if budget is not None and engine_ver < need_engine:   # checked before the 15-111 GB download

@@ -1,8 +1,7 @@
 #!/bin/sh
 # Update Strata without starting the model (#475): the newest code (git pull, when this folder is a git clone), then
-# what ./setup.sh does before a start - the engine (a new ready-made one when this version needs it, or compiled
-# again when its source changed), the Python packages, each installed model's settings and draft subset. The model
-# files are not touched. Start the model later with ./setup.sh. Options are passed on to setup.py.
+# what ./setup.sh does before a start - the engine (compiled again when its source changed), the Python packages, each
+# installed model's settings and draft subset. The model files are not touched. Start the model later with ./setup.sh. Options are passed on to setup.py.
 cd "$(dirname "$0")" || exit 1
 # all of it in a function, read before it runs: the git pull below can change this very file
 main() {
