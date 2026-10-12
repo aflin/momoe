@@ -16,3 +16,4 @@ estimates.
 | Note | Status | Summary |
 |---|---|---|
 | [conversation-cache-file-spill.md](conversation-cache-file-spill.md) | Proposed | When RAM is short, park conversations in a memory-mapped file instead of pinned RAM |
+| [second-gpu-layer-split.md](second-gpu-layer-split.md) | Rejected (this PC) | An RTX 3060 beside the 4070 Ti for Flash-Next: more cache hits, no faster writing |
