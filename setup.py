@@ -469,8 +469,21 @@ VISION_GPU_QWEN36_MIB = 1254
 VISION_GPU_SMALL_RESERVE_MIB = 1000    # the tip for images on a <= 12 GB card (the engine's LOW line asked ~1003)
 VISION = {"gpu": {"max_tokens": 1024, "reserve_mib": 700},
           "cpu": {"max_tokens": 300, "reserve_mib": 700}}
-EXE = "strata.exe" if WIN else "strata"
-VEXE = "strata-vision.exe" if WIN else "strata-vision"
+EXE = "momoe.exe" if WIN else "momoe"
+VEXE = "momoe-vision.exe" if WIN else "momoe-vision"
+# Momoe: Strata's names for them - a ready-made engine (Strata's release) and an engine folder set up before the rename
+STRATA_NAMES = {("strata.exe" if WIN else "strata"): EXE, ("strata-vision.exe" if WIN else "strata-vision"): VEXE}
+
+
+def momoe_names(folder: Path) -> None:
+    """Momoe: the engine and image encoder in `folder` under Momoe's names (a Strata-named file is renamed, unless the
+    Momoe-named one is there already)."""
+    for old, new in STRATA_NAMES.items():
+        try:
+            if (folder / old).is_file() and not (folder / new).exists():
+                (folder / old).rename(folder / new)
+        except OSError as e:
+            warn(f"could not rename {folder / old} to {new} ({e.strerror or e})")
 
 
 # ------------------------------------------------------------------------------------------------ output
@@ -2820,6 +2833,7 @@ def get_prebuilt_hip(url_base, gpu, updating=False) -> Path | None:
     shutil.rmtree(tmp, ignore_errors=True)
     with zipfile.ZipFile(z) as f:
         f.extractall(tmp)
+    momoe_names(tmp)
     try:
         meta = json.loads((tmp / "BUILD.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -3345,6 +3359,7 @@ def get_prebuilt(url_base, gpu, vision, updating=False, toolkit=13) -> Path | No
     try:
         with zipfile.ZipFile(z) as f:
             f.extractall(tmp)
+        momoe_names(tmp)
     except zipfile.BadZipFile:                         # not a zip, or a damaged one: a kept .done mark would make
         drop_archive(z)                                # every later run fail on it instead of downloading it again
         raise
@@ -4559,6 +4574,12 @@ def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
     KV streaming is dropped: its RAM copy must be pinned, and the driver pins only about 1 GB there."""
     a = cfg.get("args", [])
     changed = False
+    # Momoe: an engine (and image encoder) set up under Strata's names, renamed by momoe_names
+    for holder in (cfg, cfg.get("vision") if isinstance(cfg.get("vision"), dict) else {}):
+        exe = Path(holder.get("exe") or "")
+        if exe.name in STRATA_NAMES and not exe.exists() and (exe.parent / STRATA_NAMES[exe.name]).exists():
+            holder["exe"] = str(exe.parent / STRATA_NAMES[exe.name])
+            changed = True
     ver = engine_version(cfg["exe"]) if "--prefill" in a else (0, 0, 0)
     if "--prefill" in a and a[a.index("--prefill") + 1] == "2048" and ver >= (0, 1, 13):
         a[a.index("--prefill") + 1] = "auto"
@@ -5375,6 +5396,8 @@ def main() -> int:
         else:
             ap.error(f"--gpu takes a GPU number as nvidia-smi numbers them, e.g. --gpu 1 (or --gpus 0,2), not {a.gpu!r}")
     say("Strata - Qwen3.8-Flash-Next on a normal PC (a GPU + system RAM + CPU)")
+    for d in (engine_dir(13), engine_dir(12)):          # Momoe: an engine installed under Strata's names
+        momoe_names(d)
     data, elsewhere = data_folder(a.data_dir)          # the model files: in the data folder, found from any copy
     roots = [data, *elsewhere]
     if a.models_dir is None:

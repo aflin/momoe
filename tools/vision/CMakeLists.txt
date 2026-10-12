@@ -58,4 +58,5 @@ add_subdirectory(${LLAMA_DIR} llama EXCLUDE_FROM_ALL)
 add_executable(strata-vision strata_vision.cpp)
 target_link_libraries(strata-vision PRIVATE mtmd llama)
 target_compile_features(strata-vision PRIVATE cxx_std_17)
-set_target_properties(strata-vision PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set_target_properties(strata-vision PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+                      OUTPUT_NAME momoe-vision)   # Momoe: the encoder's name (the target keeps Strata's)

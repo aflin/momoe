@@ -173,7 +173,7 @@ def engine_error(log: str | None, since: int = 0) -> str | None:
             lines = [x.strip() for x in f.read()[-16384:].decode("utf-8", "replace").splitlines() if x.strip()]
     except OSError:
         return None
-    return next((x for x in reversed(lines) if x.startswith(("strata", "ERR"))), lines[-1] if lines else None)
+    return next((x for x in reversed(lines) if x.startswith(("momoe", "strata", "ERR"))), lines[-1] if lines else None)
 
 
 def sweep(s, values: list, base_tune: dict, key: str, label: str, say) -> dict:

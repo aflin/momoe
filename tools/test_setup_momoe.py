@@ -80,6 +80,41 @@ class Setup(q36.Base):
         self.assertNotIn(self.t / "package.json", setup.model_config_files(self.t))
 
 
+class EngineNames(unittest.TestCase):
+    """The engine is momoe(.exe) and the encoder momoe-vision(.exe): an engine folder set up under Strata's names, or
+    a ready-made engine (Strata's release), is renamed, and a config pointing at the old names follows."""
+
+    def test_rename_and_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            eng = Path(d)
+            old_exe, old_vexe = (eng / n for n in setup.STRATA_NAMES)
+            old_exe.write_bytes(b"engine")
+            old_vexe.write_bytes(b"encoder")
+            setup.momoe_names(eng)
+            self.assertEqual((eng / setup.EXE).read_bytes(), b"engine")
+            self.assertEqual((eng / setup.VEXE).read_bytes(), b"encoder")
+            self.assertFalse(old_exe.exists() or old_vexe.exists())
+            setup.momoe_names(eng)                                       # again: nothing to do
+            cfg_path = eng / "strata-x.json"
+            cfg = {"exe": str(old_exe), "args": [], "vision": {"exe": str(old_vexe)}}
+            cfg_path.write_text(json.dumps(cfg))
+            with mock.patch.object(setup, "is_wsl", lambda: False):
+                got = setup.upgrade_config(cfg_path, cfg)
+            self.assertEqual(got["exe"], str(eng / setup.EXE))
+            self.assertEqual(got["vision"]["exe"], str(eng / setup.VEXE))
+            self.assertEqual(json.loads(cfg_path.read_text())["exe"], str(eng / setup.EXE))
+
+    def test_a_momoe_engine_is_kept(self):
+        with tempfile.TemporaryDirectory() as d:
+            eng = Path(d)
+            old = eng / next(iter(setup.STRATA_NAMES))
+            old.write_bytes(b"old")
+            (eng / setup.EXE).write_bytes(b"new")
+            setup.momoe_names(eng)
+            self.assertEqual((eng / setup.EXE).read_bytes(), b"new")       # not replaced by the Strata-named one
+            self.assertTrue(old.exists())
+
+
 class Momoe(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
