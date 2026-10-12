@@ -1,0 +1,18 @@
+# Momoe design notes
+
+Design choices made for Momoe, proposed or implemented, one file each. `docs/` is Strata's and changes with every merge
+from upstream; these are Momoe's own and stay out of it.
+
+Each note starts with its status:
+
+- **Proposed**: written up, not built.
+- **Accepted**: decided, being built.
+- **Implemented**: in the code; the note names the commit.
+- **Rejected**: decided against; the note says why, so it is not proposed again.
+
+Keep the style of the docs: plain words, measured numbers with what they were measured on, and estimates marked as
+estimates.
+
+| Note | Status | Summary |
+|---|---|---|
+| [conversation-cache-file-spill.md](conversation-cache-file-spill.md) | Proposed | When RAM is short, park conversations in a memory-mapped file instead of pinned RAM |
