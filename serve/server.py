@@ -488,7 +488,7 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
                 if "PLE on" in line or "expert arena:" in line or "experts via mmap" in line:   # #505: mapped
                     say("arena", f"[strata] {loading}\n"
                                  "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.\n"
-                                 "         Please wait and don't close this window; the browser opens when it is ready.")
+                                 "         Please wait: the server says when it is ready.")
                 elif " loaded " in line and "GiB at" in line:
                     say("loaded", "[strata] experts loaded: " + line.split(" loaded ", 1)[1].strip() +
                         f" ({time.time() - t0:.0f} s so far)")

@@ -48,5 +48,8 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
 /// out[t][r] = down_r . hq[t] for rows r in [r0, r1).
 void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const* hq, int nt, float* const* out,
                       int r0, int r1);
+/// The same with the down rows at `down` (native_down_rows passes blob + f.down_off).
+void native_down_rows_at(const NativeFmt& f, const uint8_t* down, const void* const* hq, int nt, float* const* out,
+                         int r0, int r1);
 
 }  // namespace strata::kernels::cpu

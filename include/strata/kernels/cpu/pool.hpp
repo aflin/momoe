@@ -61,6 +61,10 @@ struct ExpertJobMulti {
     float* out[MAXT] = {};
     /// Plan v0.3 P6: a native pack's activations (the layer's `vec_dot_type`), one per token.
     const void* nact[MAXT] = {};
+    /// Momoe: an expert read in place from the GGUF (ExpertSource::roles): its up rows at `up` (after the gate rows
+    /// at `blob`) and its down rows at `down`, not at blob + up_off / blob + down_off.  Null: the one contiguous blob.
+    const uint8_t* up = nullptr;
+    const uint8_t* down = nullptr;
 };
 
 /// How worker threads are allocated across physical/logical CPU cores (#272).  `All` is the layout the pool has

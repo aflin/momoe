@@ -198,6 +198,11 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
 
 void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const* hq, int nt, float* const* out,
                       int r0, int r1) {
+    native_down_rows_at(f, blob + f.down_off, hq, nt, out, r0, r1);
+}
+
+void native_down_rows_at(const NativeFmt& f, const uint8_t* down, const void* const* hq, int nt, float* const* out,
+                         int r0, int r1) {
     // IQ4_NL down rows: the AVX-2 multi-token kernel decodes the nibbles and absolutises the weights once per
     // block instead of once per token; ggml-cpu's dot is single-token.  STRATA_NO_IQ4NL falls back to it.
     static const bool iq4nl_mt = std::getenv("STRATA_NO_IQ4NL") == nullptr;
@@ -207,23 +212,23 @@ void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const
     // so a CPU without AVX2 has to reach ggml-cpu's vec_dot instead - same reasoning as the gate/up
     // rows above, where `avx512` tested cpu_avx512_ok() and `avx2` did not.
     if (cpu_avx2_ok() && kq && nt >= 2 && (f.d_type == 7 || f.d_type == 8)) {   // Q5_1 / Q8_0 down: bit-exact, any group size
-        kq256_rows(f.d_type, blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
+        kq256_rows(f.d_type, down, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
         return;
     }
     if (cpu_avx2_ok() && nt >= mt_min && f.d_type == 20 && iq4nl_mt) {   // #152: the same rule as the gate/up rows
-        iq4nl256_down_rows(blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
+        iq4nl256_down_rows(down, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
         return;
     }
     // the older-CPU tier: IQ4_NL and Q2_0 down rows in 128-bit (ggml-cpu's dots for both are scalar here)
     static const bool avx1 = !cpu_avx2_ok() && cpu_avx1_ok() && std::getenv("STRATA_NO_IQ128") == nullptr;
     if (avx1 && iq128_down_supported(f.d_type)) {
-        iq128_down_rows(f.d_type, blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
+        iq128_down_rows(f.d_type, down, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
         return;
     }
     const ggml_vec_dot_t dot = traits(f.d_type)->vec_dot;
     const int n = (int) f.n_ff;
     for (int r = r0; r < r1; ++r) {
-        const uint8_t* dr = blob + f.down_off + (size_t) r * f.d_row;
+        const uint8_t* dr = down + (size_t) r * f.d_row;
         for (int t = 0; t < nt; ++t) {
             float s = 0.f;
             dot(n, &s, 0, dr, 0, hq[t], 0, 1);

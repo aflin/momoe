@@ -222,6 +222,20 @@ from the GGUF gave identical tokens and logits. An expert read from the GGUF is 
 engine fetches a layer's missing experts on 8 threads (`STRATA_FETCH_THREADS`) with one batched page request
 (Windows `PrefetchVirtualMemory`). With an `experts.bin` in the pack, nothing changes. Setup does not use this yet.
 
+**Momoe: the CPU reads those experts in place.** The GGUF keeps an expert's gate, up and down rows in three tensors,
+and the CPU kernels took one contiguous blob, so every missed expert was copied together (on new threads, every
+layer of every verify window) before the CPU computed it: on Ornith-1.5 IQ4_XS that was 165 GB of copies per
+500-token answer with nothing read from the drive. The pool now takes the up and down rows' addresses (the gate
+rows at the blob), so the mapped file is read where it lies (`ExpertSource::roles`). Layers whose up tensor lies
+before the gate tensor in the file, and the unbuffered and `STRATA_IO_PREFETCH` paths, assemble as before;
+`STRATA_ROLES_IN_PLACE=0` assembles everywhere. The bits are the assembled blob's (`pool_roles_test`: IQ4_XS,
+Q4_0, IQ3_S/IQ4_NL and IQ4_XS/Q8_0 experts laid out as in a GGUF, 1-8 tokens, 1 and 3 workers). Measured on an
+RTX 4070 Ti, Ryzen 9 5950X, 62 GB, Ornith-1.5 IQ4_XS with `--mmap-experts`, 256K context, 4096 MiB kept free, the
+page cache warm, 6 answers of 500 tokens: 49.7-58.0 tokens/s against 16.0-22.7 with the copies (the page-locked
+default: 57.1-65.6). 24K-token prompts are unchanged (343-361 tokens/s against 336-365): the prompt path still
+copies the experts it streams. Mapped mode's output varies from run to run with or without this (the cache and
+the prompt path's CPU share follow timing), so the check is the kernel test, not the answers.
+
 **Linux file-tier I/O path (opt in, `STRATA_IO_PREFETCH=1`; 0.1.40.2):** the mapped file tier reads experts through
 page faults. With this on, the layer's uncached experts and the router-predicted ones of the next layer (`STRATA_LOOKAHEAD_K`,
 `STRATA_IO_PREFETCH_DEPTH`, default 2 when on) are read by I/O threads (`STRATA_IO_PF_THREADS`, default 8) with whole-blob

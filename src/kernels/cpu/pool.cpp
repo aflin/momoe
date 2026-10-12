@@ -635,6 +635,10 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
                 const int e = (int) (r / per), r0 = (int) (r % per);
                 const int r1 = (int) std::min<int64_t>(per, r0 + (g1 - r));
                 SplitBufMulti& sb = split_multi_[(size_t) e];
+                // Momoe: an expert read in place from the GGUF names its up and down rows (ExpertSource::roles)
+                const ExpertJobMulti& jm = mjobs_[e];
+                const uint8_t* up_rows = jm.up != nullptr ? jm.up : jm.blob + nfmt_->up_off;
+                const uint8_t* down_rows = jm.down != nullptr ? jm.down : jm.blob + nfmt_->down_off;
                 if (mode_ == 5 && q2_native_kernels(nfmt_->gu_type)) {
                     // a native Q2_0 pack: gate and up rows on the Q2_0 kernels, then SwiGLU
                     thread_local float gbuf[MAXT][FF], ubuf[MAXT][FF];
@@ -643,24 +647,30 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
                     for (int t = 0; t < mjobs_[e].nt; ++t) { gp[t] = gbuf[t]; up[t] = ubuf[t]; }
                     const int nbk = (int) (nfmt_->n_embd / 64);
                     q2_rows_any(mjobs_[e].blob, nfmt_->gu_row, nbk, mjobs_[e].act, mjobs_[e].nt, gp, r0, r1);
-                    q2_rows_any(mjobs_[e].blob + nfmt_->up_off, nfmt_->gu_row, nbk, mjobs_[e].act, mjobs_[e].nt, up, r0, r1);
+                    q2_rows_any(up_rows, nfmt_->gu_row, nbk, mjobs_[e].act, mjobs_[e].nt, up, r0, r1);
                     for (int t = 0; t < mjobs_[e].nt; ++t)
                         for (int r = r0; r < r1; ++r)
                             sb.ff[t][r] = (gbuf[t][r] / (1.f + std::exp(-gbuf[t][r]))) * ubuf[t][r];
                 } else if (mode_ == 5) {
                     float* ff[MAXT];
                     for (int t = 0; t < mjobs_[e].nt; ++t) ff[t] = sb.ff[t];
-                    native_gu_rows(*nfmt_, mjobs_[e].blob, mjobs_[e].nact, mjobs_[e].nt, ff, r0, r1);
+                    if (jm.up == nullptr) {
+                        native_gu_rows(*nfmt_, mjobs_[e].blob, mjobs_[e].nact, mjobs_[e].nt, ff, r0, r1);
+                    } else {   // the kernels take the up rows as an offset from the gate rows (roles() keeps it positive)
+                        NativeFmt f = *nfmt_;
+                        f.up_off = (size_t) (jm.up - jm.blob);
+                        native_gu_rows(f, mjobs_[e].blob, mjobs_[e].nact, mjobs_[e].nt, ff, r0, r1);
+                    }
                 } else if (q2_native_kernels(nfmt_->d_type)) {
                     // Q2_0 down (most IQ layers): the AVX-512 kernel, ggml-cpu has only a scalar one on x86
                     const ActQ* a2[MAXT];
                     for (int t = 0; t < mjobs_[e].nt; ++t) a2[t] = &sb.a2[t];
-                    q2_rows_any(mjobs_[e].blob + nfmt_->down_off, nfmt_->d_row, (int) (nfmt_->n_ff / 64), a2,
+                    q2_rows_any(down_rows, nfmt_->d_row, (int) (nfmt_->n_ff / 64), a2,
                                 mjobs_[e].nt, mjobs_[e].out, r0, r1);
                 } else {
                     const void* hq[MAXT];
                     for (int t = 0; t < mjobs_[e].nt; ++t) hq[t] = sb.hq[t];
-                    native_down_rows(*nfmt_, mjobs_[e].blob, hq, mjobs_[e].nt, mjobs_[e].out, r0, r1);
+                    native_down_rows_at(*nfmt_, down_rows, hq, mjobs_[e].nt, mjobs_[e].out, r0, r1);
                 }
                 r += r1 - r0;
             }

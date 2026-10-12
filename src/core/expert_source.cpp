@@ -1177,6 +1177,18 @@ bool FileExpertSource::open_gguf(std::string& err) {
         }
     }
     base_ = maps_.front().base;       // "opened"; mapped_blob answers nullptr in this mode
+    // Momoe: the CPU reads a layer's experts in place when its up slice lies after its gate slice in the same file
+    // (the kernels take up as an offset from gate) and gate and up are the same size (one type and shape)
+    roles_ok_.assign((size_t) n_layers_, 0);
+    for (int64_t l = 0; l < n_layers_; ++l) {
+        const size_t g = (size_t) (3 * l), u = g + 1;
+        roles_ok_[(size_t) l] = role_file_[g] == role_file_[u] && role_ptr_[u] > role_ptr_[g] &&
+                                role_bytes_[g] == role_bytes_[u] ? 1 : 0;
+    }
+    {
+        const char* v = std::getenv("STRATA_ROLES_IN_PLACE");
+        roles_on_ = v == nullptr || std::atoi(v) != 0;
+    }
     warm_stamp_.reset(new std::atomic<uint32_t>[(size_t) (n_layers_ * n_expert_)]());
     for (uint64_t b : layer_blob_bytes_) stage_blob_ = std::max(stage_blob_, b);
     return true;
@@ -1423,6 +1435,33 @@ const uint8_t* FileExpertSource::staged_blob(int64_t layer, int64_t expert) {
     return ok ? dst : nullptr;
 }
 
+bool FileExpertSource::roles_serve(int64_t layer, size_t index) const {
+    if (!roles_on_ || role_ptr_.empty() || unmapped_ || !direct_.empty() || io_pf_ || !roles_ok_[(size_t) layer])
+        return false;
+    if (complement_ready_ && resident_blob(index) != nullptr) return false;   // the RAM copy's blob
+    return override_.empty() || override_[index] == nullptr;                  // an exchange's blob
+}
+
+bool FileExpertSource::roles(int64_t layer, int64_t expert, const uint8_t*& gate, const uint8_t*& up,
+                             const uint8_t*& down) {
+    if (base_ == nullptr || layer < 0 || expert < 0 || layer >= n_layers_ || expert >= n_expert_) return false;
+    const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
+    if (!roles_serve(layer, index)) return false;
+    const uint8_t* p[3];
+    for (int r = 0; r < 3; ++r) {
+        const size_t i = (size_t) (3 * layer + r);
+        p[r] = role_ptr_[i] + (size_t) ((uint64_t) expert * role_bytes_[i]);
+    }
+    gate = p[0];
+    up = p[1];
+    down = p[2];
+    file_read_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
+    file_blob_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
+    if (complement_ready_) file_reads_.fetch_add(1, std::memory_order_relaxed);
+    ++reads_;
+    return true;
+}
+
 void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n) {
     if (!staged() || n <= 0 || layer < 0 || layer >= n_layers_) return;
     if (io_fill_ && io_pf_ && direct_.empty()) {   // hand the layer's uncached blobs to the workers and go on: the kernels
@@ -1463,6 +1502,7 @@ void FileExpertSource::prefetch(int64_t layer, const int64_t* experts, int64_t n
             if (complement_ready_ && resident_blob(index) != nullptr)
                 continue;                                     // in the RAM copy
             if (!override_.empty() && override_[index] != nullptr) continue;
+            if (roles_serve(layer, index)) continue;          // Momoe: read in place (roles), nothing to assemble
             if (only_uncached && !cold[(size_t) i] && stage_of_.find(layer * n_expert_ + e) == stage_of_.end()) continue;
             size_t v = 0;
             bool fill = false;
@@ -3882,7 +3922,12 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             ++d.cache_refused;
             int16_t& jo = d.job_of[(size_t) e];
             if (jo < 0) {
-                const uint8_t* b = d.src->blob(d.layers, e);
+                // Momoe: a native layer read in place from the GGUF (ExpertSource::roles) needs no assembled blob
+                const uint8_t *b = nullptr, *up = nullptr, *down = nullptr;
+                if (!native || !d.src->roles(d.layers, e, b, up, down)) {
+                    b = d.src->blob(d.layers, e);
+                    up = down = nullptr;
+                }
                 if (b == nullptr) {
                     d.failed = true;
                     d.fail = "the expert source could not produce a blob";
@@ -3894,6 +3939,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 jo = (int16_t) njobs++;
                 ExpertJobMulti& nj = d.jobs_multi[(size_t) jo];
                 nj.blob = b;
+                nj.up = up;
+                nj.down = down;
                 nj.nt = 0;
             }
             ExpertJobMulti& jb = d.jobs_multi[(size_t) jo];

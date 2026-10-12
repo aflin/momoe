@@ -169,6 +169,13 @@ public:
     /// A blob pointer that stays valid (not recycled) for as long as the source is open: for a copy that runs
     /// asynchronously long after the call (the adaptive tier's swap-ins).  Defaults to `blob`.
     virtual const uint8_t* blob_stable(int64_t layer, int64_t expert) { return blob(layer, expert); }
+    /// Momoe: the expert's gate, up and down rows where they lie in the model file, for the CPU to read in place
+    /// instead of an assembled blob (up after gate, so the kernels' up_off stays positive).  False: use `blob`.  A
+    /// true answer counts as a read, as `blob` does.  The pointers stay valid while the source is open.
+    virtual bool roles(int64_t layer, int64_t expert, const uint8_t*& gate, const uint8_t*& up, const uint8_t*& down) {
+        (void) layer; (void) expert; (void) gate; (void) up; (void) down;
+        return false;
+    }
     /// The caller has queued an asynchronous copy out of `blob` (a pointer this source handed out) on `stream` (a
     /// cudaStream_t): the source must not overwrite or recycle that memory until the copy has finished.  A source whose
     /// pointers are never recycled ignores it.  (#1237: a page-locked stage buffer is read by the DMA after the copy call
@@ -681,6 +688,11 @@ public:
     bool advise_pairs(const std::pair<int32_t, int32_t>* pairs, int64_t n) const override;
 
     const uint8_t* blob(int64_t layer, int64_t expert) override;
+    /// Momoe: the GGUF in place, read through the mapping: the three role slices themselves, so a missed expert is
+    /// not assembled into a staging buffer first (STRATA_ROLES_IN_PLACE=0 assembles it, as before).  Not for an
+    /// expert in the RAM copy or an exchange, not unbuffered or with io prefetch, not where a layer's up tensor lies
+    /// before its gate tensor in the file.
+    bool roles(int64_t layer, int64_t expert, const uint8_t*& gate, const uint8_t*& up, const uint8_t*& down) override;
     /// With io prefetch in the experts.bin tier, the mapping itself (blob() may hand out a recycled staging buffer).
     const uint8_t* blob_stable(int64_t layer, int64_t expert) override;
     void note_async_read(const uint8_t* blob, void* stream) override;
@@ -782,6 +794,9 @@ private:
     std::vector<Map> maps_;
     std::vector<const uint8_t*> role_ptr_;    ///< 3 x n_layers: gate / up / down of the layer's expert 0
     std::vector<uint64_t> role_bytes_;        ///< 3 x n_layers: bytes per expert of that role
+    std::vector<uint8_t> roles_ok_;           ///< Momoe, per layer: roles() serves it (up after gate, in one file)
+    bool roles_on_ = false;                   ///< Momoe: roles() in use (the GGUF in place, mapped, not opted out)
+    bool roles_serve(int64_t layer, size_t index) const;
     // the blobs assembled for `blob()`: a small pool of buffers, one per recent (layer, expert).  A buffer is
     // reused only once `kStageAge` layer changes have passed since its blob was last asked for, so a pointer holds
     // through the layer it was asked in and the next ones (the pool computes a layer's misses before the next).
