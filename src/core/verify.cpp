@@ -348,7 +348,7 @@ void release_live_verifiers(std::FILE* f) {
             const Clock::time_point t0 = Clock::now();
             const bool done = v->release_gpu_waits(5000);
             if (f != nullptr)
-                std::fprintf(f, "strata: released the verify window's GPU waits (#267): the GPU %s\n",
+                std::fprintf(f, "momoe: released the verify window's GPU waits (#267): the GPU %s\n",
                              done ? ("finished in " + std::to_string((long long) ms_since(t0)) + " ms").c_str()
                                   : "did not finish within 5 s");
         }
@@ -818,7 +818,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         }
         if (!ok2) { cudaGetLastError(); all_resident_ = false; device_plan_ = false; }
     }
-    std::fprintf(stderr, "strata verify: window up to %d tokens, %.1f MiB of device buffers%s\n", max_t,
+    std::fprintf(stderr, "momoe verify: window up to %d tokens, %.1f MiB of device buffers%s\n", max_t,
                  (double) count.used / 1048576.0,
                  all_resident_ ? " (100% VRAM resident: zero-doorbell graph)" : "");
     return true;
@@ -1891,7 +1891,7 @@ void Verifier::refresh_ar() {
     const bool off = lo < 0;
     if (off != ar_off_) {
         ar_off_ = off;
-        std::fprintf(stderr, "strata verify: layers [%lld, %lld) %s\n", (long long) lb_, (long long) (le_ < 0 ? g_->n_layers : le_),
+        std::fprintf(stderr, "momoe verify: layers [%lld, %lld) %s\n", (long long) lb_, (long long) (le_ < 0 ? g_->n_layers : le_),
                      off ? "have experts out of VRAM (a prompt loan, a shrink or a swap): the doorbell graph runs the windows"
                          : "are 100% VRAM resident again: the zero-doorbell graph");
     }
@@ -1903,7 +1903,7 @@ bool Verifier::capture(int T, std::string& err) {
     {   // said before the capture: a process that exits inside it (#1275: Windows, 313 MiB free) leaves this line as the trace
         size_t free_b = 0, total_b = 0;
         if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess)
-            std::fprintf(stderr, "strata verify: capturing the %d-token window (%zu MiB of VRAM free)\n", T, free_b >> 20);
+            std::fprintf(stderr, "momoe verify: capturing the %d-token window (%zu MiB of VRAM free)\n", T, free_b >> 20);
         else
             (void) cudaGetLastError();
     }
@@ -1951,7 +1951,7 @@ bool Verifier::capture(int T, std::string& err) {
         std::vector<std::pair<int, std::string>> v;
         for (auto& [k2, c] : kinds) v.push_back({c, k2});
         std::sort(v.rbegin(), v.rend());
-        std::fprintf(stderr, "strata verify: the %d-token window graph has %zu nodes:", T, nn);
+        std::fprintf(stderr, "momoe verify: the %d-token window graph has %zu nodes:", T, nn);
         for (size_t i = 0; i < v.size() && i < 80; ++i) std::fprintf(stderr, "\n %4d x %.110s", v[i].first, v[i].second.c_str());
         std::fprintf(stderr, "\n%s\n", seq.c_str());
     }
@@ -1982,7 +1982,7 @@ bool Verifier::capture(int T, std::string& err) {
         std::vector<std::pair<int, std::string>> v;
         for (auto& [k2, c] : kinds) v.push_back({c, k2});
         std::sort(v.rbegin(), v.rend());
-        std::fprintf(stderr, "strata verify: the %d-token window graph has %zu nodes:", T, nn);
+        std::fprintf(stderr, "momoe verify: the %d-token window graph has %zu nodes:", T, nn);
         for (size_t i = 0; i < v.size() && i < 40; ++i) std::fprintf(stderr, " %d x %.60s;", v[i].first, v[i].second.c_str());
         std::fprintf(stderr, "\n");
 #if CUDART_VERSION >= 12030   // the programmatic (PDL) edges: CUDA allows them only from a kernel node to a kernel node
@@ -2009,7 +2009,7 @@ bool Verifier::capture(int T, std::string& err) {
                 ++bad;
         }
         if (ge != cudaSuccess) cudaGetLastError();
-        std::fprintf(stderr, "strata verify: %zu edges, %zu programmatic (PDL), %zu of them not kernel to kernel%s\n", ne,
+        std::fprintf(stderr, "momoe verify: %zu edges, %zu programmatic (PDL), %zu of them not kernel to kernel%s\n", ne,
                      prog, bad, ge != cudaSuccess ? " (the edge query failed)" : "");
 #endif
     }
@@ -2019,7 +2019,7 @@ bool Verifier::capture(int T, std::string& err) {
     if (!made) return false;
     const cudaError_t ue = cudaGraphUpload(exec_t, cs_);
     const cudaError_t us = cudaStreamSynchronize(cs_);
-    std::fprintf(stderr, "strata verify: captured the %d-token window (upload %s, sync %s)\n", T,
+    std::fprintf(stderr, "momoe verify: captured the %d-token window (upload %s, sync %s)\n", T,
                  cudaGetErrorString(ue), cudaGetErrorString(us));
     return true;
 }
@@ -2407,7 +2407,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
                 for (int64_t v = 0; v < n_vocab_; ++v) bad += !std::isfinite(h[(size_t) t * n_vocab_ + v]);
                 if (bad) {
                     reported = true;
-                    std::fprintf(stderr, "strata dbg: verify window at position %lld, row %d: %lld of %lld logits non-finite "
+                    std::fprintf(stderr, "momoe dbg: verify window at position %lld, row %d: %lld of %lld logits non-finite "
                                          "(token out %d)\n", (long long) pos0, t, (long long) bad, (long long) n_vocab_, out[t]);
                 }
             }
@@ -2630,7 +2630,7 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
     tail_snap_b_ = (float*) ((uint8_t*) d + a);
     slots_ = slots;
     slot_sp_.assign(slots.size(), sampling_);   // greedy until set_slot_sampling
-    std::fprintf(stderr, "strata verify: batch windows of up to %lld sequences (layers [%lld, %lld))\n", (long long) S,
+    std::fprintf(stderr, "momoe verify: batch windows of up to %lld sequences (layers [%lld, %lld))\n", (long long) S,
                  (long long) lb_, (long long) le_);
     return true;
 }
@@ -2663,7 +2663,7 @@ bool Verifier::capture_batch(const int* rows, int S, int hbase, std::string& err
     cudaStreamSynchronize(cs_);
     std::string list;
     for (int t = 0; t < S; ++t) list += (t ? "," : "") + std::to_string(rows[t]);
-    std::fprintf(stderr, "strata verify: captured the batch window over slots %s\n", list.c_str());
+    std::fprintf(stderr, "momoe verify: captured the batch window over slots %s\n", list.c_str());
     return true;
 }
 
@@ -2805,7 +2805,7 @@ bool Verifier::instantiate_evicting(cudaGraphExec_t& ex, cudaGraph_t graph, cons
         }
     }
     if (freed > 0)
-        std::fprintf(stderr, "strata verify: no VRAM for a new window graph: freed the graphs of %d older batch slot "
+        std::fprintf(stderr, "momoe verify: no VRAM for a new window graph: freed the graphs of %d older batch slot "
                              "layouts, %zu kept (a larger --vram-reserve-mib keeps more)\n", freed, exec_bm_.size());
     if (ie != cudaSuccess) {
         err = std::string(what) + cudaGetErrorString(ie);
@@ -3204,7 +3204,7 @@ void Verifier::note_nonfinite(int T, const int64_t* pos_b) {
         const long long k = g_nf_windows.fetch_add(1) + 1;
         if (nf_mask_ == 0 && std::find(inject.begin(), inject.end(), k) != inject.end()) {
             nf_mask_ = 1u;
-            std::fprintf(stderr, "strata verify: STRATA_NAN_INJECT: window %lld reported as non-finite\n", k);
+            std::fprintf(stderr, "momoe verify: STRATA_NAN_INJECT: window %lld reported as non-finite\n", k);
         }
     }
     for (int t = 0; t < T && nf_row_ < 0; ++t)

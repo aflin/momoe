@@ -539,8 +539,8 @@ class IQ4XS(Base):
         self.assertEqual(code, 1, out)
         self.assertNotIn("[ok] RAM", out)
         self.assertIn("[!]  RAM: 8 GB (less than", out)
-        self.assertIn("This PC cannot run Strata yet", out)
-        self.assertNotIn("This PC can run Strata", out)
+        self.assertIn("This PC cannot run Momoe yet", out)
+        self.assertNotIn("This PC can run Momoe", out)
 
     def test_engine_0138(self):
         code, out, cfg = self.main(["--context", "8192"], version="0.1.37", m=X)

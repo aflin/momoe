@@ -377,7 +377,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
         bytes_ = total + hc_q8_bytes;
         allocated_ = allocated;
         if (hc_q8_requested())
-            std::fprintf(stderr, "strata: STRATA_HC_Q8=1: %.2f GiB of Q8_0 hyper-connection projections for the verify read\n",
+            std::fprintf(stderr, "momoe: STRATA_HC_Q8=1: %.2f GiB of Q8_0 hyper-connection projections for the verify read\n",
                          (double) hc_q8_bytes / 1073741824.0);
         return true;
     } catch (const std::exception& error) {

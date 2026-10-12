@@ -189,7 +189,7 @@ cudaError_t adapt_copy_h2d(void* dst, const void* src, size_t bytes, cudaStream_
     static const bool kernel = [] {
         const char* e = std::getenv("STRATA_HIP_ADAPT_KERNEL_COPY");
         const bool on = e != nullptr && e[0] == '1';
-        if (on) std::fprintf(stderr, "strata: STRATA_HIP_ADAPT_KERNEL_COPY=1: adaptive swaps copy with a kernel, not SDMA (#884)\n");
+        if (on) std::fprintf(stderr, "momoe: STRATA_HIP_ADAPT_KERNEL_COPY=1: adaptive swaps copy with a kernel, not SDMA (#884)\n");
         return on;
     }();
     if (kernel && bytes % 16 == 0 && ((uintptr_t) src & 15) == 0 && ((uintptr_t) dst & 15) == 0) {
@@ -246,7 +246,7 @@ void rss_probe(const char* where) {
     while (std::fgets(line, sizeof line, f))
         if (std::strncmp(line, "RssFile:", 8) == 0) { kb = std::atoll(line + 8); break; }
     std::fclose(f);
-    std::fprintf(stderr, "strata rss: %s: RssFile %.2f GiB\n", where, (double) kb / (1024.0 * 1024.0));
+    std::fprintf(stderr, "momoe rss: %s: RssFile %.2f GiB\n", where, (double) kb / (1024.0 * 1024.0));
     std::fflush(stderr);
 }
 
@@ -302,7 +302,7 @@ bool resident_stage_swaps(strata::core::FileExpertSource& src, const std::vector
         if (const cudaError_t e = cudaMemcpyAsync(src.exchange_buffer(q), home.cache->device_slot(slot),
                             (size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer), cudaMemcpyDeviceToHost,
                             home.stream); e != cudaSuccess) {
-            std::fprintf(stderr, "strata: copy back of layer %d slot %d (device %d) failed: %s\n", (int) s.layer,
+            std::fprintf(stderr, "momoe: copy back of layer %d slot %d (device %d) failed: %s\n", (int) s.layer,
                          (int) slot, home.dev, cudaGetErrorString(e));
             return false;
         }
@@ -316,13 +316,13 @@ bool resident_stage_swaps(strata::core::FileExpertSource& src, const std::vector
         for (const SwapHome& u : used) {
             const strata::core::OnDevice on(u.dev);
             if (const cudaError_t e = cudaStreamSynchronize(u.stream); e != cudaSuccess) {
-                std::fprintf(stderr, "strata: copy back sync (device %d) failed: %s\n", u.dev, cudaGetErrorString(e));
+                std::fprintf(stderr, "momoe: copy back sync (device %d) failed: %s\n", u.dev, cudaGetErrorString(e));
                 return false;
             }
         }
         for (const Staged& x : staged)
             if (!src.stage_exchange(x.layer, x.in, x.out, x.q)) {
-                std::fprintf(stderr, "strata: stage_exchange refused layer %d in %d out %d\n", (int) x.layer,
+                std::fprintf(stderr, "momoe: stage_exchange refused layer %d in %d out %d\n", (int) x.layer,
                              (int) x.in, (int) x.out);
                 return false;
             }
@@ -1001,7 +1001,7 @@ void drive_pool(void* user, const float* x_f, const int32_t* ids, const float* w
         // anything keyed on the layer index, which is exactly what a cache profile is, would have been wrong.
         const int32_t layer_idx = (int32_t) (t->d.layers - 1);
         if (layer_idx < 0 || layer_idx >= 48) {
-            std::fprintf(stderr, "strata generate: the routing trace saw layer %d, outside 0..47\n", layer_idx);
+            std::fprintf(stderr, "momoe generate: the routing trace saw layer %d, outside 0..47\n", layer_idx);
             return;
         }
         const int32_t rec[2] = {layer_idx, (int32_t) k};
@@ -1263,7 +1263,7 @@ bool launch_blocking() {
 
 void stall_report(std::FILE* f, uint64_t layers_during) {
     strata::core::Progress& p = strata::core::progress();
-    std::fprintf(f, "strata serve: stall report (engine %s): stage \"%s\" for %lld s; %llu layers served since the "
+    std::fprintf(f, "momoe serve: stall report (engine %s): stage \"%s\" for %lld s; %llu layers served since the "
                     "last finished step (0 = stopped, more = slow)\n", STRATA_VERSION, stage_text().c_str(),
                  (long long) ((strata::core::progress_now_ms() - p.since_ms.load()) / 1000),
                  (unsigned long long) layers_during);
@@ -1317,7 +1317,7 @@ void mem_mark(const char* where) {
     if (!on) return;
     size_t free_b = 0, total_b = 0;
     cudaMemGetInfo(&free_b, &total_b);
-    std::fprintf(stderr, "strata trace: %lld MiB free after %s\n", (long long) (free_b >> 20), where);
+    std::fprintf(stderr, "momoe trace: %lld MiB free after %s\n", (long long) (free_b >> 20), where);
 }
 
 /// #463's A/B: STRATA_ADAPT_NOWAIT=1 lets a verify window start before the adaptive tier's copies have landed (0.1.37)
@@ -1470,7 +1470,7 @@ ConvStateSizes conv_state_sizes(const strata::core::ModelGeometry& g, const stra
 bool checkpoint_save(ConvCheckpoint& c, const strata::core::SessionState& ss, const strata::core::ModelGeometry& g) {
     std::string error;
     if (strata::core::conversation_checkpoint_save(c, ss, g, error)) return true;
-    std::fprintf(stderr, "strata serve: checkpoint save: %s\n", error.c_str());   // the caller's ERR has no reason
+    std::fprintf(stderr, "momoe serve: checkpoint save: %s\n", error.c_str());   // the caller's ERR has no reason
     return false;
 }
 
@@ -1478,7 +1478,7 @@ bool checkpoint_save(ConvCheckpoint& c, const strata::core::SessionState& ss, co
 bool checkpoint_restore(const ConvCheckpoint& c, strata::core::SessionState& ss, const strata::core::ModelGeometry& g) {
     std::string error;
     if (strata::core::conversation_checkpoint_restore(c, ss, g, error)) return true;
-    std::fprintf(stderr, "strata serve: checkpoint restore: %s\n", error.c_str());
+    std::fprintf(stderr, "momoe serve: checkpoint restore: %s\n", error.c_str());
     return false;
 }
 
@@ -1501,7 +1501,7 @@ bool load_control_vectors(const Options& o, const strata::core::ModelGeometry& g
             }
             const strata::MetaValue* hint = f.get("controlvector.model_hint");
             if (hint != nullptr && hint->s != "qwen4exp")
-                std::fprintf(stderr, "strata generate: %s was made for '%s', not qwen4exp\n", path.c_str(), hint->s.c_str());
+                std::fprintf(stderr, "momoe generate: %s was made for '%s', not qwen4exp\n", path.c_str(), hint->s.c_str());
             int found = 0;
             for (const strata::TensorInfo& t : f.tensors()) {
                 if (t.name.rfind("direction.", 0) != 0) continue;
@@ -1564,7 +1564,7 @@ bool load_control_vectors(const Options& o, const strata::core::ModelGeometry& g
     summary = std::string(o.cvec_mode == 0 ? "project" : "add") + ":" + std::to_string(first) + "-" + std::to_string(last) +
               (single >= 0 ? ":single" + std::to_string(single) : "");
     // the line llama.cpp's patched build prints, so a log shows the same thing
-    std::fprintf(stderr, "strata generate: control vector mode = %s, dir = %s, layers %d..%d (%d steered)\n",
+    std::fprintf(stderr, "momoe generate: control vector mode = %s, dir = %s, layers %d..%d (%d steered)\n",
                  o.cvec_mode == 0 ? "project" : "add", single >= 0 ? "single" : "per-layer", first, last, steered);
     return true;
 }
@@ -1897,7 +1897,7 @@ int main(int argc, char** argv) {
             char* end = nullptr;
             const long tasks = std::strtol(v, &end, 10);
             if (end == v || *end != '\0' || tasks < 0 || tasks > strata::kernels::cpu::ExpertPool::kMaxTasks) {
-                std::fprintf(stderr, "strata generate: --pool-tasks expects an integer in 0..4096 (0 = automatic)\n");
+                std::fprintf(stderr, "momoe generate: --pool-tasks expects an integer in 0..4096 (0 = automatic)\n");
                 return 2;
             }
             o.pool_tasks = (int) tasks;
@@ -1905,7 +1905,7 @@ int main(int argc, char** argv) {
         else if (a == "--host-core") {
             o.host_core = next("--host-core");
             if (o.host_core != "first" && o.host_core != "last") {
-                std::fprintf(stderr, "strata generate: unknown --host-core value '%s' (expected first or last)\n", o.host_core.c_str());
+                std::fprintf(stderr, "momoe generate: unknown --host-core value '%s' (expected first or last)\n", o.host_core.c_str());
                 return 2;
             }
         }
@@ -1914,7 +1914,7 @@ int main(int argc, char** argv) {
             std::string aerr;
             strata::aux_cpus::Config acfg;
             if (!strata::aux_cpus::parse_spec(o.aux_cpus, acfg, aerr)) {
-                std::fprintf(stderr, "strata generate: %s\n", aerr.c_str());
+                std::fprintf(stderr, "momoe generate: %s\n", aerr.c_str());
                 return 2;
             }
         }
@@ -1924,7 +1924,7 @@ int main(int argc, char** argv) {
             else if (v == "p-cores" || v == "pcores") o.pool_affinity = strata::kernels::cpu::PoolAffinity::PCores;
             else if (v == "all") o.pool_affinity = strata::kernels::cpu::PoolAffinity::All;
             else {
-                std::fprintf(stderr, "strata generate: unknown --pool-affinity value '%s' (expected auto, p-cores, or all)\n", v.c_str());
+                std::fprintf(stderr, "momoe generate: unknown --pool-affinity value '%s' (expected auto, p-cores, or all)\n", v.c_str());
                 return 2;
             }
         }
@@ -1973,7 +1973,7 @@ int main(int argc, char** argv) {
                 o.prefill_auto_cap = strata::platform::host_limits::auto_chunk_cap(win_hip, bare_auto && o.prefill_auto);
                 if (o.prefill_auto_cap > 0) o.prefill_chunk = std::min(o.prefill_chunk, o.prefill_auto_cap);
                 if (strata::platform::host_limits::warn_user_chunk(win_hip, bare_auto, o.prefill_chunk))
-                    std::fprintf(stderr, "strata: WARNING --prefill %s: prompt chunks of 8192 tokens or more crashed the engine "
+                    std::fprintf(stderr, "momoe: WARNING --prefill %s: prompt chunks of 8192 tokens or more crashed the engine "
                                          "on Windows HIP (RX 7900 XTX: the commit charge jumped ~70 GB, exit code 0xC0000409, "
                                          "#1630); 7500 and below were stable. Kept as asked; a bare --prefill auto stops at %lld\n",
                                  v.c_str(), (long long) strata::platform::host_limits::kWinHipAutoChunkCap);
@@ -2051,7 +2051,7 @@ int main(int argc, char** argv) {
         else if (a == "--mtp-hnorm") {
             const std::string v = next("--mtp-hnorm");
             if (v != "pooled" && v != "stream") {
-                std::fprintf(stderr, "strata generate: --mtp-hnorm takes pooled or stream\n");
+                std::fprintf(stderr, "momoe generate: --mtp-hnorm takes pooled or stream\n");
                 return 2;
             }
             o.mtp_hnorm_stream = v == "stream";
@@ -2059,7 +2059,7 @@ int main(int argc, char** argv) {
         else if (a == "--mtp-q4") {
             o.mtp_q4 = next("--mtp-q4");
             if (o.mtp_q4 != "all" && o.mtp_q4 != "proj" && o.mtp_q4 != "head") {
-                std::fprintf(stderr, "strata generate: --mtp-q4 takes all, proj or head\n");
+                std::fprintf(stderr, "momoe generate: --mtp-q4 takes all, proj or head\n");
                 return 2;
             }
         }
@@ -2131,7 +2131,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--resident-budget-gib") {
             const double gib = std::atof(next("--resident-budget-gib"));
-            if (!(gib > 0.0)) { std::fprintf(stderr, "strata generate: --resident-budget-gib needs N > 0\n"); return 2; }
+            if (!(gib > 0.0)) { std::fprintf(stderr, "momoe generate: --resident-budget-gib needs N > 0\n"); return 2; }
             o.resident_budget = (uint64_t) (gib * 1073741824.0);
             o.mmap_experts = o.resident_cpu_experts = o.resident_pin = true;
             o.resident_headroom = 4ull << 30;
@@ -2179,7 +2179,7 @@ int main(int argc, char** argv) {
             cudaGetDeviceProperties(&cp, 0) == cudaSuccess && strata::kernels::gfx_arch_is_gfx12(cp.gcnArchName)) {
             o.prefill_auto_max = 16384;
             o.prefill_chunk = 16384;
-            std::fprintf(stderr, "strata generate: gfx12: --prefill auto may take chunks up to 16384 (STRATA_GFX12_CHUNK=0 keeps 8192)\n");
+            std::fprintf(stderr, "momoe generate: gfx12: --prefill auto may take chunks up to 16384 (STRATA_GFX12_CHUNK=0 keeps 8192)\n");
         }
         (void) cudaGetLastError();
     }
@@ -2192,7 +2192,7 @@ int main(int argc, char** argv) {
             for (int d = 0; d < n_dev; ++d) {
                 cudaDeviceProp wp{};
                 if (cudaGetDeviceProperties(&wp, d) == cudaSuccess && wp.warpSize != 64) {
-                    std::fprintf(stderr, "strata generate: this engine was built for gfx906 (wave64, STRATA_HIP_GFX906), but GPU %d "
+                    std::fprintf(stderr, "momoe generate: this engine was built for gfx906 (wave64, STRATA_HIP_GFX906), but GPU %d "
                                          "(%s) has %d-lane waves: use the ready-made engine for that card, or hide it "
                                          "(HIP_VISIBLE_DEVICES)\n", d, wp.name, wp.warpSize);
                     return 2;
@@ -2215,7 +2215,7 @@ int main(int argc, char** argv) {
             if (const char* e = std::getenv("STRATA_AUX_CPUS")) ac = e;
         std::string aerr;
         if (!strata::aux_cpus::configure(ac, aerr)) {
-            std::fprintf(stderr, "strata generate: STRATA_AUX_CPUS: %s\n", aerr.c_str());
+            std::fprintf(stderr, "momoe generate: STRATA_AUX_CPUS: %s\n", aerr.c_str());
             return 2;
         }
     }
@@ -2238,10 +2238,10 @@ int main(int argc, char** argv) {
             constexpr double GiB = 1073741824.0;
             const auto mem = strata::core::sample_host_memory();
             if (!mem) {
-                std::fprintf(stderr, "strata generate: memory guard: the available RAM cannot be read; parking and session "
+                std::fprintf(stderr, "momoe generate: memory guard: the available RAM cannot be read; parking and session "
                                      "save/restore are refused\n");
             } else {
-                std::fprintf(stderr, "strata generate: memory guard: limit %.1f GiB (source: %s), current %.1f GiB, "
+                std::fprintf(stderr, "momoe generate: memory guard: limit %.1f GiB (source: %s), current %.1f GiB, "
                                      "reclaimable cache credited %.1f GiB; available %.1f GiB (MemAvailable %.1f GiB%s), "
                                      "floor %lld MiB\n",
                              (double) mem->limit / GiB, strata::core::memory_source_name(mem->source),
@@ -2253,7 +2253,7 @@ int main(int argc, char** argv) {
         }
     }
     if (o.serve && o.conversation_cache_mib > 0 && (o.prompt_cache == 0 || o.conversation_cache_slots == 0))
-        std::fprintf(stderr, "strata serve: warning: conversation caching is disabled by %s\n",
+        std::fprintf(stderr, "momoe serve: warning: conversation caching is disabled by %s\n",
                      o.prompt_cache == 0 ? "--prompt-cache 0" : "--conversation-cache-slots 0");
     // parking with --layer-split saves every stage (SavedConversation::stage_images)
     // Layer split (multi-GPU): the later stages run layers [K_i, K_i+1) on their own GPUs (--split-device, default
@@ -2292,12 +2292,12 @@ int main(int argc, char** argv) {
         if (ok && !split_auto && split_devs.empty() && split_at.size() == 1) split_devs.push_back(0);   // one GPU
         split_same = ok && split_devs.size() == 1 && split_devs[0] == 0 && !split_auto;
         if (split_same && o.conversation_cache_mib > 0 && o.conversation_cache_slots > 0 && o.prompt_cache > 0) {
-            std::fprintf(stderr, "strata serve: conversation parking does not support a layer split on one GPU "
+            std::fprintf(stderr, "momoe serve: conversation parking does not support a layer split on one GPU "
                                  "(--split-device 0); disable parking with --conversation-cache-mib 0\n");
             return 2;
         }
         if (ok && split_auto && split_devs.empty()) {
-            std::fprintf(stderr, "strata generate: --layer-split auto: one GPU visible, so no split\n");
+            std::fprintf(stderr, "momoe generate: --layer-split auto: one GPU visible, so no split\n");
             o.layer_split.clear();
             split_auto = false;
         } else if (ok) {
@@ -2309,7 +2309,7 @@ int main(int argc, char** argv) {
             }
         }
         if (!ok) {
-            std::fprintf(stderr, "strata generate: --layer-split K[,K2..]|auto needs --serve, rising K from 2, and one "
+            std::fprintf(stderr, "momoe generate: --layer-split K[,K2..]|auto needs --serve, rising K from 2, and one "
                                  "distinct GPU per K in --split-device (1..%d; or 0 with one K: the same GPU). K is the "
                                  "FIRST LAYER of each later GPU, not a count of layers per card: \"24,36,42\" for 4 "
                                  "GPUs, not \"24,12,6,6\" (got \"%s\")\n", n_dev - 1, o.layer_split.c_str());
@@ -2319,11 +2319,11 @@ int main(int argc, char** argv) {
     bool multi_gpu = !split_devs.empty() && !split_same;   // cleared by --split-skip-if-fits before any stage loads
     bool split_own_auto = false;   // #340: the split keeps own prompt buffers by its rule (not --no-prefill-borrow)
     if (o.mmap_experts && !o.shared_expert_arena.empty()) {
-        std::fprintf(stderr, "strata generate: --shared-expert-arena backs the resident arena and cannot be used with --mmap-experts\n");
+        std::fprintf(stderr, "momoe generate: --shared-expert-arena backs the resident arena and cannot be used with --mmap-experts\n");
         return 2;
     }
     if (o.resident_cpu_experts && (!o.mmap_experts || o.expert_profile.empty())) {
-        std::fprintf(stderr, "strata generate: --resident-cpu-experts requires --mmap-experts and a static --expert-profile\n");
+        std::fprintf(stderr, "momoe generate: --resident-cpu-experts requires --mmap-experts and a static --expert-profile\n");
         return 2;
     }
     const bool remote_caches = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 ||
@@ -2331,7 +2331,7 @@ int main(int argc, char** argv) {
     // A layer split keeps the resident RAM mode: every stage's GPU cache is left out of the RAM copy, and an adaptive
     // swap copies an evicted expert back from the card that owns its layer (resident_stage_swaps).
     if (o.resident_cpu_experts && remote_caches) {
-        std::fprintf(stderr, "strata generate: --resident-cpu-experts does not support remote expert caches\n");
+        std::fprintf(stderr, "momoe generate: --resident-cpu-experts does not support remote expert caches\n");
         return 2;
     }
     // the helper-GPU expert caches (--expert-cache-remote, docs/SECOND_GPU.md): CUDA1..3 on one GPU; with a layer
@@ -2339,7 +2339,7 @@ int main(int argc, char** argv) {
     int remote_dev[3] = {1, 2, 3};
     if (multi_gpu) {
         if (o.expert_profile.empty()) {
-            std::fprintf(stderr, "strata generate: a layer split across GPUs needs --expert-profile\n");
+            std::fprintf(stderr, "momoe generate: a layer split across GPUs needs --expert-profile\n");
             return 2;
         }
         // A STAGE'S PROMPT PATH BORROWS FROM THAT STAGE'S OWN EXPERT CACHE.  This used to set
@@ -2388,11 +2388,11 @@ int main(int argc, char** argv) {
             if (own) {
                 o.no_prefill_borrow = true;
                 split_own_auto = true;
-                std::fprintf(stderr, "strata generate: layer split: every stage keeps its own prompt buffers (~%lld MiB "
+                std::fprintf(stderr, "momoe generate: layer split: every stage keeps its own prompt buffers (~%lld MiB "
                                      "each, %lld-token chunks)%s\n", (long long) reserve_mib, (long long) own_chunk,
                              v ? " (STRATA_SPLIT_OWN=1)" : "");
             } else if (!why.empty()) {
-                std::fprintf(stderr, "strata generate: layer split: the prompt paths borrow from the caches (%s)\n",
+                std::fprintf(stderr, "momoe generate: layer split: the prompt paths borrow from the caches (%s)\n",
                              why.c_str());
             }
         }
@@ -2405,7 +2405,7 @@ int main(int argc, char** argv) {
             while (next_free < n_vis &&
                    std::find(split_devs.begin(), split_devs.end(), next_free) != split_devs.end()) ++next_free;
             if (next_free >= n_vis) {
-                std::fprintf(stderr, "strata generate: --expert-cache-remote with a layer split needs a GPU that runs no "
+                std::fprintf(stderr, "momoe generate: --expert-cache-remote with a layer split needs a GPU that runs no "
                                      "stage (%d visible, %zu used by the split)\n", n_vis, split_devs.size() + 1);
                 return 2;
             }
@@ -2413,7 +2413,7 @@ int main(int argc, char** argv) {
         }
         std::string devs;
         for (const int d : split_devs) devs += (devs.empty() ? "" : ",") + std::to_string(d);
-        std::fprintf(stderr, "strata generate: layer split across %zu GPUs: CUDA0, then CUDA%s (split %s)\n",
+        std::fprintf(stderr, "momoe generate: layer split across %zu GPUs: CUDA0, then CUDA%s (split %s)\n",
                      split_devs.size() + 1, devs.c_str(), o.layer_split.c_str());
     }
 #if defined(STRATA_USE_HIP)
@@ -2426,7 +2426,7 @@ int main(int argc, char** argv) {
             if (o.expert_cache_remote[(size_t) r] > 0) used.push_back(remote_dev[r]);
         for (const int d : used) {
             if (const std::string why = strata::core::gpu_arch_problem(d); !why.empty()) {
-                std::fprintf(stderr, "strata generate: %s\n", why.c_str());
+                std::fprintf(stderr, "momoe generate: %s\n", why.c_str());
                 return 1;
             }
         }
@@ -2443,7 +2443,7 @@ int main(int argc, char** argv) {
         o.stop_eos = true;
     }
     if (!have_tokens) {
-        std::fprintf(stderr, "strata generate: --tokens is required (this build has no tokenizer; see the "
+        std::fprintf(stderr, "momoe generate: --tokens is required (this build has no tokenizer; see the "
                              "header of src/program/generate.cpp)\n");
         usage();
         return 2;
@@ -2451,12 +2451,12 @@ int main(int argc, char** argv) {
 
     if ((o.ple_io != "direct" && o.ple_io != "mmap" && o.ple_io != "ram") || o.ple_row_cache < 0 || o.ple_inflight < 1 ||
         o.ple_inflight > 1024 || !(o.ple_delay_us >= 0)) {
-        std::fprintf(stderr, "strata generate: invalid --ple-io/--ple-row-cache/--ple-inflight/--ple-delay-us\n");
+        std::fprintf(stderr, "momoe generate: invalid --ple-io/--ple-row-cache/--ple-inflight/--ple-delay-us\n");
         return 2;
     }
     if (o.kv == "q4") o.kv = "q4_0";
     if (o.kv != "fp16" && o.kv != "int8" && o.kv != "q4_0" && o.kv != "k8v4") {
-        std::fprintf(stderr, "strata generate: --kv must be fp16, int8, q4_0 or k8v4\n");
+        std::fprintf(stderr, "momoe generate: --kv must be fp16, int8, q4_0 or k8v4\n");
         return 2;
     }
     strata::core::qsa_set_kv_int8(o.kv == "int8");
@@ -2466,10 +2466,10 @@ int main(int argc, char** argv) {
     const char* kv_rot = std::getenv("STRATA_KV_ROT");
     strata::core::qsa_set_kv_int8_rotate(kv_rot != nullptr && kv_rot[0] == '1');
     if (kv_rot != nullptr && kv_rot[0] == '1' && o.kv == "int8")
-        std::fprintf(stderr, "strata generate: STRATA_KV_ROT=1: INT8 K/V through the Hadamard rotation (opt-in)\n");
+        std::fprintf(stderr, "momoe generate: STRATA_KV_ROT=1: INT8 K/V through the Hadamard rotation (opt-in)\n");
     strata::core::qsa_set_kv_hybrid(o.kv == "k8v4");   // K8V4: INT8 K + rotated Q4_0 V, 816 B/cell
     if (o.kv_resident < 0) {
-        std::fprintf(stderr, "strata generate: --kv-resident must be >= 0\n");
+        std::fprintf(stderr, "momoe generate: --kv-resident must be >= 0\n");
         return 2;
     }
     strata::core::qsa_set_kv_resident(o.kv_resident);
@@ -2499,7 +2499,7 @@ int main(int argc, char** argv) {
             if (!strata::core::geometry_from_gguf(strata::GgufFile(o.native_shards.front()), model_geom, geom_err))
                 throw std::runtime_error(geom_err);
             if (model_geom.arch != strata::core::ModelArch::kQwen4Exp)
-                std::fprintf(stderr, "strata generate: model architecture %s: %lld layers, n_embd %lld, %lld experts "
+                std::fprintf(stderr, "momoe generate: model architecture %s: %lld layers, n_embd %lld, %lld experts "
                                      "(%lld per token), no PLE / hyper-connections / indexer\n",
                              strata::core::arch_name(model_geom.arch), (long long) model_geom.n_layers,
                              (long long) model_geom.n_embd, (long long) model_geom.n_expert,
@@ -2512,16 +2512,16 @@ int main(int argc, char** argv) {
                 if (model.find("per_layer_token_embd.weight", &at) != nullptr) o.ple_gguf = o.native_shards[at];
             }
         } catch (const std::exception& e) {
-            std::fprintf(stderr, "strata generate: --native %s: %s\n", o.native_preset.c_str(), e.what());
+            std::fprintf(stderr, "momoe generate: --native %s: %s\n", o.native_preset.c_str(), e.what());
             return 2;
         }
         if (model_geom.has_ple && (o.no_ple || o.ple_gguf.empty())) {
-            std::fprintf(stderr, "strata generate: --native requires --ple-gguf (the PLE key is native too), and no "
+            std::fprintf(stderr, "momoe generate: --native requires --ple-gguf (the PLE key is native too), and no "
                                  "shard of the model holds per_layer_token_embd.weight\n");
             return 2;
         }
         if (!model_geom.has_ple && !o.ple_gguf.empty()) {
-            std::fprintf(stderr, "strata generate: --ple-gguf: a %s model has no PLE table\n",
+            std::fprintf(stderr, "momoe generate: --ple-gguf: a %s model has no PLE table\n",
                          strata::core::arch_name(model_geom.arch));
             return 2;
         }
@@ -2529,7 +2529,7 @@ int main(int argc, char** argv) {
         // Qwen3.6 / Ornith (one residual stream): one GPU.  The layer split, the peer tier and the remote expert caches
         // carry Flash-Next's shapes (10 experts per token, 2560 wide) and have not been run with this model.
         if (!model_geom.has_hc() && (o.peer_device >= 1 || !o.layer_split.empty() || o.expert_cache_remote[0] > 0)) {
-            std::fprintf(stderr, "strata generate: a %s model runs on one GPU: %s is not supported for it\n",
+            std::fprintf(stderr, "momoe generate: a %s model runs on one GPU: %s is not supported for it\n",
                          strata::core::arch_name(model_geom.arch),
                          o.peer_device >= 1 ? "--peer-device" : !o.layer_split.empty() ? "--layer-split"
                                                                                        : "--expert-cache-device1..3");
@@ -2562,29 +2562,29 @@ int main(int argc, char** argv) {
         // cost 27.0 vs 17.2 ms/token of pool time and G-C does not need it; `--cpu-oracle-q8-0` still selects it.
     }
     if (o.logits_stride > 1 && (o.max_new != 1 || o.dump_logits.empty())) {
-        std::fprintf(stderr, "strata generate: --logits-stride > 1 requires --max-new 1 and --dump-logits\n");
+        std::fprintf(stderr, "momoe generate: --logits-stride > 1 requires --max-new 1 and --dump-logits\n");
         return 2;
     }
     if (o.no_ple && !o.ple_gguf.empty()) {
-        std::fprintf(stderr, "strata generate: --no-ple and --ple-gguf are mutually exclusive\n");
+        std::fprintf(stderr, "momoe generate: --no-ple and --ple-gguf are mutually exclusive\n");
         return 2;
     }
     if (o.native_ple_postops && o.no_ple) {
-        std::fprintf(stderr, "strata generate: --native-ple-postops requires PLE enabled\n");
+        std::fprintf(stderr, "momoe generate: --native-ple-postops requires PLE enabled\n");
         return 2;
     }
     if (!o.no_ple && o.ple_gguf.empty()) {
-        std::fprintf(stderr, "strata generate: --ple-gguf is required; --no-ple explicitly enables a diagnostic ablation\n");
+        std::fprintf(stderr, "momoe generate: --ple-gguf is required; --no-ple explicitly enables a diagnostic ablation\n");
         return 2;
     }
     // P7 audit: positions, cells and pooled-block indices are cast to int32 on the device path.
     if (o.max_context > 2147483647LL - 8) {
-        std::fprintf(stderr, "strata generate: --max-context must be below 2^31\n");
+        std::fprintf(stderr, "momoe generate: --max-context must be below 2^31\n");
         return 2;
     }
     if (o.max_new <= 0 || o.max_context <= 0 || o.max_new > o.max_context ||
         o.tokens.size() > (size_t) (o.max_context - o.max_new)) {
-        std::fprintf(stderr, "strata generate: positive --max-new and --max-context must fit the prompt and generation\n");
+        std::fprintf(stderr, "momoe generate: positive --max-new and --max-context must fit the prompt and generation\n");
         return 2;
     }
     // THE ROPE KNOBS (rope_scaling.hpp).  Anything invalid dies here, at second zero, rather than becoming a
@@ -2599,7 +2599,7 @@ int main(int argc, char** argv) {
         else if (o.rope_scaling == "linear") rope_cfg.type = RST::Linear;
         else if (o.rope_scaling == "yarn") rope_cfg.type = RST::YaRN;
         else if (!o.rope_scaling.empty()) {
-            std::fprintf(stderr, "strata generate: --rope-scaling must be none, linear or yarn (got '%s')\n",
+            std::fprintf(stderr, "momoe generate: --rope-scaling must be none, linear or yarn (got '%s')\n",
                          o.rope_scaling.c_str());
             return 2;
         }
@@ -2607,22 +2607,22 @@ int main(int argc, char** argv) {
         for (const double v : {o.rope_scale, o.rope_freq_base, o.rope_freq_scale, o.yarn_orig_ctx, o.yarn_ext_factor,
                                o.yarn_attn_factor, o.yarn_beta_fast, o.yarn_beta_slow})
             if (!std::isfinite(v)) {
-                std::fprintf(stderr, "strata generate: a rope scaling knob is not a finite number (%g)\n", v);
+                std::fprintf(stderr, "momoe generate: a rope scaling knob is not a finite number (%g)\n", v);
                 return 2;
             }
         // 0 is the absent default; an explicit factor must extend, not shrink
         if (o.rope_scale != 0 && o.rope_scale < 1.0) {
-            std::fprintf(stderr, "strata generate: --rope-scale %g must be >= 1 (it extends the context, not shrinks it)\n",
+            std::fprintf(stderr, "momoe generate: --rope-scale %g must be >= 1 (it extends the context, not shrinks it)\n",
                          o.rope_scale);
             return 2;
         }
         if (o.rope_freq_base != 0 && o.rope_freq_base <= 1.0) {
-            std::fprintf(stderr, "strata generate: --rope-freq-base must be a base above 1 (0 = the model's)\n");
+            std::fprintf(stderr, "momoe generate: --rope-freq-base must be a base above 1 (0 = the model's)\n");
             return 2;
         }
         if (o.rope_freq_scale < 0 || o.yarn_orig_ctx < 0 || o.yarn_ext_factor < -1.0 || o.yarn_attn_factor <= 0 ||
             o.yarn_beta_fast <= 0 || o.yarn_beta_slow <= 0) {
-            std::fprintf(stderr, "strata generate: invalid rope scaling knob (see usage: --yarn-ext-factor <0 = auto, "
+            std::fprintf(stderr, "momoe generate: invalid rope scaling knob (see usage: --yarn-ext-factor <0 = auto, "
                                  "--yarn-orig-ctx 0 = default, the rest positive)\n");
             return 2;
         }
@@ -2633,39 +2633,39 @@ int main(int argc, char** argv) {
                                            [](int slots) { return slots < 0; }) ||
         (o.expert_cache_remote[1] > 0 && o.expert_cache_remote[0] == 0) ||
         (o.expert_cache_remote[2] > 0 && o.expert_cache_remote[1] == 0)) {
-        std::fprintf(stderr, "strata generate: invalid sampling or resource parameter\n");
+        std::fprintf(stderr, "momoe generate: invalid sampling or resource parameter\n");
         return 2;
     }
     if (o.expert_cache_remote_placement != "stripe" && o.expert_cache_remote_placement != "layer") {
-        std::fprintf(stderr, "strata generate: --expert-cache-remote-placement must be stripe or layer\n");
+        std::fprintf(stderr, "momoe generate: --expert-cache-remote-placement must be stripe or layer\n");
         return 2;
     }
     if (o.remote_expert_opt && !o.serve) {
-        std::fprintf(stderr, "strata generate: --remote-expert-opt requires --serve\n");
+        std::fprintf(stderr, "momoe generate: --remote-expert-opt requires --serve\n");
         return 2;
     }
     // the peer tier is the second card's only user: a layer split or a remote expert cache would put a second engine
     // part (and a second copy of the same experts) on it
     if (o.peer_device >= 1 && (!o.layer_split.empty() || o.expert_cache_remote[0] > 0)) {
-        std::fprintf(stderr, "strata generate: --peer-device cannot be combined with %s\n",
+        std::fprintf(stderr, "momoe generate: --peer-device cannot be combined with %s\n",
                      !o.layer_split.empty() ? "--layer-split (use one or the other)"
                                             : "--expert-cache-device1..3 (the peer tier already caches experts there)");
         return 2;
     }
 
     if (o.native_flash_attn_short && o.max_context > 256) {
-        std::fprintf(stderr, "strata generate: --native-flash-attn-short requires --max-context <=256\n");
+        std::fprintf(stderr, "momoe generate: --native-flash-attn-short requires --max-context <=256\n");
         return 2;
     }
     if (o.native_flash_attn_short && (o.gpu_only_full || o.graph_only || o.gpu_stages)) {
-        std::fprintf(stderr, "strata generate: --native-flash-attn-short requires the normal decode loop for status validation\n");
+        std::fprintf(stderr, "momoe generate: --native-flash-attn-short requires the normal decode loop for status validation\n");
         return 2;
     }
     // The whole-model graph measurements replay every layer through CUDA0's session, which a layer split carves to
     // CUDA0's own range - the answer would read another stage's state.  Refused here rather than at the call, so
     // the reason is visible before 55 GB is loaded.
     if (multi_gpu && (o.gpu_only_full || o.gpu_stages)) {
-        std::fprintf(stderr, "strata generate: --gpu-only-full and --gpu-stages replay the whole model through one "
+        std::fprintf(stderr, "momoe generate: --gpu-only-full and --gpu-stages replay the whole model through one "
                              "session, which a layer split does not have; run them without --layer-split\n");
         return 2;
     }
@@ -2674,16 +2674,16 @@ int main(int argc, char** argv) {
             o.native_head_shards = o.native_head_gguf == o.native_preset ? o.native_shards
                                                                          : strata::gguf_split_paths(o.native_head_gguf);
         } catch (const std::exception& e) {
-            std::fprintf(stderr, "strata generate: --native-head-gguf %s: %s\n", o.native_head_gguf.c_str(), e.what());
+            std::fprintf(stderr, "momoe generate: --native-head-gguf %s: %s\n", o.native_head_gguf.c_str(), e.what());
             return 2;
         }
     }
     if (o.native_ple_key && (o.native_dense_gguf.empty() || o.no_ple)) {
-        std::fprintf(stderr, "strata generate: --native-ple-key requires PLE and --native-dense-gguf\n");
+        std::fprintf(stderr, "momoe generate: --native-ple-key requires PLE and --native-dense-gguf\n");
         return 2;
     }
     if (o.cpu_oracle_q8_0 && (o.expert_cache != 0 || !o.expert_profile.empty())) {
-        std::fprintf(stderr, "strata generate: --cpu-oracle-q8-0 cannot be combined with --expert-cache or --expert-profile until the GPU expert contract matches\n");
+        std::fprintf(stderr, "momoe generate: --cpu-oracle-q8-0 cannot be combined with --expert-cache or --expert-profile until the GPU expert contract matches\n");
         return 2;
     }
 
@@ -2698,8 +2698,8 @@ int main(int argc, char** argv) {
     // for that floor, so a native pack's experts run there on ggml-cpu (every AVX2 kernel is behind cpu_avx2_ok).
     const char* isa_floor = strata::kernels::cpu::isa_floor_build();
     if (!strata::kernels::cpu::cpu_avx2_ok() && isa_floor[0] == '\0') {
-        std::fprintf(stderr, "strata generate: this CPU (%s) does not support AVX2 with FMA and F16C, which this engine's "
-                             "CPU expert kernels need; Strata runs on Intel Haswell (2013), AMD Zen (2017) or newer. "
+        std::fprintf(stderr, "momoe generate: this CPU (%s) does not support AVX2 with FMA and F16C, which this engine's "
+                             "CPU expert kernels need; Momoe runs on Intel Haswell (2013), AMD Zen (2017) or newer. "
                              "Older CPUs are EXPERIMENTAL and slow: setup compiles an engine for them on this PC "
                              "(STRATA_ISA_FLOOR, see \"Older CPUs\" in docs/INSTALL.md)\n",
                      strata::kernels::cpu::cpu_name().c_str());
@@ -2708,17 +2708,17 @@ int main(int argc, char** argv) {
     if (isa_floor[0] != '\0') {
         const bool avx_floor = std::strcmp(isa_floor, "avx") == 0;
         if (avx_floor ? !strata::kernels::cpu::cpu_avx1_ok() : !strata::kernels::cpu::cpu_sse42_ok()) {
-            std::fprintf(stderr, "strata generate: this engine is the older-CPU build for %s, which this CPU (%s) does "
+            std::fprintf(stderr, "momoe generate: this engine is the older-CPU build for %s, which this CPU (%s) does "
                                  "not have%s\n", avx_floor ? "AVX" : "SSE4.2 with POPCNT",
                          strata::kernels::cpu::cpu_name().c_str(),
                          avx_floor ? "; compile it with STRATA_ISA_FLOOR=none" : "");
             return 2;
         }
         if (!strata::kernels::cpu::cpu_avx2_ok())
-            std::fprintf(stderr, "strata generate: EXPERIMENTAL older-CPU build (ggml-cpu for %s): this CPU has no AVX2, "
+            std::fprintf(stderr, "momoe generate: EXPERIMENTAL older-CPU build (ggml-cpu for %s): this CPU has no AVX2, "
                                  "so the CPU's experts run on ggml-cpu's kernels - expect it to be slow\n", isa_floor);
         else
-            std::fprintf(stderr, "strata generate: this is the older-CPU build (ggml-cpu for %s); this CPU has AVX2, "
+            std::fprintf(stderr, "momoe generate: this is the older-CPU build (ggml-cpu for %s); this CPU has AVX2, "
                                  "and the normal build is faster on it\n", isa_floor);
     }
 
@@ -2733,7 +2733,7 @@ int main(int argc, char** argv) {
     {
         const strata::core::ModelGeometry g0 = model_geom;
         if (!strata::kernels::cpu::expert_layout_load(o.pack, g0.n_layers, g0.n_expert, err, g0.n_embd, g0.n_ff)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         // Every layer's formats must have GPU expert kernels and a prompt-path dequantizer, checked here, before
@@ -2743,7 +2743,7 @@ int main(int argc, char** argv) {
         for (int64_t l = 0; lay.native && l < (int64_t) lay.fmt.size(); ++l) {
             const auto& f = lay.fmt[(size_t) l];
             if (!strata::kernels::native_expert_supported(f.gu_type, f.d_type, f.n_embd, f.n_ff)) {
-                std::fprintf(stderr, "strata generate: layer %lld's experts are %s/%s (ggml types %d/%d), which this "
+                std::fprintf(stderr, "momoe generate: layer %lld's experts are %s/%s (ggml types %d/%d), which this "
                                      "engine has no GPU kernels for" STRATA_FORMATS_MARK "\n", (long long) l,
                              strata::ggml_type_name((uint32_t) f.gu_type), strata::ggml_type_name((uint32_t) f.d_type),
                              f.gu_type, f.d_type);
@@ -2756,7 +2756,7 @@ int main(int argc, char** argv) {
     // read through the verify windows, in serve (every part a short read) as in one-shot generate
     const bool no_prompt_path = native_pack && !model_geom.has_hc() && !strata::prefill::Prefill::supports(model_geom);
     if (no_prompt_path) {
-        std::fprintf(stderr, "strata generate: this GPU has no batched prompt path for a %s model (NVIDIA sm_75+): "
+        std::fprintf(stderr, "momoe generate: this GPU has no batched prompt path for a %s model (NVIDIA sm_75+): "
                              "prompts are read through the decode windows (slower)\n",
                      strata::core::arch_name(model_geom.arch));
         o.prefill_chunk = 0;
@@ -2773,10 +2773,10 @@ int main(int argc, char** argv) {
         // allocating GPU0 weights or mapping the large host expert arena.
         double free_gib = 0;
         if (!strata::core::RemoteExperts::preflight(remote_dev[r], free_gib, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "strata generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
+        std::fprintf(stderr, "momoe generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
                      remote_dev[r], free_gib);
     }
     // plan v0.3 P6: the PCIe share of the missed experts, measured per kind of pack (the paper, finding on PCIe).
@@ -2805,7 +2805,7 @@ int main(int argc, char** argv) {
             o.pcie_frac = base;
         } else if (!native_pack) {
             o.pcie_frac = base;
-            std::fprintf(stderr, "strata generate: PCIe probe: %.1f GB/s host->device (best of %s); the canonical pack "
+            std::fprintf(stderr, "momoe generate: PCIe probe: %.1f GB/s host->device (best of %s); the canonical pack "
                                  "starts at pcie_frac %.2f and refines it from the CPU pool's speed\n", bw, bursts.c_str(), base);
 #if !defined(STRATA_USE_HIP)
             o.pcie_frac_auto = o.layer_split.empty();
@@ -2813,20 +2813,20 @@ int main(int argc, char** argv) {
 #endif
         } else if (bw > 0.0) {
             o.pcie_frac = pcie_frac_for_gbps(bw, base);
-            std::fprintf(stderr, "strata generate: PCIe probe: %.1f GB/s host->device (best of %s) -> pcie_frac %.2f "
+            std::fprintf(stderr, "momoe generate: PCIe probe: %.1f GB/s host->device (best of %s) -> pcie_frac %.2f "
                                  "(default %.2f)\n", bw, bursts.c_str(), o.pcie_frac, base);
             o.pcie_frac_auto = (o.layer_split.empty() || pcie_auto_split_ok()) && decode_defaults_arch_ok() && !pf_old;
             o.pcie_probe_gbps = bw;
         } else {
             o.pcie_frac = base;
-            std::fprintf(stderr, "strata generate: PCIe probe failed -> pcie_frac default %.2f\n", base);
+            std::fprintf(stderr, "momoe generate: PCIe probe failed -> pcie_frac default %.2f\n", base);
         }
     }
     mem_mark("the CUDA context (the PCIe probe)");
     // the canonical Q2_0 pack's CPU kernels are AVX-512 only; a native pack runs on AVX2 CPUs as well
     if (!native_pack) strata::kernels::cpu::cpu_require_expert_support();
     else if (!strata::kernels::cpu::cpu_avx512_ok())
-        std::fprintf(stderr, "strata generate: this CPU has no AVX-512: the expert kernels run on %s "
+        std::fprintf(stderr, "momoe generate: this CPU has no AVX-512: the expert kernels run on %s "
                              "(multi-token for the i-quant gate/up rows)\n",
                      !strata::kernels::cpu::cpu_avx2_ok()
                          ? (strata::kernels::cpu::cpu_avx1_ok() && std::getenv("STRATA_NO_IQ128") == nullptr
@@ -2858,7 +2858,7 @@ int main(int argc, char** argv) {
                 if (const strata::MetaValue* v = model_gguf.get(ap + "rope.scaling.original_context_length"))
                     gguf_rope_orig_ctx = v->num();
             } catch (const std::exception& e) {
-                std::fprintf(stderr, "strata generate: reading the model's expert shape from %s: %s\n",
+                std::fprintf(stderr, "momoe generate: reading the model's expert shape from %s: %s\n",
                              o.native_preset.c_str(), e.what());
                 return 1;
             }
@@ -2873,7 +2873,7 @@ int main(int argc, char** argv) {
             if (gguf_rope_type == "linear") rope_cfg.type = RST::Linear;
             else if (gguf_rope_type == "yarn") rope_cfg.type = RST::YaRN;
             else if (gguf_rope_type != "none") {
-                std::fprintf(stderr, "strata generate: %s carries rope.scaling.type '%s' - none, linear or yarn only\n",
+                std::fprintf(stderr, "momoe generate: %s carries rope.scaling.type '%s' - none, linear or yarn only\n",
                              o.native_preset.c_str(), gguf_rope_type.c_str());
                 return 2;
             }
@@ -2900,14 +2900,14 @@ int main(int argc, char** argv) {
             rope_cfg = strata::kernels::RopeScaling{};
             rope_cfg.freq_base = base;
             if (knobs)
-                std::fprintf(stderr, "strata generate: note: no rope scaling is active (none), so --rope-scale, "
+                std::fprintf(stderr, "momoe generate: note: no rope scaling is active (none), so --rope-scale, "
                                      "--rope-freq-scale and the --yarn-* knobs have no effect\n");
         }
         // THE RESOLVED CONFIG IS VALIDATED AS A WHOLE, with the one rule every rotation site also applies
         // (rope_scaling.hpp): the CLI ranges above cannot see a model-file value, nor a combination such as a
         // --rope-freq-scale that turns the resolved factor non-finite.
         if (const char* why = strata::kernels::rope_scaling_invalid(rope_cfg)) {
-            std::fprintf(stderr, "strata generate: invalid rope scaling configuration: %s (type %s, factor %g, "
+            std::fprintf(stderr, "momoe generate: invalid rope scaling configuration: %s (type %s, factor %g, "
                                  "freq_scale %g, base %g, original context %g)\n",
                          why, rope_cfg.type == RST::YaRN ? "yarn" : rope_cfg.type == RST::Linear ? "linear" : "none",
                          rope_cfg.factor, rope_cfg.freq_scale(), rope_cfg.freq_base, rope_cfg.orig_ctx);
@@ -2917,20 +2917,20 @@ int main(int argc, char** argv) {
         if (rope_cfg.type != RST::None) {
             const char* tn = rope_cfg.type == RST::YaRN ? "yarn" : "linear";
             std::fprintf(stderr,
-                         "strata generate: rope scaling %s, factor %.6g (freq_scale %.6g, base %.6g, mscale %.6f), "
+                         "momoe generate: rope scaling %s, factor %.6g (freq_scale %.6g, base %.6g, mscale %.6f), "
                          "--max-context %lld against a trained context of %.0f\n",
                          tn, rope_cfg.factor, rope_cfg.freq_scale(), rope_cfg.freq_base, rope_cfg.mscale(),
                          (long long) o.max_context, rope_cfg.orig_ctx);
             if ((double) o.max_context <= rope_cfg.orig_ctx)
                 std::fprintf(stderr,
-                             "strata generate: note: the context is within the trained %.0f - no position needs the "
+                             "momoe generate: note: the context is within the trained %.0f - no position needs the "
                              "extension, and the resolved scaling still applies to every angle\n",
                              rope_cfg.orig_ctx);
             // only when there IS a magnitude correction: YaRN's log term (ext_factor != 0) or an explicit
             // --yarn-attn-factor; plain linear (mscale 1) has none, and saying otherwise was TODO 22
             if (rope_cfg.mscale() != 1.0)
                 std::fprintf(stderr,
-                             "strata generate: note: the %s magnitude correction scales cos and sin by %.6f "
+                             "momoe generate: note: the %s magnitude correction scales cos and sin by %.6f "
                              "at every position\n",
                              rope_cfg.type == RST::YaRN ? "YaRN" : "--yarn-attn-factor", rope_cfg.mscale());
         }
@@ -2939,7 +2939,7 @@ int main(int argc, char** argv) {
     if (native_pack) {
         if (o.native_preset.empty() || o.spec < 2 || o.keep_canonical ||
             (o.prefill_chunk <= 0 && o.tokens.size() > 1 && !no_prompt_path)) {
-            std::fprintf(stderr, "strata generate: %s is a native (IQ) pack: it needs --native SHARD1, --spec T (T >= 2) "
+            std::fprintf(stderr, "momoe generate: %s is a native (IQ) pack: it needs --native SHARD1, --spec T (T >= 2) "
                                  "and --prefill CHUNK\n", o.pack.c_str());
             return 2;
         }
@@ -2947,11 +2947,11 @@ int main(int argc, char** argv) {
         const auto embed_t0 = std::chrono::steady_clock::now();
         if (!native_embed.load(o.embd_gguf.empty() ? o.native_shards : std::vector<std::string>{o.embd_gguf}, g0.n_embd,
                                248320, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         strata::core::set_native_embed(&native_embed);
-        std::fprintf(stderr, "strata generate: native pack: %s experts (largest blob %.2f MB), token embedding "
+        std::fprintf(stderr, "momoe generate: native pack: %s experts (largest blob %.2f MB), token embedding "
                              "%s in mapped host memory (%.0f MiB, %.1f s)\n",
                      o.pack.c_str(), (double) strata::kernels::cpu::expert_layout().max_blob / 1e6,
                      strata::ggml_type_name((uint32_t) native_embed.type()), (double) native_embed.bytes() / 1048576.0,
@@ -2963,7 +2963,7 @@ int main(int argc, char** argv) {
     if (!o.keep_canonical) {
         if (!o.native_dense_gguf.empty() &&
             !strata::core::NativeDense::served_names(o.native_dense_gguf, o.native_ple_key, skip, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         if (!o.native_head_gguf.empty()) skip.insert("output.weight");
@@ -2971,7 +2971,7 @@ int main(int argc, char** argv) {
         if (!native_pack) skip.erase("blk.1.ple_key.weight");
         // #326: a --compat-bf16 pack (OrcaRouter IQ3_XXS) keeps its BF16 key in the arena
         if (native_pack && !strata::core::NativeDense::keep_unquantized_ple_key(o.pack, skip, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         if (native_pack) skip.insert("token_embd.weight");
@@ -2994,7 +2994,7 @@ int main(int argc, char** argv) {
     // so they trim under `auto` too - see the block past it.
     const bool stage_trim = trim_asked && multi_gpu && !split_auto && !split_at.empty();
     if (o.trim_stage_weights && !multi_gpu)
-        std::fprintf(stderr, "strata generate: --trim-stage-weights needs a layer split across GPUs (ignored)\n");
+        std::fprintf(stderr, "momoe generate: --trim-stage-weights needs a layer split across GPUs (ignored)\n");
     // Only `--layer-split auto` WITH the trim asked loads the later stages' weights after the split search (they can
     // only be trimmed once the split is known).  Every other run keeps the 0.1.39 order: weights first, then the
     // search - so without the trim nothing about a split moves.
@@ -3019,12 +3019,12 @@ int main(int argc, char** argv) {
     if (stage_trim) {
         add_foreign(0, split_at[0], skip, o.mmap_experts);
         strata::core::NativeDense::set_layer_range(0, (int) split_at[0]);
-        std::fprintf(stderr, "strata generate: layer split: CUDA0 loads the dense weights of layers 0-%lld only\n",
+        std::fprintf(stderr, "momoe generate: layer split: CUDA0 loads the dense weights of layers 0-%lld only\n",
                      (long long) split_at[0] - 1);
     }
     uint64_t pool_bytes = 0;
     if (!strata::core::WeightTable::pool_bytes(o.pack, pool_bytes, err, skip.empty() ? nullptr : &skip)) {
-        std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+        std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
         return 1;
     }
     void* arena = nullptr;
@@ -3040,7 +3040,7 @@ int main(int argc, char** argv) {
             if ((cudaGetDeviceCount(&n_hip) != cudaSuccess || n_hip < 1) && ::access("/dev/kfd", F_OK) == 0 &&
                 ::access("/dev/kfd", R_OK | W_OK) != 0) {
                 cudaGetLastError();
-                std::fprintf(stderr, "strata generate: no GPU is visible (%s) and this user cannot open /dev/kfd "
+                std::fprintf(stderr, "momoe generate: no GPU is visible (%s) and this user cannot open /dev/kfd "
                                      "(permission denied): it is not another program holding the GPU. Add your user to "
                                      "the render and video groups - sudo usermod -aG render,video $USER - then log out "
                                      "and in again\n", cudaGetErrorString(ce));
@@ -3050,7 +3050,7 @@ int main(int argc, char** argv) {
 #endif
         size_t free_b = 0, total_b = 0;
         cudaMemGetInfo(&free_b, &total_b);
-        std::fprintf(stderr, "strata generate: cudaMalloc(%llu) for the weight arena failed (%s): %llu MiB of %llu "
+        std::fprintf(stderr, "momoe generate: cudaMalloc(%llu) for the weight arena failed (%s): %llu MiB of %llu "
                              "MiB VRAM free on this GPU. The arena is allocated first, before the KV and expert "
                              "caches: another program (or an engine that is still exiting) holds the rest - "
                              "nvidia-smi / rocm-smi lists them\n",
@@ -3068,10 +3068,10 @@ int main(int argc, char** argv) {
     };
     strata::core::WeightTable wt;
     if (!wt.load(o.pack, arena, pool_bytes, err, skip.empty() ? nullptr : &skip)) {
-        std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+        std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
         return 1;
     }
-    std::fprintf(stderr, "strata generate: %llu MiB of weights loaded from %s in %.1f s (%zu canonical tensors "
+    std::fprintf(stderr, "momoe generate: %llu MiB of weights loaded from %s in %.1f s (%zu canonical tensors "
                          "skipped: served natively)\n",
                  (unsigned long long) (pool_bytes >> 20), o.pack.c_str(), load_s(), skip.size());
     mem_mark("the pack weights");
@@ -3081,10 +3081,10 @@ int main(int argc, char** argv) {
         // a model file that carries MTP layers after its main ones (qwen35moe): those belong to the draft
         const int64_t dense_hi = g.n_mtp_layers > 0 ? g.n_layers : -1;
         if (!native_dense.load(o.native_dense_gguf, wt, err, o.native_ple_key, 0, dense_hi)) {
-            std::fprintf(stderr, "strata generate: native dense projections: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: native dense projections: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "strata generate: %zu native projection matrices, %.2f MiB of weights, in %.1f s\n",
+        std::fprintf(stderr, "momoe generate: %zu native projection matrices, %.2f MiB of weights, in %.1f s\n",
                      native_dense.tensor_count(), (double) native_dense.weight_bytes() / (1024.0 * 1024.0), load_s());
         mem_mark("the native projections");
     }
@@ -3121,7 +3121,7 @@ int main(int argc, char** argv) {
         if (cudaMalloc(&d_mrope, mrope_host.size() * sizeof(int32_t)) != cudaSuccess ||
             cudaMemcpy(d_mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
                 cudaSuccess) {
-            std::fprintf(stderr, "strata generate: cannot allocate the image position table\n");
+            std::fprintf(stderr, "momoe generate: cannot allocate the image position table\n");
             return 1;
         }
         strata::kernels::mrope_table_set(d_mrope);
@@ -3133,12 +3133,12 @@ int main(int argc, char** argv) {
     if (!o.cvec_files.empty()) {
         std::string ce;
         if (!load_control_vectors(o, g, cvec_summary, cvec_digest, ce)) {
-            std::fprintf(stderr, "strata generate: control vector: %s\n", ce.c_str());
+            std::fprintf(stderr, "momoe generate: control vector: %s\n", ce.c_str());
             return 2;
         }
     }
     if (o.max_context < (int64_t) o.tokens.size() + o.max_new) {
-        std::fprintf(stderr, "strata generate: --max-context %lld cannot hold %zu prompt + %lld new tokens\n",
+        std::fprintf(stderr, "momoe generate: --max-context %lld cannot hold %zu prompt + %lld new tokens\n",
                      (long long) o.max_context, o.tokens.size(), (long long) o.max_new);
         return 2;
     }
@@ -3154,7 +3154,7 @@ int main(int argc, char** argv) {
     // 0.805 us inside a graph.  **That is an ~8x penalty on every launch in the engine.**
     cudaStream_t main_stream = nullptr;
     if (cudaStreamCreateWithFlags(&main_stream, cudaStreamNonBlocking) != cudaSuccess) {
-        std::fprintf(stderr, "strata generate: cannot create the main stream\n");
+        std::fprintf(stderr, "momoe generate: cannot create the main stream\n");
         return 1;
     }
     void* const main_cs = (void*) main_stream;
@@ -3172,12 +3172,12 @@ int main(int argc, char** argv) {
     if (!o.dump_halves.empty()) {
         half_dump = std::fopen(o.dump_halves.c_str(), "wb");
         if (half_dump == nullptr) {
-            std::fprintf(stderr, "strata generate: cannot write %s\n", o.dump_halves.c_str());
+            std::fprintf(stderr, "momoe generate: cannot write %s\n", o.dump_halves.c_str());
             return 1;
         }
         const size_t n = (size_t) g.n_layers * (size_t) half_stride;
         if (cudaHostAlloc((void**) &half_stage, n * sizeof(float), cudaHostAllocDefault) != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: cannot pin the half-dump staging buffer\n");
+            std::fprintf(stderr, "momoe generate: cannot pin the half-dump staging buffer\n");
             return 1;
         }
         ss.block.dump = half_stage;
@@ -3185,7 +3185,7 @@ int main(int argc, char** argv) {
 
     strata::core::Doorbell db;
     if (strata::core::doorbell_init(g, K, db) == 0) {
-        std::fprintf(stderr, "strata generate: doorbell_init failed\n");
+        std::fprintf(stderr, "momoe generate: doorbell_init failed\n");
         return 1;
     }
     ss.db = &db;
@@ -3220,7 +3220,7 @@ int main(int argc, char** argv) {
             if (pio.mode != strata::kernels::PleIo::Direct || !pio.io_thread) pio.keepalive_ms = 0;
         }
         if (!ple_table.open(o.ple_gguf, err, pio)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         // Recommend, never force: when the default direct reads measure slow, switch to the mapped reads (40-100x
@@ -3229,10 +3229,10 @@ int main(int argc, char** argv) {
             constexpr double kSlowRowsPerS = 15000.0;   // ~60 MB/s of 4 KiB pages; a healthy NVMe is >100k
             const double rps = ple_direct_rows_per_s(ple_table);
             if (rps >= kSlowRowsPerS)
-                std::fprintf(stderr, "strata generate: PLE direct read probe: %.0f rows/s (fine)\n", rps);
+                std::fprintf(stderr, "momoe generate: PLE direct read probe: %.0f rows/s (fine)\n", rps);
             if (rps > 0 && rps < kSlowRowsPerS) {
                 if (!o.ple_io_explicit) {
-                    std::fprintf(stderr, "strata generate: --ple-io direct measures slow here (%.0f rows/s, about %.0f MB/s of "
+                    std::fprintf(stderr, "momoe generate: --ple-io direct measures slow here (%.0f rows/s, about %.0f MB/s of "
                                          "random 4 KiB reads): using --ple-io mmap instead (the OS file cache holds the pages; "
                                          "--ple-io direct forces the old mode, --ple-io ram keeps the table in RAM)\n",
                                  rps, rps * 4096.0 / 1e6);
@@ -3240,11 +3240,11 @@ int main(int argc, char** argv) {
                     pio.mode = strata::kernels::PleIo::Mmap;
                     pio.keepalive_ms = 0;
                     if (!ple_table.open(o.ple_gguf, err, pio)) {
-                        std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                        std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
                         return 1;
                     }
                 } else {
-                    std::fprintf(stderr, "strata generate: WARNING: --ple-io direct measures slow here (%.0f rows/s, about %.0f "
+                    std::fprintf(stderr, "momoe generate: WARNING: --ple-io direct measures slow here (%.0f rows/s, about %.0f "
                                          "MB/s of random 4 KiB reads): a prompt can spend minutes reading layer 1 and trip the "
                                          "stall watchdog (#1425, #1629). --ple-io mmap was 40-100x faster on such drives; "
                                          "--ple-io ram needs the RAM for the table\n", rps, rps * 4096.0 / 1e6);
@@ -3257,22 +3257,22 @@ int main(int argc, char** argv) {
             // can take longer than the stall watchdog's 60 s for one prompt chunk's rows.  Recommended, not forced.
             std::string dev;
             if (!under_wddm() && on_rotational_disk(o.ple_gguf, dev) == 1)   // (WSL's virtual disk says rotational)
-                std::fprintf(stderr, "strata generate: WARNING: the n-gram table (%s) is on a rotational disk (%s): "
+                std::fprintf(stderr, "momoe generate: WARNING: the n-gram table (%s) is on a rotational disk (%s): "
                                      "--ple-io direct reads it at random and can stall a prompt for minutes (#605). "
                                      "--ple-io ram (it then needs RAM for the table) or the model on an SSD is "
                                      "recommended\n", o.ple_gguf.c_str(), dev.c_str());
         }
 #endif
         if (pio.lock)
-            std::fprintf(stderr, "strata generate: PLE table %s (--ple-io ram) in %.1f s\n",
+            std::fprintf(stderr, "momoe generate: PLE table %s (--ple-io ram) in %.1f s\n",
                          ple_table.locked() ? "locked in RAM" : "loaded (not locked)",
                          std::chrono::duration<double>(Clock::now() - tpl).count());
         if (pio.keepalive_ms > 0)
-            std::fprintf(stderr, "strata generate: the SSD is kept awake while rows are read: one page of the table after "
+            std::fprintf(stderr, "momoe generate: the SSD is kept awake while rows are read: one page of the table after "
                                  "%.0f ms without a read, until %.0f s after the last request "
                                  "(STRATA_SSD_KEEPALIVE=0 turns it off)\n", pio.keepalive_ms, pio.keepalive_window_s);
         else if (pio.mode == strata::kernels::PleIo::Direct)
-            std::fprintf(stderr, "strata generate: SSD keep-alive off: the SSD may fall asleep between reads\n");
+            std::fprintf(stderr, "momoe generate: SSD keep-alive off: the SSD may fall asleep between reads\n");
         const strata::core::WeightRef* wk = wt.find("blk.1.ple_key.weight");
         const strata::core::WeightRef* wv = wt.find("blk.1.ple_value.weight");
         const strata::core::WeightRef* wnk = wt.find("blk.1.ple_norm_key.weight");
@@ -3280,7 +3280,7 @@ int main(int argc, char** argv) {
         const strata::core::WeightRef* wnc = wt.find("blk.1.ple_norm_conv.weight");
         const strata::core::WeightRef* wc = wt.find("blk.1.ple_conv1d.weight");
         if (!wk || !wv || !wnk || !wnq || !wnc || !wc) {
-            std::fprintf(stderr, "strata generate: the pack has no blk.1.ple_* tensors, so the PLE cannot be "
+            std::fprintf(stderr, "momoe generate: the pack has no blk.1.ple_* tensors, so the PLE cannot be "
                                  "wired - and running without it is a DIFFERENT MODEL (LEDGER L123)\n");
             return 1;
         }
@@ -3296,7 +3296,7 @@ int main(int argc, char** argv) {
         if (o.native_ple_key && wk->quantized()) {
             if (!wk->native_data || (wk->native_type != 42 && wk->native_type != 18 && wk->native_type != 23 &&
                                      wk->native_type != 8) || !wk->native_q8_1) {
-                std::fprintf(stderr, "strata generate: native PLE key is absent or incompatible\n");
+                std::fprintf(stderr, "momoe generate: native PLE key is absent or incompatible\n");
                 return 1;
             }
             ss.ple.w.key_native_data = wk->native_data;
@@ -3315,7 +3315,7 @@ int main(int argc, char** argv) {
         const bool f16 = wc->kind == strata::core::WeightKind::F16InF32 ||
                          (wc->kind == strata::core::WeightKind::Verbatim && wc->code_bits == 0);
         if (!f16 || wc->bytes != (uint64_t) wc->elements * 2) {
-            std::fprintf(stderr, "strata generate: blk.1.ple_conv1d.weight is not stored as F16 (pack index kind %d, "
+            std::fprintf(stderr, "momoe generate: blk.1.ple_conv1d.weight is not stored as F16 (pack index kind %d, "
                                  "%llu B for %lld values); the PLE conv1d kernel reads F16 - repack with "
                                  "tools/iq_pack.py\n",
                          (int) wc->kind, (unsigned long long) wc->bytes, (long long) wc->elements);
@@ -3332,21 +3332,21 @@ int main(int argc, char** argv) {
         ss.ple.emb_host = ple_emb_host.data();
         if (cudaMalloc((void**) &ple_emb_dev, (size_t) strata::kernels::NG_N_EMBD * 4) != cudaSuccess ||
             cudaMalloc((void**) &ple_scratch, strata::core::ple_run_scratch_bytes()) != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: the PLE buffers failed\n");
+            std::fprintf(stderr, "momoe generate: the PLE buffers failed\n");
             return 1;
         }
         ss.ple.emb_dev = ple_emb_dev;
         ss.ple.scratch = ple_scratch;
     } else if (g.has_ple) {   // (a model without a PLE block - qwen35moe - has nothing to switch off)
         std::fprintf(stderr,
-                     "strata generate: PLE OFF by explicit --no-ple diagnostic request.\n"
+                     "momoe generate: PLE OFF by explicit --no-ple diagnostic request.\n"
                      "  The tokens below are NOT this model's; this is only useful for A/B measurement.\n");
     }
 
     float* d_parts = nullptr;
     if (cudaMalloc(&d_parts, (size_t) K * g.n_embd * 4) != cudaSuccess ||
         cudaMemset(d_parts, 0, (size_t) K * g.n_embd * 4) != cudaSuccess) {
-        std::fprintf(stderr, "strata generate: the parts buffer failed\n");
+        std::fprintf(stderr, "momoe generate: the parts buffer failed\n");
         return 1;
     }
 
@@ -3361,7 +3361,7 @@ int main(int argc, char** argv) {
         const bool remote = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
         if (remote || o.expert_profile.empty() ||
             !strata::core::read_expert_profile(o.expert_profile, g.n_layers, g.n_expert, prof, pslots, perr)) {
-            std::fprintf(stderr, "strata generate: --split-skip-if-fits: %s; the split stays\n",
+            std::fprintf(stderr, "momoe generate: --split-skip-if-fits: %s; the split stays\n",
                          remote ? "remote expert caches are in use" : perr.empty() ? "no expert profile" : perr.c_str());
         } else {
             const auto& lay = strata::kernels::cpu::expert_layout();
@@ -3376,7 +3376,7 @@ int main(int argc, char** argv) {
             cudaDeviceProp dp{};
             cudaGetDeviceProperties(&dp, 0);
             if (pairs_bytes <= room) {
-                std::fprintf(stderr, "strata generate: layer split skipped (--split-skip-if-fits): CUDA0 (%s) holds all "
+                std::fprintf(stderr, "momoe generate: layer split skipped (--split-skip-if-fits): CUDA0 (%s) holds all "
                                      "%zu profiled pairs (%.2f GiB) with the session (%.2f GiB, %lld-token context), "
                                      "the drafter and the reserve: %.2f GiB free, %.2f GiB to spare - one GPU\n",
                              dp.name, prof.size(), (double) pairs_bytes / 1073741824.0, (double) session / 1073741824.0,
@@ -3388,7 +3388,7 @@ int main(int argc, char** argv) {
                 split_at.clear();
                 o.layer_split.clear();
             } else {
-                std::fprintf(stderr, "strata generate: --split-skip-if-fits: CUDA0 (%s) would hold only %.2f of the "
+                std::fprintf(stderr, "momoe generate: --split-skip-if-fits: CUDA0 (%s) would hold only %.2f of the "
                                      "profile's %.2f GiB (%.2f GiB free, %.2f GiB for the session, drafter and "
                                      "reserve): the split stays\n", dp.name,
                              (double) std::max<int64_t>(room, 0) / 1073741824.0, (double) pairs_bytes / 1073741824.0,
@@ -3418,7 +3418,7 @@ int main(int argc, char** argv) {
         on = on && !o.mtp.empty() && o.spec >= 2 && o.batch == 0 && o.peer_device < 0 && !helpers_a && !o.adapt_async;
         o.pipeline_windows = on ? 2 : 0;
         if (on)
-            std::fprintf(stderr, "strata generate: --pipeline-windows 2 is on by default for a layer split of %zu stages "
+            std::fprintf(stderr, "momoe generate: --pipeline-windows 2 is on by default for a layer split of %zu stages "
                                  "(--pipeline-windows 0 or STRATA_PIPELINE_AUTO=0 turns it off)\n", split_devs.size() + 1);
     }
     if (o.pipeline_windows > 0) {
@@ -3435,7 +3435,7 @@ int main(int argc, char** argv) {
                         : helpers ? "not with the helper caches (--expert-cache-device1..3, --remote-expert-opt)"
                         : nullptr;
         if (off != nullptr) {
-            std::fprintf(stderr, "strata generate: --pipeline-windows %d is off: %s\n", o.pipeline_windows, off);
+            std::fprintf(stderr, "momoe generate: --pipeline-windows %d is off: %s\n", o.pipeline_windows, off);
             o.pipeline_windows = 0;
         }
     }
@@ -3450,10 +3450,10 @@ int main(int argc, char** argv) {
             add_foreign(lb, le, skip_s, false);
             strata::core::NativeDense::set_layer_range((int) lb, (int) le);
             if (!strata::core::WeightTable::pool_bytes(o.pack, pool_s, err, &skip_s)) {
-                std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
                 return false;
             }
-            std::fprintf(stderr, "strata generate: layer split: CUDA%d loads the dense weights of layers %lld-%lld only\n",
+            std::fprintf(stderr, "momoe generate: layer split: CUDA%d loads the dense weights of layers %lld-%lld only\n",
                          st.dev, (long long) lb, (long long) le - 1);
         } else {
             skip_s = skip;
@@ -3464,7 +3464,7 @@ int main(int argc, char** argv) {
             cudaGetLastError();
             size_t free_b = 0, total_b = 0;   // #486: what that card had free
             cudaMemGetInfo(&free_b, &total_b);
-            std::fprintf(stderr, "strata generate: layer split, CUDA%d weights: %s (%llu MiB needed, %llu MiB of %llu "
+            std::fprintf(stderr, "momoe generate: layer split, CUDA%d weights: %s (%llu MiB needed, %llu MiB of %llu "
                                  "MiB free on that card)\n", st.dev,
                          err.empty() ? "the weight arena does not fit" : err.c_str(),
                          (unsigned long long) (pool_s >> 20), (unsigned long long) (free_b >> 20),
@@ -3472,7 +3472,7 @@ int main(int argc, char** argv) {
             return false;
         }
         if (!o.native_dense_gguf.empty() && !st.dense.load(o.native_dense_gguf, st.wt, err, o.native_ple_key)) {
-            std::fprintf(stderr, "strata generate: layer split, CUDA%d native dense projections: %s\n", st.dev,
+            std::fprintf(stderr, "momoe generate: layer split, CUDA%d native dense projections: %s\n", st.dev,
                          err.c_str());
             return false;
         }
@@ -3484,7 +3484,7 @@ int main(int argc, char** argv) {
         st.dev = split_devs[i];
         double free_gib = 0;
         if (!strata::core::RemoteExperts::preflight(st.dev, free_gib, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         const strata::core::OnDevice on(st.dev);
@@ -3501,12 +3501,12 @@ int main(int argc, char** argv) {
         if (cudaStreamCreateWithFlags(&st.stream, cudaStreamNonBlocking) != cudaSuccess ||
             cudaStreamCreateWithFlags(&st.adapt_stream, cudaStreamNonBlocking) != cudaSuccess ||
             cudaEventCreateWithFlags(&st.adapt_ev, cudaEventDisableTiming) != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: layer split, CUDA%d: its streams failed\n", st.dev);
+            std::fprintf(stderr, "momoe generate: layer split, CUDA%d: its streams failed\n", st.dev);
             return 1;
         }
         // a control vector (the speed projection): its tables on this device too - the stage's layers apply it here
         if (!strata::kernels::cvec_replicate(err)) {
-            std::fprintf(stderr, "strata generate: layer split, CUDA%d: %s\n", st.dev, err.c_str());
+            std::fprintf(stderr, "momoe generate: layer split, CUDA%d: %s\n", st.dev, err.c_str());
             return 1;
         }
         // --vision: this device's image-position table (the identity until a picture request), read by every rope
@@ -3515,7 +3515,7 @@ int main(int argc, char** argv) {
             if (cudaMalloc(&st.mrope, mrope_host.size() * sizeof(int32_t)) != cudaSuccess ||
                 cudaMemcpy(st.mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
                     cudaSuccess) {
-                std::fprintf(stderr, "strata generate: layer split, CUDA%d: the image position table failed\n", st.dev);
+                std::fprintf(stderr, "momoe generate: layer split, CUDA%d: the image position table failed\n", st.dev);
                 return 1;
             }
             strata::kernels::mrope_table_set(st.mrope);
@@ -3528,13 +3528,13 @@ int main(int argc, char** argv) {
             const double bw = probe_pcie_h2d_gbps(&bursts);
             if (bw > 0.0) st.pcie_frac = pcie_frac_for_gbps(bw, 0.55);
             st.link_gbps = bw;
-            std::fprintf(stderr, "strata generate: layer split: CUDA%d PCIe probe %.1f GB/s (best of %s) -> pcie_frac "
+            std::fprintf(stderr, "momoe generate: layer split: CUDA%d PCIe probe %.1f GB/s (best of %s) -> pcie_frac "
                                  "%.2f\n", st.dev, bw, bursts.c_str(), st.pcie_frac);
         }
         if (!late_weights) {
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
-            std::fprintf(stderr, "strata generate: layer split: CUDA%d holds its weights; %.2f GiB free (its session "
+            std::fprintf(stderr, "momoe generate: layer split: CUDA%d holds its weights; %.2f GiB free (its session "
                                  "follows the split search)\n", st.dev, (double) fb / 1073741824.0);
         }
     }
@@ -3544,7 +3544,7 @@ int main(int argc, char** argv) {
     if (!o.expert_profile.empty()) {
         int64_t pslots = 0;
         if (!strata::core::read_expert_profile(o.expert_profile, g.n_layers, g.n_expert, profile, pslots, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         // An explicit number truncates the ranked list ("what would 2,000 slots give" without rebuilding the
@@ -3577,11 +3577,11 @@ int main(int argc, char** argv) {
                 out.insert(out.end(), moved.begin(), moved.end());
                 out.insert(out.end(), profile.begin() + (long) fill, profile.end());
                 profile.swap(out);
-                std::fprintf(stderr, "strata generate: STRATA_PEER_HOT %.2f: %zu of the first %zu ranked pairs moved "
+                std::fprintf(stderr, "momoe generate: STRATA_PEER_HOT %.2f: %zu of the first %zu ranked pairs moved "
                                      "behind rank %zu (the peer's)\n", f, n_moved, at, fill);
             }
         }
-        std::fprintf(stderr, "strata generate: profile %s: %zu ranked pairs, built for %lld slots\n",
+        std::fprintf(stderr, "momoe generate: profile %s: %zu ranked pairs, built for %lld slots\n",
                      o.expert_profile.c_str(), profile.size(), (long long) pslots);
     }
     // #477: the whole ranking as loaded, the prior of --expert-profile-save's order (a layer split keeps only
@@ -3689,7 +3689,7 @@ int main(int argc, char** argv) {
         const strata::core::OnDevice on(dev);
         size_t fb = 0, tb = 0;
         if (const cudaError_t e = cudaMemGetInfo(&fb, &tb); e != cudaSuccess)
-            std::fprintf(stderr, "strata generate: layer split: CUDA%d free memory: %s\n", dev < 0 ? 0 : dev,
+            std::fprintf(stderr, "momoe generate: layer split: CUDA%d free memory: %s\n", dev < 0 ? 0 : dev,
                          cudaGetErrorString(e));
         const int64_t pf = search && split_own_auto && !place_with_reserve ? 0 : split_pf_mib;
         const int64_t base_reserve =
@@ -3717,7 +3717,7 @@ int main(int argc, char** argv) {
             cudaGetLastError();
             const double speed = std::max(1.0, (double) sms * (double) khz / 1e6);   // SMs x GHz
             layer_ms[(size_t) i] = 0.33 * (84.0 * 2.617) / speed;
-            std::fprintf(stderr, "strata generate: layer split auto: CUDA%d %d SMs at %.2f GHz -> %.2f ms per layer, "
+            std::fprintf(stderr, "momoe generate: layer split auto: CUDA%d %d SMs at %.2f GHz -> %.2f ms per layer, "
                                  "%.2f GiB free before its session carve\n", dev, sms, khz / 1e6, layer_ms[(size_t) i],
                          (double) cap[(size_t) i] / 1073741824.0);
         }
@@ -3732,7 +3732,7 @@ int main(int argc, char** argv) {
             // Never below 1.0: a link at or above the 20 GB/s reference keeps the fitted cost exactly (a x16
             // gen4/5 reads 26-28 and must not credit misses below the formula the sweep's K was fitted with).
             if (bw > 0.0) link_scale[(size_t) i] = std::clamp(20.0 / bw, 1.0, 64.0);
-            std::fprintf(stderr, "strata generate: layer split auto: CUDA%d link %.1f GB/s -> miss cost x%.2f\n",
+            std::fprintf(stderr, "momoe generate: layer split auto: CUDA%d link %.1f GB/s -> miss cost x%.2f\n",
                          dev, bw, link_scale[(size_t) i]);
         }
         const double miss_ms = std::getenv("STRATA_SPLIT_MISS_MS") ? std::atof(std::getenv("STRATA_SPLIT_MISS_MS")) : 190.0;
@@ -4122,12 +4122,12 @@ int main(int argc, char** argv) {
             };
             if (best.empty()) {
                 best = first; best_ms = first_ms;
-                std::fprintf(stderr, "strata generate: layer split auto: K=%s gives a stage fewer than %lld layers (a "
+                std::fprintf(stderr, "momoe generate: layer split auto: K=%s gives a stage fewer than %lld layers (a "
                                      "tiny expert cache clamps the prompt chunk, #1616), but no placement with at least "
                                      "that many layers can start; keeping it\n", fmt(first).c_str(),
                              (long long) strata::program::split_rules::kMinStageLayers);
             } else {
-                std::fprintf(stderr, "strata generate: layer split auto: K=%s would give a stage fewer than %lld layers "
+                std::fprintf(stderr, "momoe generate: layer split auto: K=%s would give a stage fewer than %lld layers "
                                      "(a tiny expert cache there clamps the prompt chunk of every card, #1616); chose "
                                      "K=%s instead (%.1f ms per decode window, not %.1f)\n", fmt(first).c_str(),
                              (long long) strata::program::split_rules::kMinStageLayers, fmt(best).c_str(), best_ms,
@@ -4143,35 +4143,35 @@ int main(int argc, char** argv) {
                 const int64_t le = i + 1 < ns ? at[(size_t) i] : g.n_layers;
                 const uint64_t cn = chunk_bytes(lb, c);
                 const int64_t room_mib = (int64_t) (stage_left(i, lb, le) >> 20);
-                std::fprintf(stderr, "strata generate:   CUDA%d: a 512-token prompt needs %lld MiB of its own buffers "
+                std::fprintf(stderr, "momoe generate:   CUDA%d: a 512-token prompt needs %lld MiB of its own buffers "
                                      "(+512 MiB headroom); %lld MiB is left for them after its session and cache\n",
                              dev, (long long) (cn >> 20), (long long) room_mib);
             }
-            std::fprintf(stderr, "strata generate: to make room: a smaller --max-context, --prefill 512, a smaller "
+            std::fprintf(stderr, "momoe generate: to make room: a smaller --max-context, --prefill 512, a smaller "
                                  "--vram-reserve-mib, an explicit --layer-split, or close other programs using the GPU\n");
         };
         if (best.empty()) {
             // recommend, never force: with nothing startable on paper the search runs again without the gate, so the
             // run is as it was before the gate, and what is short is said
-            std::fprintf(stderr, "strata generate: layer split auto: no placement can start the prompt path on the "
+            std::fprintf(stderr, "momoe generate: layer split auto: no placement can start the prompt path on the "
                                  "figures here; choosing by decode speed alone\n");
             gate_on = false;
             search();
             if (!best.empty()) split_diagnosis(best);
         }
         if (best.empty()) {
-            std::fprintf(stderr, "strata generate: --layer-split auto: no valid split for %d GPUs (this model has %lld layers)\n",
+            std::fprintf(stderr, "momoe generate: --layer-split auto: no valid split for %d GPUs (this model has %lld layers)\n",
                          ns, (long long) g.n_layers);
             return 2;
         }
         if (!carve_ok) {   // `carve_bytes` reports through `err`; it is called from the search, which cannot return
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         split_at = best;
         std::string ks;
         for (const int64_t k : split_at) ks += (ks.empty() ? "" : ",") + std::to_string(k);
-        std::fprintf(stderr, "strata generate: layer split auto: K=%s - predicted %.1f ms per decode window; the caches "
+        std::fprintf(stderr, "momoe generate: layer split auto: K=%s - predicted %.1f ms per decode window; the caches "
                              "hold %lld of %zu profiled pairs (~%.1f%% of the routed mass), best of %lld placements\n",
                      ks.c_str(), best_ms, (long long) best_held, profile.size(), 100.0 * best_mass, (long long) tried);
         // #1428: a near tie on a mixed pair.  The model prices a decode window only (the prompt path is not in it), and on
@@ -4200,7 +4200,7 @@ int main(int argc, char** argv) {
                 if (alt != nullptr) {
                     std::string as;
                     for (const int64_t k : *alt) as += (as.empty() ? "" : ",") + std::to_string(k);
-                    std::fprintf(stderr, "strata generate: layer split auto: NEAR TIE - K=%s is predicted %.1f ms per decode "
+                    std::fprintf(stderr, "momoe generate: layer split auto: NEAR TIE - K=%s is predicted %.1f ms per decode "
                                          "window, within %.1f%% of K=%s (%.1f ms); the cards differ, so the prediction may not "
                                          "rank them (it prices decode, not the prompt). To try the other: --layer-split %s\n",
                                  as.c_str(), alt_ms, 100.0 * (alt_ms / best_ms - 1.0), ks.c_str(), best_ms, as.c_str());
@@ -4210,7 +4210,7 @@ int main(int argc, char** argv) {
     }
     for (size_t i = 0; i < split_at.size(); ++i)
         if (split_at[i] >= g.n_layers) {
-            std::fprintf(stderr, "strata generate: --layer-split: layer %lld is past the last (%lld)\n",
+            std::fprintf(stderr, "momoe generate: --layer-split: layer %lld is past the last (%lld)\n",
                          (long long) split_at[i], (long long) (g.n_layers - 1));
             return 2;
         }
@@ -4257,11 +4257,11 @@ int main(int argc, char** argv) {
                 const uint64_t took = before > fb ? (uint64_t) (before - fb) : 0;
                 const uint64_t priced = carve_bytes(st.lb, st.le);
                 if (priced < took || priced - took > took / 20)
-                    std::fprintf(stderr, "strata generate: layer split, CUDA%d: WARNING the split search priced this "
+                    std::fprintf(stderr, "momoe generate: layer split, CUDA%d: WARNING the split search priced this "
                                          "stage's weights at %llu MiB, it took %llu MiB\n", st.dev,
                                  (unsigned long long) (priced >> 20), (unsigned long long) (took >> 20));
             }
-            std::fprintf(stderr, "strata generate: layer split: CUDA%d holds its weights; %.2f GiB free (its session "
+            std::fprintf(stderr, "momoe generate: layer split: CUDA%d holds its weights; %.2f GiB free (its session "
                                  "follows)\n", st.dev, (double) fb / 1073741824.0);
         }
 
@@ -4285,7 +4285,7 @@ int main(int argc, char** argv) {
                             // the batch slots carve their own K/V and --vram-elastic's cache is not one VMM range
                             o.batch == 0 && !o.vram_elastic && o.peer_device < 0;
             if (asked && !on)
-                std::fprintf(stderr, "strata generate: --kv-grow is off (one GPU, a profile, the whole K/V in VRAM, "
+                std::fprintf(stderr, "momoe generate: --kv-grow is off (one GPU, a profile, the whole K/V in VRAM, "
                                      "every expert in RAM, no --batch, --vram-elastic or --peer-device)\n");
             const char* iv = std::getenv("STRATA_KV_GROW_INIT");
             strata::core::qsa_set_kv_elastic(on, iv != nullptr && std::atoll(iv) > 0 ? std::atoll(iv) : 16384);
@@ -4293,18 +4293,18 @@ int main(int argc, char** argv) {
         }
         mem_mark("the weights (before the session)");
         if (std::getenv("STRATA_TRACE"))
-            std::fprintf(stderr, "strata trace: the session takes %lld MiB\n",
+            std::fprintf(stderr, "momoe trace: the session takes %lld MiB\n",
                          (long long) (strata::core::session_bytes(g, o.max_context, K, 0, hi0) >> 20));
         if (cudaMalloc(&sbuf, strata::core::session_bytes(g, o.max_context, K, 0, hi0)) != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: session state allocation failed\n");
+            std::fprintf(stderr, "momoe generate: session state allocation failed\n");
             return 1;
         }
         if (strata::core::session_init(g, o.max_context, K, sbuf, ss, 0, hi0) == 0) {
-            std::fprintf(stderr, "strata generate: session_init failed\n");
+            std::fprintf(stderr, "momoe generate: session_init failed\n");
             return 1;
         }
         if (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1)
-            std::fprintf(stderr, "strata generate: KV streaming: %lld of %lld cells per QSA layer in VRAM, the K/V in "
+            std::fprintf(stderr, "momoe generate: KV streaming: %lld of %lld cells per QSA layer in VRAM, the K/V in "
                                  "%.2f GiB of pinned RAM\n",
                          (long long) (ss.qsa_states[ss.qsa_primary()].n_slots * 4),
                          (long long) o.max_context, (double) strata::core::qsa_kv_host_bytes() / 1073741824.0);
@@ -4314,16 +4314,16 @@ int main(int argc, char** argv) {
         // path or the verifier reads it (--serve zeroes it per request when nothing is reused)
         strata::core::session_zero(ss, g, nullptr, main_cs);
         if (cudaDeviceSynchronize() != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: zeroing the session state failed\n");
+            std::fprintf(stderr, "momoe generate: zeroing the session state failed\n");
             return 1;
         }
         mem_mark("the session");
         if (!o.ple_gguf.empty()) {
             if (!ss.ple.ready()) {
-                std::fprintf(stderr, "strata generate: the PLE run is not ready after construction\n");
+                std::fprintf(stderr, "momoe generate: the PLE run is not ready after construction\n");
                 return 1;
             }
-            std::fprintf(stderr, "strata generate: PLE on, table %llu rows of %s\n",
+            std::fprintf(stderr, "momoe generate: PLE on, table %llu rows of %s\n",
                          (unsigned long long) ple_table.rows(), o.ple_gguf.c_str());
         }
     }
@@ -4334,21 +4334,21 @@ int main(int argc, char** argv) {
         void* sbuf_s = nullptr;
         if (cudaMalloc(&sbuf_s, strata::core::session_bytes(g, o.max_context, K, st.lb, st.le)) != cudaSuccess ||
             strata::core::session_init(g, o.max_context, K, sbuf_s, st.ss, st.lb, st.le) == 0) {
-            std::fprintf(stderr, "strata generate: layer split, CUDA%d: the session state failed\n", st.dev);
+            std::fprintf(stderr, "momoe generate: layer split, CUDA%d: the session state failed\n", st.dev);
             return 1;
         }
         const bool last = i + 1 == stages.size();
         const strata::core::WeightRef* wo_s = st.wt.find("output.weight");
         if (wo_s == nullptr ||
             (last && !o.native_head_gguf.empty() && !st.head.load(o.native_head_shards, g.n_embd, wo_s->ne1, err))) {
-            std::fprintf(stderr, "strata generate: layer split, CUDA%d head: %s%s\n", st.dev,
+            std::fprintf(stderr, "momoe generate: layer split, CUDA%d head: %s%s\n", st.dev,
                          wo_s == nullptr ? "output.weight is missing" : err.c_str(),
                          wo_s == nullptr ? "" : vram_free_note().c_str());
             return 1;
         }
         size_t fb = 0, tb = 0;
         cudaMemGetInfo(&fb, &tb);
-        std::fprintf(stderr, "strata generate: layer split: CUDA%d holds its weights, session [%lld, %lld)%s; "
+        std::fprintf(stderr, "momoe generate: layer split: CUDA%d holds its weights, session [%lld, %lld)%s; "
                              "%.2f GiB free\n", st.dev, (long long) st.lb, (long long) st.le,
                      last ? " and the head" : "", (double) fb / 1073741824.0);
     }
@@ -4391,7 +4391,7 @@ int main(int argc, char** argv) {
         if (why == nullptr && !stages.empty() && (remote_caches || o.remote_expert_opt))
             why = "it is not run with helper expert caches on a layer split";
         if (why != nullptr) {
-            std::fprintf(stderr, "strata generate: WARNING: --batch-mtp is off: %s\n", why);
+            std::fprintf(stderr, "momoe generate: WARNING: --batch-mtp is off: %s\n", why);
             batch_mtp = false;
         }
     }
@@ -4401,10 +4401,10 @@ int main(int argc, char** argv) {
         const char* off = !o.serve ? "it needs --serve" : o.batch < 2 ? "it needs 2 or more slots"
                         : split_same ? "it needs each stage of a layer split on its own GPU" : nullptr;
         if (off != nullptr) {
-            std::fprintf(stderr, "strata generate: WARNING: --batch %d is off: %s\n", o.batch, off);
+            std::fprintf(stderr, "momoe generate: WARNING: --batch %d is off: %s\n", o.batch, off);
             o.batch = 0;
         } else if (o.batch > cap && !batch_mtp) {
-            std::fprintf(stderr, "strata generate: WARNING: --batch %d: a batch window holds at most %d rows, so %d "
+            std::fprintf(stderr, "momoe generate: WARNING: --batch %d: a batch window holds at most %d rows, so %d "
                                  "slots\n", o.batch, cap, cap);
             o.batch = cap;
         }
@@ -4421,16 +4421,16 @@ int main(int argc, char** argv) {
         if (groups_said == r.groups) return;   // (the second call, once the slots that fit are known, says nothing new)
         groups_said = r.groups;
         if (r.serial != strata::program::batch_groups::Serial::None)
-            std::fprintf(stderr, "strata generate: --batch-groups auto: 1 group of %d slot%s - %s does not run in pipelined "
+            std::fprintf(stderr, "momoe generate: --batch-groups auto: 1 group of %d slot%s - %s does not run in pipelined "
                                  "groups; --batch-groups %d would pipeline them and turn it off\n", o.batch,
                          o.batch == 1 ? "" : "s", strata::program::batch_groups::serial_what(r.serial), r.would_be);
         else
-            std::fprintf(stderr, "strata generate: --batch-groups auto: %d group%s of %d slot%s\n", r.groups,
+            std::fprintf(stderr, "momoe generate: --batch-groups auto: %d group%s of %d slot%s\n", r.groups,
                          r.groups == 1 ? "" : "s", o.batch / r.groups, o.batch / r.groups == 1 ? "" : "s");
     };
     if (o.batch > 0) resolve_groups_auto();
     if (o.batch > 0 && o.batch_groups > 1 && (stages.empty() || o.batch % o.batch_groups != 0)) {
-        std::fprintf(stderr, "strata generate: WARNING: --batch-groups %d needs a layer split and to divide --batch %d; "
+        std::fprintf(stderr, "momoe generate: WARNING: --batch-groups %d needs a layer split and to divide --batch %d; "
                              "one group\n", o.batch_groups, o.batch);
         o.batch_groups = 1;
     }
@@ -4453,7 +4453,7 @@ int main(int argc, char** argv) {
                     if (buf != nullptr) cudaFree(buf);
                     size_t fb = 0, tb = 0;
                     cudaMemGetInfo(&fb, &tb);
-                    std::fprintf(stderr, "strata generate: WARNING: --batch %d: slot %d's session does not fit on CUDA%d "
+                    std::fprintf(stderr, "momoe generate: WARNING: --batch %d: slot %d's session does not fit on CUDA%d "
                                          "(%.2f GiB each, %.2f GiB free); %d slot%s\n", o.batch, b, dev,
                                  (double) bytes / 1073741824.0, (double) fb / 1073741824.0, b, b == 1 ? "" : "s");
                     fit = b;
@@ -4465,12 +4465,12 @@ int main(int argc, char** argv) {
             cudaDeviceSynchronize();
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
-            std::fprintf(stderr, "strata generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each); %.2f GiB free\n",
+            std::fprintf(stderr, "momoe generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each); %.2f GiB free\n",
                          (int) bslot_ss[k].size(), dev, (double) bytes / 1073741824.0, (double) fb / 1073741824.0);
         }
         for (auto& v : bslot_ss) if ((int) v.size() > fit) v.resize((size_t) fit);   // the same count on every stage
         if (fit < 2) {
-            std::fprintf(stderr, "strata generate: WARNING: --batch is off: not two slot sessions fit (a smaller "
+            std::fprintf(stderr, "momoe generate: WARNING: --batch is off: not two slot sessions fit (a smaller "
                                  "--max-context or KV streaming, --kv-resident, makes them smaller)\n");
             bslot_ss.clear();
             o.batch = 0;
@@ -4479,7 +4479,7 @@ int main(int argc, char** argv) {
             resolve_groups_auto();   // (the slots that fit may not be the ones asked for)
             if (o.batch_groups > 1 && o.batch % o.batch_groups != 0) o.batch_groups = 1;
             // the sessions' VRAM is the expert cache's: say what it costs (docs/BATCHING.md has the measured trade)
-            std::fprintf(stderr, "strata generate: --batch %d: the slot sessions take %.2f GiB of VRAM on CUDA0 that the "
+            std::fprintf(stderr, "momoe generate: --batch %d: the slot sessions take %.2f GiB of VRAM on CUDA0 that the "
                                  "expert cache would otherwise hold\n", o.batch,
                          (double) bytes0 * o.batch / 1073741824.0);
         }
@@ -4496,7 +4496,7 @@ int main(int argc, char** argv) {
     std::vector<std::unique_ptr<strata::core::MtpDrafter>> slot_mtp;
     if (!o.mtp.empty()) {
         if (o.spec < 2) {
-            std::fprintf(stderr, "strata generate: --mtp is ignored without --spec T (T >= 2)\n");
+            std::fprintf(stderr, "momoe generate: --mtp is ignored without --spec T (T >= 2)\n");
             o.mtp.clear();
         }
         if (!o.mtp.empty()) mtp.set_prompt_len((int64_t) o.tokens.size());
@@ -4511,7 +4511,7 @@ int main(int argc, char** argv) {
         // the next window's drafts), and the round/step graphs carry the forcing kernel
         const int mtp_t = o.pipeline_windows >= 2 ? strata::kernels::kVerifyMaxT : o.spec;
         if (o.pipeline_windows >= 2) mtp.set_force_capture(true);
-        if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st ? last_st->ss : ss, mtp_t, err, o.mtp_window)) { std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(), vram_free_note().c_str()); return 1; }
+        if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st ? last_st->ss : ss, mtp_t, err, o.mtp_window)) { std::fprintf(stderr, "momoe generate: %s%s\n", err.c_str(), vram_free_note().c_str()); return 1; }
         mtp.set_ple_session(&ss);
         if (batch_mtp) {
             // Slot b's drafter lives where the solo drafter does (the guard above: the last stage's GPU), carved from the
@@ -4521,7 +4521,7 @@ int main(int argc, char** argv) {
             for (int b = 0; b < o.batch; ++b) {
                 auto d = std::make_unique<strata::core::MtpDrafter>();
                 if (!d->load(o.mtp, draft_geometry, *bslot_ss.back()[(size_t) b], o.spec, err, o.mtp_window, &mtp)) {
-                    std::fprintf(stderr, "strata generate: batch MTP slot %d: %s%s\n", b, err.c_str(),
+                    std::fprintf(stderr, "momoe generate: batch MTP slot %d: %s%s\n", b, err.c_str(),
                                  vram_free_note().c_str());
                     return 1;
                 }
@@ -4532,7 +4532,7 @@ int main(int argc, char** argv) {
             if (!slot_mtp.empty()) {
                 size_t fb = 0, tb = 0;
                 cudaMemGetInfo(&fb, &tb);
-                std::fprintf(stderr, "strata generate: --batch-mtp: %d slot drafters on CUDA%d (%.0f MiB of private K/V "
+                std::fprintf(stderr, "momoe generate: --batch-mtp: %d slot drafters on CUDA%d (%.0f MiB of private K/V "
                                      "state and buffers each, sharing the solo drafter's weights); %.2f GiB free there\n",
                              (int) slot_mtp.size(), mtp.device(), (double) slot_mtp.front()->vram_bytes() / 1048576.0,
                              (double) fb / 1073741824.0);
@@ -4546,16 +4546,16 @@ int main(int argc, char** argv) {
     // arena registers tens of GiB of host pages, like the drafter above - WDDM then refused the head's cudaMalloc on
     // a 16 GB card with the desktop on the iGPU ("native head upload: out of memory" with GiBs free).
     const strata::core::WeightRef* wo = wt.find("output.weight");
-    if (wo == nullptr) { std::fprintf(stderr, "strata generate: output.weight is missing\n"); return 1; }
+    if (wo == nullptr) { std::fprintf(stderr, "momoe generate: output.weight is missing\n"); return 1; }
     const int64_t n_vocab = wo->ne1;
     strata::core::NativeHead native_head;
     if (!o.native_head_gguf.empty() && !multi_gpu) {   // a layer split's head is on its last stage
         const auto head_t0 = std::chrono::steady_clock::now();
         if (!native_head.load(o.native_head_shards, g.n_embd, n_vocab, err)) {
-            std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(), vram_free_note().c_str());
+            std::fprintf(stderr, "momoe generate: %s%s\n", err.c_str(), vram_free_note().c_str());
             return 1;
         }
-        std::fprintf(stderr, "strata generate: experimental native Q5_K head, %llu bytes, in %.1f s\n",
+        std::fprintf(stderr, "momoe generate: experimental native Q5_K head, %llu bytes, in %.1f s\n",
                      (unsigned long long) native_head.weight_bytes(),
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - head_t0).count());
     }
@@ -4564,7 +4564,7 @@ int main(int argc, char** argv) {
     float* d_logits = nullptr;
     if (cudaMalloc(&d_logits, (size_t) n_vocab * 4) != cudaSuccess) {
         (void) cudaGetLastError();
-        std::fprintf(stderr, "strata generate: the logits buffer failed%s\n", vram_free_note().c_str());
+        std::fprintf(stderr, "momoe generate: the logits buffer failed%s\n", vram_free_note().c_str());
         return 1;
     }
     // Create the additional contexts after MTP has secured CUDA0 memory, but
@@ -4572,10 +4572,10 @@ int main(int argc, char** argv) {
     for (int r = 1; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0 && !early_remote) {
         double free_gib = 0;
         if (!strata::core::RemoteExperts::preflight(remote_dev[r], free_gib, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "strata generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
+        std::fprintf(stderr, "momoe generate: CUDA%d context ready, %.2f GiB free before expert arena registration\n",
                      remote_dev[r], free_gib);
     }
 
@@ -4608,12 +4608,12 @@ int main(int argc, char** argv) {
         if (!named) cudaGetLastError();
         const char* name = named && p.name[0] ? p.name : "(an unnamed GPU)";
 #if defined(STRATA_USE_HIP)
-        std::fprintf(stderr, "strata generate: GPU %d: %s (%s)\n", dev, name, named ? p.gcnArchName : "?");
+        std::fprintf(stderr, "momoe generate: GPU %d: %s (%s)\n", dev, name, named ? p.gcnArchName : "?");
         // A hint only, never an action: on RDNA4 with an int8 KV the opt-in matrix-core prompt attention reads prompts
         // about 30% faster (R9700, PR #1318), but its output differs from the default kernel's in the last bits, so it
         // stays the user's choice.  Silent when the variable is set to anything (STRATA_HIP_WMMA=0 included).
         if (named && o.kv == "int8" && std::strncmp(p.gcnArchName, "gfx12", 5) == 0 && std::getenv("STRATA_HIP_WMMA") == nullptr)
-            std::fprintf(stderr, "strata generate: hint: STRATA_HIP_WMMA=1 reads prompts about 30%% faster on this card with "
+            std::fprintf(stderr, "momoe generate: hint: STRATA_HIP_WMMA=1 reads prompts about 30%% faster on this card with "
                                  "--kv int8 (prompt attention on the matrix cores); it is off by default because the output "
                                  "bits change (last-place rounding). Nothing was enabled.\n");
 #if defined(_WIN32)
@@ -4621,7 +4621,7 @@ int main(int argc, char** argv) {
         if (HMODULE h = GetModuleHandleA("amdhip64_7.dll")) {
             char path[MAX_PATH] = {};
             if (GetModuleFileNameA(h, path, MAX_PATH) > 0) {
-                std::fprintf(stderr, "strata generate: HIP runtime %s\n", path);
+                std::fprintf(stderr, "momoe generate: HIP runtime %s\n", path);
                 // #1261: the bundled runtime sits beside the exe, but Windows bound the import to another copy (the AMD
                 // driver's, in System32, was seen with a different build): kernels of this engine can then fail
                 // (hipErrorInvalidDeviceFunction in the prompt GEMMs).  Said, not changed - the import is bound before main.
@@ -4632,7 +4632,7 @@ int main(int argc, char** argv) {
                     beside = (cut == std::string::npos ? std::string() : beside.substr(0, cut + 1)) + "amdhip64_7.dll";
                     if (GetFileAttributesA(beside.c_str()) != INVALID_FILE_ATTRIBUTES &&
                         _stricmp(beside.c_str(), path) != 0) {
-                        std::fprintf(stderr, "strata generate: WARNING: the HIP runtime in use is not the bundled one beside "
+                        std::fprintf(stderr, "momoe generate: WARNING: the HIP runtime in use is not the bundled one beside "
                                              "the engine (%s): if prompts fail with hipErrorInvalidDeviceFunction, tell the "
                                              "maintainers with this log (#1261)\n",
                                      beside.c_str());
@@ -4644,7 +4644,7 @@ int main(int argc, char** argv) {
                                                        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
                         const DWORD le = probe != nullptr ? 0 : GetLastError();
                         if (probe != nullptr) FreeLibrary(probe);
-                        std::fprintf(stderr, "strata generate: the bundled runtime beside the engine %s (GetLastError %lu)%s\n",
+                        std::fprintf(stderr, "momoe generate: the bundled runtime beside the engine %s (GetLastError %lu)%s\n",
                                      probe != nullptr ? "loads on its own" : "does NOT load", (unsigned long) le,
                                      le == 126 ? ": a DLL it imports is missing from the engine's folder (rocm_kpack.dll, "
                                                  "msvcp140.dll, vcruntime140.dll, vcruntime140_1.dll); run START-HERE.bat "
@@ -4655,7 +4655,7 @@ int main(int argc, char** argv) {
         }
 #endif
 #else
-        std::fprintf(stderr, "strata generate: GPU %d: %s, compute capability %d.%d%s\n", dev, name,
+        std::fprintf(stderr, "momoe generate: GPU %d: %s, compute capability %d.%d%s\n", dev, name,
                      strata::cc_major_of(p.major), strata::cc_minor_of(p.minor),
                      strata::emulated_cc() ? " (STRATA_EMULATE_CC: a test mode, the card is emulated)" : "");
 #if !defined(STRATA_HIP_GFX906)   // a CUDA toolkit mismatch; the gfx906 HIP build has no CUDART_VERSION
@@ -4663,7 +4663,7 @@ int main(int argc, char** argv) {
             // CMake resolved to the system's CUDA 12 one) reads cudaDeviceProp shifted - silently, and slowly
             int rt = 0;
             if (cudaRuntimeGetVersion(&rt) == cudaSuccess && rt / 1000 != CUDART_VERSION / 1000)
-                std::fprintf(stderr, "strata generate: WARNING: this engine was compiled with CUDA %d.%d headers but "
+                std::fprintf(stderr, "momoe generate: WARNING: this engine was compiled with CUDA %d.%d headers but "
                                      "loaded a CUDA %d.%d runtime (libcudart): GPU properties can read wrong and some "
                                      "kernels go unused. Rebuild it against one toolkit (cmake -DCUDAToolkit_ROOT=<the "
                                      "toolkit>, with its libcudart.so present) (#542)\n",
@@ -4673,7 +4673,7 @@ int main(int argc, char** argv) {
 #endif
         const std::string e = strata::core::device_code_error();
         if (!e.empty()) {
-            std::fprintf(stderr, "strata generate: this engine has no code for %s (sm_%d%d): %s - rebuild it for this "
+            std::fprintf(stderr, "momoe generate: this engine has no code for %s (sm_%d%d): %s - rebuild it for this "
                                  "card (setup does: START-HERE.bat --setup)\n", name, p.major, p.minor, e.c_str());
             return 1;
         }
@@ -4691,10 +4691,10 @@ int main(int argc, char** argv) {
         if (const char* v = std::getenv("STRATA_FETCH_THREADS"); v != nullptr && std::atoi(v) > 0)
             src.set_fetch_threads(std::atoi(v));
         if (!src.open(o.pack, g.n_layers, g.n_expert, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "strata generate: experts via mmap (--mmap-experts; %s)\n",
+        std::fprintf(stderr, "momoe generate: experts via mmap (--mmap-experts; %s)\n",
                      src.gguf_mode() ? "the GGUF shards in place, no experts.bin" : "the A/B arm of R2.1");
         // #286: with a RAM budget the hottest experts live in it, and the rest are read from the drive unbuffered
         // when the file cache could not keep them beside the budget anyway (a 32 GB PC) - the mapped reads' page
@@ -4705,11 +4705,11 @@ int main(int argc, char** argv) {
         if (o.resident_budget > 0) {
             std::string why;
             const bool ub = src.set_unbuffered(o.resident_budget, why);
-            std::fprintf(stderr, "strata generate: the file tier reads %s (%s)\n",
+            std::fprintf(stderr, "momoe generate: the file tier reads %s (%s)\n",
                          ub ? "unbuffered" : "through the file cache", why.c_str());
         } else if (const char* env = std::getenv("STRATA_UNBUFFERED_LOAD"); env != nullptr && env[0] != '\0' &&
                    env[0] != '0') {
-            std::fprintf(stderr, "strata generate: the file tier reads through the file cache (STRATA_UNBUFFERED_LOAD=%s "
+            std::fprintf(stderr, "momoe generate: the file tier reads through the file cache (STRATA_UNBUFFERED_LOAD=%s "
                                  "ignored: without --resident-budget-gib the file cache holds the experts)\n", env);
         }
 #if defined(_WIN32)
@@ -4718,10 +4718,10 @@ int main(int argc, char** argv) {
         if (o.resident_cpu_experts && !src.unbuffered()) {
             std::string why;
             if (src.begin_startup_unbuffered(why))
-                std::fprintf(stderr, "strata generate: the GPU cache's fill and the RAM copy read unbuffered (%s)\n",
+                std::fprintf(stderr, "momoe generate: the GPU cache's fill and the RAM copy read unbuffered (%s)\n",
                              why.c_str());
             else if (why.find("STRATA_STARTUP_UNBUFFERED") == std::string::npos)
-                std::fprintf(stderr, "strata generate: the GPU cache's fill and the RAM copy read through the mapping "
+                std::fprintf(stderr, "momoe generate: the GPU cache's fill and the RAM copy read through the mapping "
                                      "(%s)\n", why.c_str());
         }
 #endif
@@ -4731,23 +4731,23 @@ int main(int argc, char** argv) {
             const char* th = std::getenv("STRATA_IO_PF_THREADS");
             src.set_io_prefetch(true, th != nullptr ? std::atoi(th) : 0);
             if (src.io_prefetch())
-                std::fprintf(stderr, "strata generate: file tier io prefetch ON (STRATA_IO_PREFETCH=1): whole-blob preads, "
+                std::fprintf(stderr, "momoe generate: file tier io prefetch ON (STRATA_IO_PREFETCH=1): whole-blob preads, "
                                      "the layer's uncached experts and the predicted ones read by %s I/O threads (STRATA_IO_PF_THREADS, default 8)\n",
                              th != nullptr ? th : "8");
             else
-                std::fprintf(stderr, "strata generate: STRATA_IO_PREFETCH=1 is not available here (Linux mapped file tier "
+                std::fprintf(stderr, "momoe generate: STRATA_IO_PREFETCH=1 is not available here (Linux mapped file tier "
                                      "only, not with unbuffered reads); the file tier reads as before\n");
             if (src.io_prefetch()) {   // recommend, never force: the engine runs as asked
                 const char* st = std::getenv("STRATA_IO_PF_STAGE");
                 if (st != nullptr && std::atoi(st) != 0)
-                    std::fprintf(stderr, "strata generate: note: STRATA_IO_PF_STAGE=1 (staging) measured faster only on a 32 GB-class "
+                    std::fprintf(stderr, "momoe generate: note: STRATA_IO_PF_STAGE=1 (staging) measured faster only on a 32 GB-class "
                                          "box (+25%% on an RTX 3060, 32 GB); it was slower at 16 GB and on an iGPU (docs/DETAILS.md, file tier I/O)\n");
 #if defined(STRATA_USE_HIP)
                 int igpu_dev = 0;
                 cudaDeviceProp igpu_p{};
                 if (cudaGetDevice(&igpu_dev) == cudaSuccess && cudaGetDeviceProperties(&igpu_p, igpu_dev) == cudaSuccess &&
                     igpu_p.integrated != 0 && o.adapt_every > 0 && o.adapt_swaps > 0)
-                    std::fprintf(stderr, "strata generate: WARNING: STRATA_IO_PREFETCH=1 with the adaptive tier on an AMD iGPU (%s): "
+                    std::fprintf(stderr, "momoe generate: WARNING: STRATA_IO_PREFETCH=1 with the adaptive tier on an AMD iGPU (%s): "
                                          "GPU resets were seen with this combination under memory pressure (Radeon 780M); "
                                          "--adapt-every 100000 avoided them. Continuing as asked.\n", igpu_p.gcnArchName);
                 else
@@ -4769,20 +4769,20 @@ int main(int argc, char** argv) {
         const bool pin_wddm_cap = pin_env < 0 && (o.expert_cache_remote[0] > 0 || multi_gpu) && under_wddm();
         const uint64_t pin_limit = pin_env >= 0 ? (uint64_t) pin_env << 30 : pin_wddm_cap ? (8ull << 30) : 0;
         if (pin_env >= 0)
-            std::fprintf(stderr, "strata generate: STRATA_ARENA_PIN_GIB=%d: %s\n", pin_env,
+            std::fprintf(stderr, "momoe generate: STRATA_ARENA_PIN_GIB=%d: %s\n", pin_env,
                          pin_env == 0 ? "the whole expert arena is pinned" : "the expert arena's pinning is capped");
         else if (pin_wddm_cap)
-            std::fprintf(stderr, "strata generate: multi-GPU under WDDM: at most 8 GiB of the expert arena is pinned "
+            std::fprintf(stderr, "momoe generate: multi-GPU under WDDM: at most 8 GiB of the expert arena is pinned "
                                  "(STRATA_ARENA_PIN_GIB changes it)\n");
         if (!arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, err, pin_limit,
                             o.shared_expert_arena)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         if (!arena_src.ram_warning().empty())   // #633: said before the load's numbers, which it explains
-            std::fprintf(stderr, "strata generate: WARNING: %s\n", arena_src.ram_warning().c_str());
-        std::fprintf(stderr, "strata generate: expert arena: %s\n", arena_src.note().c_str());
-        std::fprintf(stderr, "strata generate: loaded %.2f GiB at %.2f GiB/s\n",
+            std::fprintf(stderr, "momoe generate: WARNING: %s\n", arena_src.ram_warning().c_str());
+        std::fprintf(stderr, "momoe generate: expert arena: %s\n", arena_src.note().c_str());
+        std::fprintf(stderr, "momoe generate: loaded %.2f GiB at %.2f GiB/s\n",
                      (double) strata::kernels::cpu::expert_layout().total / (1024.0 * 1024 * 1024),
                      arena_src.load_gib_per_second());
         // A rate under ~0.2 GiB/s is not the hardware.  Task Scheduler / service contexts throttle this
@@ -4793,8 +4793,8 @@ int main(int argc, char** argv) {
 #ifdef _WIN32   // a Windows launch context; elsewhere a load this slow is the disk
         if (arena_src.load_gib_per_second() > 0.0 && arena_src.load_gib_per_second() < 0.2) {
             std::fprintf(stderr,
-                         "strata generate: hint: ~24x below what this hardware streams from a normal "
-                         "launch. If Strata is started by Task Scheduler or a service, register the task "
+                         "momoe generate: hint: ~24x below what this hardware streams from a normal "
+                         "launch. If Momoe is started by Task Scheduler or a service, register the task "
                          "with Priority 4 (Normal) and 'Run with highest privileges' - the scheduler's "
                          "defaults (Below normal + a least-privilege token) throttle the load. See "
                          "docs/DETAILS.md ('Running it at startup').\n");
@@ -4804,14 +4804,14 @@ int main(int argc, char** argv) {
     }
     strata::kernels::cpu::ExpertPool pool(o.pool_workers, /*pin=*/true, /*host_works=*/!o.no_host_worker,
                                         o.pool_affinity, o.pool_tasks);
-    std::fprintf(stderr, "strata generate: CPU pool tasks/phase: %d%s, participating threads: %d\n",
+    std::fprintf(stderr, "momoe generate: CPU pool tasks/phase: %d%s, participating threads: %d\n",
                  o.pool_tasks ? o.pool_tasks : 3 * (pool.workers() + (pool.host_works() ? 1 : 0)),
                  o.pool_tasks ? " (capped by rows)" : " (automatic)",
                  pool.workers() + (pool.host_works() ? 1 : 0));
     if (pool.is_hybrid() && pool.affinity() != strata::kernels::cpu::PoolAffinity::All) {
         const char* aff_str = pool.affinity() == strata::kernels::cpu::PoolAffinity::PCores ? "p-cores" :
                               pool.affinity() == strata::kernels::cpu::PoolAffinity::All ? "all" : "auto";
-        std::fprintf(stderr, "strata generate: hybrid CPU detected (%d P-cores / %d threads, %d E-cores), pool workers: %d, affinity: %s\n",
+        std::fprintf(stderr, "momoe generate: hybrid CPU detected (%d P-cores / %d threads, %d E-cores), pool workers: %d, affinity: %s\n",
                      pool.p_cores(), pool.p_threads(), pool.e_cores(), pool.workers(), aff_str);
     }
     {   // where the threads run (--host-core)
@@ -4819,7 +4819,7 @@ int main(int argc, char** argv) {
         std::string on;
         for (int i = 0; i < pool.workers() && i < (int) ht.worker_cores.size(); ++i)
             on += (i > 0 ? "," : "") + std::to_string(ht.worker_cores[(size_t) i]);
-        std::fprintf(stderr, "strata generate: %d pool workers on logical processors %s, the host thread on %d%s "
+        std::fprintf(stderr, "momoe generate: %d pool workers on logical processors %s, the host thread on %d%s "
                              "(--host-core %s)\n", pool.workers(), on.c_str(), ht.host_core,
                      pool.host_works() ? " (draining too)" : "",
                      strata::kernels::cpu::host_core_setting() == strata::kernels::cpu::HostCore::Last ? "last" : "first");
@@ -4843,7 +4843,7 @@ int main(int argc, char** argv) {
     const int64_t pipe_first = o.pipeline_windows <= 0 ? 0
         : (kPipeWindowMib << 20) + (o.pipeline_windows >= 2 ? 2 * (int64_t) gdn_snapshot_bytes(ss) : 0);
     if (pipe_first > 0)
-        std::fprintf(stderr, "strata generate: --pipeline-windows %d: %lld MiB of CUDA0 kept out of the expert cache "
+        std::fprintf(stderr, "momoe generate: --pipeline-windows %d: %lld MiB of CUDA0 kept out of the expert cache "
                              "(the second verifier%s)\n", o.pipeline_windows, (long long) (pipe_first >> 20),
                      o.pipeline_windows >= 2 ? ", the GDN snapshots" : "");
     // The MiB the prompt path's OWN buffers (no loan) take, which the cache sizing leaves out.  0.1.39's rule is
@@ -4855,7 +4855,7 @@ int main(int argc, char** argv) {
         static const bool exact = [] { const char* v = std::getenv("STRATA_OWNED_PRICE"); return v != nullptr && std::string(v) == "exact"; }();
         if (!exact) return 160 + (o.prefill_chunk * 680) / 1024;
         const int64_t mib = ((int64_t) strata::prefill::Prefill::bytes_needed_owned(g, ss, o.prefill_chunk, srcp != nullptr) + (1 << 20) - 1) >> 20;
-        std::fprintf(stderr, "strata generate: STRATA_OWNED_PRICE=exact: the prompt path's own buffers for a %lld-token chunk: %lld MiB (the 0.1.39 rule: %lld MiB)\n",
+        std::fprintf(stderr, "momoe generate: STRATA_OWNED_PRICE=exact: the prompt path's own buffers for a %lld-token chunk: %lld MiB (the 0.1.39 rule: %lld MiB)\n",
                      (long long) o.prefill_chunk, (long long) mib, (long long) (160 + (o.prefill_chunk * 680) / 1024));
         return mib + 64;   // a margin for the allocator
     };
@@ -4881,7 +4881,7 @@ int main(int argc, char** argv) {
             size_t fb_now = 0, tb_now = 0;
             // #1709: a 16 GB card (RX 9070 XT, 7800 XT) reports 15.9 GiB, just under 16: the floor is for 15 GiB and up
             if (cudaMemGetInfo(&fb_now, &tb_now) == cudaSuccess && tb_now >= (15ull << 30)) {
-                std::fprintf(stderr, "strata generate: expert cache auto: Windows keeps %d MiB free after the cache on a card "
+                std::fprintf(stderr, "momoe generate: expert cache auto: Windows keeps %d MiB free after the cache on a card "
                                      "this size (the default %d MiB left 323 MiB on a 20 GB card and Windows paged, #1376); "
                                      "--vram-reserve-mib N sets it\n", kWddmAutoReserveMib, o.vram_reserve_mib);
                 o.vram_reserve_mib = kWddmAutoReserveMib;
@@ -4907,11 +4907,11 @@ int main(int argc, char** argv) {
         int64_t slots = ((int64_t) free_b - reserve) / blob;
         if (!profile.empty()) slots = std::min<int64_t>(slots, (int64_t) profile.size());
         o.expert_cache = (int) std::max<int64_t>(slots, 0);
-        std::fprintf(stderr, "strata generate: expert cache auto: %.2f GiB free, %d MiB reserved (+%lld MiB for the "
+        std::fprintf(stderr, "momoe generate: expert cache auto: %.2f GiB free, %d MiB reserved (+%lld MiB for the "
                              "draft head) -> %d slots\n",
                      (double) free_b / 1073741824.0, o.vram_reserve_mib, (long long) (mtp_bind >> 20), o.expert_cache);
         if (dense_attn > 0)
-            std::fprintf(stderr, "strata generate: expert cache auto: +%lld MiB kept for the dense attention at %lld "
+            std::fprintf(stderr, "momoe generate: expert cache auto: +%lld MiB kept for the dense attention at %lld "
                                  "tokens of context\n", (long long) (dense_attn >> 20), (long long) o.max_context);
 #if defined(STRATA_USE_HIP) && !defined(_WIN32)
         // An APU's "VRAM" is system RAM: the device-free figure above counts the whole GPU-addressable pool and does not
@@ -4926,7 +4926,7 @@ int main(int argc, char** argv) {
                 const int64_t host_headroom = 4ll << 30;   // the OS and request-time CPU work
                 const int64_t cache_b = (int64_t) o.expert_cache * blob;
                 if (cache_b > (int64_t) hm.available - host_headroom)
-                    std::fprintf(stderr, "strata generate: WARNING: this GPU shares system RAM, and the cache above (%.2f GiB) is "
+                    std::fprintf(stderr, "momoe generate: WARNING: this GPU shares system RAM, and the cache above (%.2f GiB) is "
                                          "more than the host memory available now (%.2f GiB) less 4 GiB for the OS: the system may "
                                          "run out of memory; --expert-cache N sets the cache by hand\n",
                                  (double) cache_b / 1073741824.0, (double) hm.available / 1073741824.0);
@@ -4958,7 +4958,7 @@ int main(int argc, char** argv) {
                 const int r = (int) std::min<int64_t>(fit_mib, o.vram_reserve_mib);
                 int64_t s2 = ((int64_t) free_b - ((((int64_t) r + prefill_mib) << 20) + mtp_bind + pipe_first + dense_attn)) / blob;
                 if (!profile.empty()) s2 = std::min<int64_t>(s2, (int64_t) profile.size());
-                std::fprintf(stderr, "strata generate: expert cache auto: the %d MiB reserve leaves too few slots on "
+                std::fprintf(stderr, "momoe generate: expert cache auto: the %d MiB reserve leaves too few slots on "
                                      "this card (a working cache needs %lld): a %d MiB reserve instead -> %lld slots\n",
                              o.vram_reserve_mib, (long long) min_slots, r, (long long) s2);
                 o.vram_reserve_mib = r;
@@ -4982,7 +4982,7 @@ int main(int argc, char** argv) {
                     ? ", a smaller --vram-reserve-mib (" + std::to_string(o.vram_reserve_mib) + " now; " +
                           std::to_string(kSmallReserveMib) + " is enough on a small card)"
                     : std::string();
-            std::fprintf(stderr, "strata generate: no VRAM is left for the expert cache: it needs at least %lld slots "
+            std::fprintf(stderr, "momoe generate: no VRAM is left for the expert cache: it needs at least %lld slots "
                                  "(%lld MiB), about %lld MiB more than this card has free. To make room: a smaller "
                                  "--max-context (the session, mostly its KV cache, takes %lld MiB at %lld tokens), "
                                  "--kv q4_0, the English draft subset (setup --draft-vocab en; the draft head takes "
@@ -5005,7 +5005,7 @@ int main(int argc, char** argv) {
         const int64_t fit = std::max<int64_t>(((int64_t) free_b - reserve) / (int64_t) strata::kernels::cpu::expert_layout().max_blob, 0);
         if (o.expert_cache > fit) {
             // a WARNING that names the knob: the user asked for this size, and gets fewer slots
-            std::fprintf(stderr, "strata generate: WARNING: layer split: --expert-cache %d leaves no room for the "
+            std::fprintf(stderr, "momoe generate: WARNING: layer split: --expert-cache %d leaves no room for the "
                                  "prompt path's buffers (%lld MiB) and the %d MiB reserve on CUDA0: %lld slots instead "
                                  "(a smaller --vram-reserve-mib leaves more of them)\n", o.expert_cache,
                          (long long) prefill_mib, o.vram_reserve_mib, (long long) fit);
@@ -5040,7 +5040,7 @@ int main(int argc, char** argv) {
                 for (int64_t s = 0; s < q; ++s) sized_slots.push_back(b);
             }
             o.expert_cache = (int) sized_slots.size();
-            std::fprintf(stderr, "strata generate: per-layer slots use each layer's blob: %d uniform slots "
+            std::fprintf(stderr, "momoe generate: per-layer slots use each layer's blob: %d uniform slots "
                                  "(%.2f GiB) -> %d slots, %lld per layer (%.2f GiB)\n",
                          asked, (double) budget / 1073741824.0, o.expert_cache, (long long) q,
                          (double) ((uint64_t) q * per_layer_bytes) / 1073741824.0);
@@ -5063,7 +5063,7 @@ int main(int argc, char** argv) {
         // #831: the sized-slots loop walks the profile's pairs, so the profile's length is the ceiling; an explicit
         // --expert-cache above it used to be cut with no word.  A warning only (what is allocated does not change).
         if (!auto_cache && o.expert_cache > 0 && sized_slots.size() == profile.size() && (size_t) o.expert_cache > profile.size())
-            std::fprintf(stderr, "strata generate: WARNING: --expert-cache %d is more than the %zu pairs of the profile %s: "
+            std::fprintf(stderr, "momoe generate: WARNING: --expert-cache %d is more than the %zu pairs of the profile %s: "
                                  "%zu slots (the profile is the ceiling on a native pack; a profile that ranks every "
                                  "(layer, expert) pair lifts it - tools/make_profile.py)\n", o.expert_cache,
                          profile.size(), o.expert_profile.c_str(), profile.size());
@@ -5081,7 +5081,7 @@ int main(int argc, char** argv) {
         if (why == nullptr) why = "it is NVIDIA-only for now";
 #endif
         if (why != nullptr) {
-            std::fprintf(stderr, "strata generate: --vram-elastic is off: %s\n", why);
+            std::fprintf(stderr, "momoe generate: --vram-elastic is off: %s\n", why);
             o.vram_elastic = false;
         } else {
             xcache.set_segment_bytes(o.vram_segment_mib << 20);
@@ -5157,13 +5157,13 @@ int main(int argc, char** argv) {
 #endif
                 if (auto_cache && failed < 8 && shrink_to(cache_bytes() / 4 * 3)) {
                     ++failed;
-                    std::fprintf(stderr, "strata generate: %s%s; trying a smaller expert cache: %d slots\n", err.c_str(),
+                    std::fprintf(stderr, "momoe generate: %s%s; trying a smaller expert cache: %d slots\n", err.c_str(),
                                  commit, o.expert_cache);
                     continue;
                 }
-                std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
 #if defined(_WIN32)
-                std::fprintf(stderr, "strata generate: on Windows the graphics card's memory also needs room in the page "
+                std::fprintf(stderr, "momoe generate: on Windows the graphics card's memory also needs room in the page "
                                      "file: set it to \"System managed\" (System > About > Advanced system settings > "
                                      "Performance > Advanced > Virtual memory), or lower --expert-cache\n");
 #endif
@@ -5182,18 +5182,18 @@ int main(int argc, char** argv) {
             if (free_b < ((size_t) 16 << 20))
                 give = std::max<int64_t>(give, ++zero_reads <= 2 ? 1ll << 30 : xcache.bytes() / 4);
             const int64_t keep_bytes = xcache.bytes() - give;
-            std::fprintf(stderr, "strata generate: only %lld MiB free once the slots are written (reserve %d MiB); "
+            std::fprintf(stderr, "momoe generate: only %lld MiB free once the slots are written (reserve %d MiB); "
                                  "shrinking the expert cache\n", (long long) (free_b >> 20), o.vram_reserve_mib);
             xcache.close();
             if (!shrink_to(keep_bytes)) break;
         }
         if (failed > 0 && o.expert_cache > 0)
-            std::fprintf(stderr, "strata generate: expert cache: %d slots (%.2f GiB) after %d smaller tries - a bigger "
+            std::fprintf(stderr, "momoe generate: expert cache: %d slots (%.2f GiB) after %d smaller tries - a bigger "
                                  "page file lets it use more of the free VRAM\n",
                          o.expert_cache, (double) xcache.bytes() / 1073741824.0, failed);
     }
     if (o.expert_cache > 0) {
-        std::fprintf(stderr, "strata generate: expert cache %lld slots, %.2f GiB of VRAM; policy is\n",
+        std::fprintf(stderr, "momoe generate: expert cache %lld slots, %.2f GiB of VRAM; policy is\n",
                      (long long) xcache.slots(), xcache.gib());
         mem_mark("opening the expert cache");
         xcache.set_per_layer_admission(o.expert_cache_per_layer);
@@ -5204,7 +5204,7 @@ int main(int argc, char** argv) {
         // forced on 2,557 tokens (bench/results/2026-09-27-cache-parity): 95-98% same top-1, and perplexity equal
         // (on - off = -0.005 +- 0.005 nats). Neither output is more correct than the other.
         std::fprintf(stderr,
-                     "strata generate: the GPU computes the experts in the cache; it rounds differently from the CPU,\n"
+                     "momoe generate: the GPU computes the experts in the cache; it rounds differently from the CPU,\n"
                      "                 so a reply can differ slightly from a run without the cache (same quality:\n"
                      "                 bench/results/2026-09-27-cache-parity).\n");
         if (o.expert_cache_per_layer) {
@@ -5238,7 +5238,7 @@ int main(int argc, char** argv) {
             const char* v = std::getenv("STRATA_FILL_AHEAD");
             fill_ahead = v == nullptr ? 256 : std::max(0, std::atoi(v));
             if (fill_ahead > 0 && !src.advise_pairs(profile.data(), std::min<int64_t>(fill_ahead, want))) fill_ahead = 0;
-            std::fprintf(stderr, "strata generate: the profile fill asks for %lld pairs ahead (STRATA_FILL_AHEAD)\n",
+            std::fprintf(stderr, "momoe generate: the profile fill asks for %lld pairs ahead (STRATA_FILL_AHEAD)\n",
                          (long long) fill_ahead);
         }
         const auto fill_t0 = std::chrono::steady_clock::now();
@@ -5258,7 +5258,7 @@ int main(int argc, char** argv) {
             const uint8_t* b = srcp->blob_stable(profile[(size_t) i].first, profile[(size_t) i].second);
             if (b == nullptr || !xcache.fill_slot_blocking(slot, b, err,
                     (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(profile[(size_t) i].first))) {
-                std::fprintf(stderr, "strata generate: the profile fill failed at pair %lld: %s\n",
+                std::fprintf(stderr, "momoe generate: the profile fill failed at pair %lld: %s\n",
                              (long long) i, err.c_str());
                 return 1;
             }
@@ -5272,11 +5272,11 @@ int main(int argc, char** argv) {
         if (prefilled > 0 && !xcache.verify_slot(xcache.slot_of(profile[0].first, profile[0].second),
                                 srcp->blob_stable(profile[0].first, profile[0].second), err,
                                 (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(profile[0].first))) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         mem_mark("the profile fill");
-        std::fprintf(stderr, "strata generate: pre-filled %lld of %lld slots from the profile in %.1f s (%.0f MB/s); "
+        std::fprintf(stderr, "momoe generate: pre-filled %lld of %lld slots from the profile in %.1f s (%.0f MB/s); "
                              "slot 0 verified\n",
                      (long long) prefilled, (long long) (per_layer ? xcache.slots() : want), fill_s,
                      fill_s > 0 ? (double) fill_bytes / 1e6 / fill_s : 0.0);
@@ -5310,7 +5310,7 @@ int main(int argc, char** argv) {
                 h = strata::core::fnv1a64((const uint8_t*) v, sizeof v, h);
                 h = strata::core::fnv1a64((const uint8_t*) &sh[i], sizeof sh[i], h);
             }
-            std::fprintf(stderr, "strata generate: expert cache checksum %016llx (%zu slots%s)\n", (unsigned long long) h,
+            std::fprintf(stderr, "momoe generate: expert cache checksum %016llx (%zu slots%s)\n", (unsigned long long) h,
                          sl.size(), copy_ok ? "" : ", A READ-BACK FAILED");
         }
     }
@@ -5325,7 +5325,7 @@ int main(int argc, char** argv) {
         {
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
-            std::fprintf(stderr, "strata generate: layer split, CUDA%d: %.2f GiB free of %.2f, room for experts %.2f GiB\n",
+            std::fprintf(stderr, "momoe generate: layer split, CUDA%d: %.2f GiB free of %.2f, room for experts %.2f GiB\n",
                          st.dev, (double) fb / 1073741824.0, (double) tb / 1073741824.0, (double) room / 1073741824.0);
         }
         std::vector<int64_t> sized;
@@ -5346,14 +5346,14 @@ int main(int argc, char** argv) {
             if (stage_open || attempt >= 3) break;
             (void) cudaGetLastError();
             const size_t keep = sized.size() * 9 / 10;
-            std::fprintf(stderr, "strata generate: layer split, CUDA%d expert cache: %s; trying %zu of %zu slots "
+            std::fprintf(stderr, "momoe generate: layer split, CUDA%d expert cache: %s; trying %zu of %zu slots "
                                  "(try %d of 3)\n", st.dev, err.c_str(), keep, sized.size(), attempt + 1);
             if (keep == 0) break;
             st.cache.close();
             sized.resize(keep);
         }
         if (!stage_open) {
-            std::fprintf(stderr, "strata generate: layer split, CUDA%d expert cache: %s\n", st.dev,
+            std::fprintf(stderr, "momoe generate: layer split, CUDA%d expert cache: %s\n", st.dev,
                          sized.empty() ? "no room" : err.c_str());
             return 1;
         }
@@ -5364,7 +5364,7 @@ int main(int argc, char** argv) {
             if (slot == strata::core::kNotResident) break;
             const uint8_t* b = srcp->blob_stable(pr.first, pr.second);
             if (b == nullptr || !st.cache.fill_slot_blocking(slot, b, err, (int64_t) lay.blob_bytes(pr.first))) {
-                std::fprintf(stderr, "strata generate: layer split, CUDA%d profile fill failed at pair %lld: %s\n",
+                std::fprintf(stderr, "momoe generate: layer split, CUDA%d profile fill failed at pair %lld: %s\n",
                              st.dev, (long long) filled, err.c_str());
                 return 1;
             }
@@ -5373,17 +5373,17 @@ int main(int argc, char** argv) {
         if (filled == 0 || !st.cache.verify_slot(st.cache.slot_of(st.profile[0].first, st.profile[0].second),
                                                  srcp->blob_stable(st.profile[0].first, st.profile[0].second), err,
                                                  (int64_t) lay.blob_bytes(st.profile[0].first))) {
-            std::fprintf(stderr, "strata generate: layer split, CUDA%d expert cache: %s\n", st.dev,
+            std::fprintf(stderr, "momoe generate: layer split, CUDA%d expert cache: %s\n", st.dev,
                          filled == 0 ? "nothing filled" : err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "strata generate: layer split: CUDA%d runs layers %lld-%lld, expert cache %lld slots "
+        std::fprintf(stderr, "momoe generate: layer split: CUDA%d runs layers %lld-%lld, expert cache %lld slots "
                              "(%.2f GiB), %lld of its %zu profiled pairs; slot 0 verified\n",
                      st.dev, (long long) st.lb, (long long) (st.le - 1), (long long) st.cache.slots(), st.cache.gib(),
                      (long long) filled, st.profile.size());
     }
     if (multi_gpu)
-        std::fprintf(stderr, "strata generate: layer split: CUDA0 runs layers 0-%lld\n", (long long) (split_at[0] - 1));
+        std::fprintf(stderr, "momoe generate: layer split: CUDA0 runs layers 0-%lld\n", (long long) (split_at[0] - 1));
 
     // ---- LAYER 2: exact startability probe on the live free figures.  Every session, cache and batch slot is
     // carved by now, so `cudaMemGetInfo` reads what serve's own_fits (5855-5869) will read.  Run serve's own
@@ -5425,14 +5425,14 @@ int main(int argc, char** argv) {
             }
         }
         if (probe_ok) {
-            std::fprintf(stderr, "strata generate: layer split auto: L2 probe: the split is startable on the live free figures\n");
+            std::fprintf(stderr, "momoe generate: layer split auto: L2 probe: the split is startable on the live free figures\n");
         } else {
-            std::fprintf(stderr, "strata generate: layer split auto: L2 probe: CUDA%d cannot start the prompt path: "
+            std::fprintf(stderr, "momoe generate: layer split auto: L2 probe: CUDA%d cannot start the prompt path: "
                                  "a 512-token chunk needs %lld MiB of its own buffers (+512 MiB headroom) with %lld MiB "
                                  "free, and its %lld-slot cache cannot lend it (needs %lld slots)\n",
                          probe_dev, (long long) (probe_need >> 20), (long long) (probe_fb >> 20),
                          (long long) probe_slots, (long long) probe_est);
-            std::fprintf(stderr, "strata generate: to make room: a smaller --max-context, --prefill 512, a smaller "
+            std::fprintf(stderr, "momoe generate: to make room: a smaller --max-context, --prefill 512, a smaller "
                                  "--vram-reserve-mib, an explicit --layer-split, or close other programs using the GPU\n");
         }
     }
@@ -5443,7 +5443,7 @@ int main(int argc, char** argv) {
     const bool multi_remote = o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
     if (o.expert_cache_remote[0] > 0) {
         if (o.expert_cache <= 0 || profile.empty() || o.no_pool) {
-            std::fprintf(stderr, "strata generate: remote experts need --expert-profile, "
+            std::fprintf(stderr, "momoe generate: remote experts need --expert-profile, "
                                  "a CUDA0 expert cache and the expert pool\n");
             return 2;
         }
@@ -5466,7 +5466,7 @@ int main(int argc, char** argv) {
                 for (int64_t l = 0; l < g.n_layers; ++l)
                     if (!seen[(size_t) l * (size_t) g.n_expert + (size_t) e])
                         ranked.emplace_back((int32_t) l, (int32_t) e);
-            std::fprintf(stderr, "strata generate: remote ranking: %zu profiled pairs, "
+            std::fprintf(stderr, "momoe generate: remote ranking: %zu profiled pairs, "
                                  "%zu other pairs to fill CUDA1..3\n", profile.size(), ranked.size() - profile.size());
         }
         std::array<std::vector<std::pair<int32_t, int32_t>>, 3> by_device;
@@ -5501,7 +5501,7 @@ int main(int argc, char** argv) {
                 by_device[(size_t) target].push_back(pair);
                 next = (target + 1) % devices;
             }
-            std::fprintf(stderr, "strata generate: remote ranks %s across %d CUDA devices\n",
+            std::fprintf(stderr, "momoe generate: remote ranks %s across %d CUDA devices\n",
                          o.expert_cache_remote_placement == "layer" ? "grouped by layer" : "striped", devices);
         } else {
             by_device[0] = std::move(ranked);
@@ -5516,10 +5516,10 @@ int main(int argc, char** argv) {
             if (!remote_experts[(size_t) r].open(remote_dev[r], o.expert_cache_remote[(size_t) r],
                      g.n_layers, g.n_expert, by_device[(size_t) r], xcache, *srcp, claimed, err,
                      o.expert_cache_remote_auto[(size_t) r])) {
-                std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
                 return 1;
             }
-            std::fprintf(stderr, "strata generate: CUDA%d: %lld additional experts, %.2f GiB; "
+            std::fprintf(stderr, "momoe generate: CUDA%d: %lld additional experts, %.2f GiB; "
                                  "results return through pinned host rows\n", remote_dev[r],
                          (long long) remote_experts[(size_t) r].resident(), remote_experts[(size_t) r].gib());
         }
@@ -5529,22 +5529,22 @@ int main(int argc, char** argv) {
     strata::core::PeerExperts peer;
     if (o.peer_device >= 1) {
         if (profile.empty() || srcp == nullptr || o.expert_cache <= 0) {
-            std::fprintf(stderr, "strata generate: --peer-device needs --expert-profile and the expert cache\n");
+            std::fprintf(stderr, "momoe generate: --peer-device needs --expert-profile and the expert cache\n");
             return 1;
         }
         const auto tp0 = Clock::now();
         if (!peer.open(o.peer_device, profile, xcache, *srcp, g.n_layers, g.n_expert, o.peer_reserve_mib, o.peer_slots,
                        err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "strata generate: peer GPU %d: %lld experts, %.2f GiB (filled in %.1f s); with the primary's "
+        std::fprintf(stderr, "momoe generate: peer GPU %d: %lld experts, %.2f GiB (filled in %.1f s); with the primary's "
                              "%lld that is %lld of %lld on the GPUs\n", o.peer_device, (long long) peer.resident(), peer.gib(),
                      std::chrono::duration<double>(Clock::now() - tp0).count(), (long long) xcache.slots(),
                      (long long) (peer.resident() + xcache.slots()), (long long) (g.n_layers * g.n_expert));
     }
 
-    if (remote_opt && !remote_opt->init(err)) { std::fprintf(stderr, "strata generate: %s\n", err.c_str()); return 1; }
+    if (remote_opt && !remote_opt->init(err)) { std::fprintf(stderr, "momoe generate: %s\n", err.c_str()); return 1; }
     Drive drive;
     // #731 (opt-in, STRATA_DISJOINT_ADAPT=1): the adaptive tiers leave an expert a helper GPU holds out of the primary's
     // promotion candidates (it would sit in both caches).  Asked live, from the helper's own cache (RemoteExperts::holds,
@@ -5595,11 +5595,11 @@ int main(int argc, char** argv) {
                 lookahead.set_depth(std::atoi(dv));
             else if (srcp == &src && src.io_prefetch())
                 lookahead.set_depth(2);
-            std::fprintf(stderr, "strata generate: routing-aware prefetch on (the next layer's router%s)\n",
+            std::fprintf(stderr, "momoe generate: routing-aware prefetch on (the next layer's router%s)\n",
                          fs_ahead ? ", feeding the Foresight swap space" : ", file tier");
         } else {
             (void) cudaGetLastError();
-            std::fprintf(stderr, "strata generate: routing-aware prefetch off (%s)\n",
+            std::fprintf(stderr, "momoe generate: routing-aware prefetch off (%s)\n",
                          ok ? err.c_str() : "the routers are not BF16 in the arena");
             err.clear();
         }
@@ -5624,7 +5624,7 @@ int main(int argc, char** argv) {
             // every chunk, and the reason enabling the cache changed the tokens.
             cudaMalloc((void**) &d_hit_q8_scale, (size_t) (g.n_embd / 32) * sizeof(float)) != cudaSuccess ||
             cudaMalloc((void**) &d_hit_out, (size_t) K * g.n_embd * 4) != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: the R4 hit path could not allocate its device buffers\n");
+            std::fprintf(stderr, "momoe generate: the R4 hit path could not allocate its device buffers\n");
             return 1;
         }
         drive.d.cache = &xcache;
@@ -5644,14 +5644,14 @@ int main(int argc, char** argv) {
         drive.d.h_slot.resize((size_t) K);
         cudaEvent_t hit_done = nullptr;
         if (cudaEventCreate(&hit_done) != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: the hit path could not create its probe event\n");
+            std::fprintf(stderr, "momoe generate: the hit path could not create its probe event\n");
             return 1;
         }
         drive.d.hit_done = (void*) hit_done;
         drive.d.hit_poke = !o.no_hit_poke;
         drive.d.h_dst.resize((size_t) K);
         mem_mark("the R4 hit path");
-        std::fprintf(stderr, "strata generate: R4 hit path ON - resident experts are computed on the GPU\n");
+        std::fprintf(stderr, "momoe generate: R4 hit path ON - resident experts are computed on the GPU\n");
     }
     // ---- P0.S8: the routing trace.  Only meaningful with the pool running, because the ids arrive through
     // the doorbell that the pool consumes - so `--no-pool` is refused rather than silently producing an empty
@@ -5661,13 +5661,13 @@ int main(int argc, char** argv) {
     // "every stage is free".  Refusing is the fix.
     if (o.stage_timing) {
         if (!o.no_capture) {
-            std::fprintf(stderr, "strata generate: --stage-timing records CUDA events inside the layer path, "
+            std::fprintf(stderr, "momoe generate: --stage-timing records CUDA events inside the layer path, "
                                  "and an event record inside a stream capture is silently dropped. Pass "
                                  "--no-capture as well.\n");
             return 2;
         }
         if (!strata::core::stage_timing_enable()) {
-            std::fprintf(stderr, "strata generate: stage_timing_enable failed\n");
+            std::fprintf(stderr, "momoe generate: stage_timing_enable failed\n");
             return 1;
         }
         strata::core::stage_timing_name(0, "gr_read (attn)");
@@ -5692,13 +5692,13 @@ int main(int argc, char** argv) {
     std::FILE* routing = nullptr;
     if (!o.dump_routing.empty()) {
         if (o.no_pool) {
-            std::fprintf(stderr, "strata generate: --dump-routing needs the expert pool; the routed ids reach "
+            std::fprintf(stderr, "momoe generate: --dump-routing needs the expert pool; the routed ids reach "
                                  "the host through the doorbell the pool reads. Drop --no-pool.\n");
             return 2;
         }
         routing = std::fopen(o.dump_routing.c_str(), "wb");
         if (routing == nullptr) {
-            std::fprintf(stderr, "strata generate: cannot write %s\n", o.dump_routing.c_str());
+            std::fprintf(stderr, "momoe generate: cannot write %s\n", o.dump_routing.c_str());
             return 1;
         }
         drive.routing = routing;
@@ -5709,7 +5709,7 @@ int main(int argc, char** argv) {
     strata::core::HitFn hit_fn =
         (o.no_pool || o.expert_cache <= 0) ? nullptr : &strata::core::expert_hit_run;
     void* pool_user = o.no_pool ? nullptr : (void*) &drive;
-    std::fprintf(stderr, "strata generate: %d expert-pool workers%s%s\n", pool.workers(),
+    std::fprintf(stderr, "momoe generate: %d expert-pool workers%s%s\n", pool.workers(),
                  pool.host_works() ? " + the host thread" : "",
                  o.no_pool ? " (UNUSED: --no-pool)" : "");
 
@@ -5735,7 +5735,7 @@ int main(int argc, char** argv) {
         // stage's state - a split runs its layers on the stages' verifiers (serve) or prefill stage chain
         if (!strata::core::session_capture(wt, g, ss, d_parts, gr, err, /*split=*/o.gpu_stages, 0,
                                            multi_gpu ? split_at[0] : -1)) {
-            std::fprintf(stderr, "strata generate: session_capture: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: session_capture: %s\n", err.c_str());
             return 1;
         }
     }
@@ -5751,7 +5751,7 @@ int main(int argc, char** argv) {
     // Refusing is the fix.  `--no-pool` is the explicit way to say "I want the GPU-only floor".
     if (o.no_capture && !o.no_pool) {
         std::fprintf(stderr,
-                     "strata generate: --no-capture runs `session_token`, which has NO CPU expert pool hook, so "
+                     "momoe generate: --no-capture runs `session_token`, which has NO CPU expert pool hook, so "
                      "the routed experts would silently contribute nothing. Pass --no-pool as well if the "
                      "GPU-only floor is what you want.\n");
         return 2;
@@ -5761,19 +5761,19 @@ int main(int argc, char** argv) {
     // than as a mistake.  `--no-capture` without `--no-pool` is already refused above, so this catches the pair.
     if (o.no_capture && !o.dump_layers.empty()) {
         std::fprintf(stderr,
-                     "strata generate: --dump-layers is written by `session_loop`; `--no-capture` runs "
+                     "momoe generate: --dump-layers is written by `session_loop`; `--no-capture` runs "
                      "`session_token` instead, which never fills the staging buffer. Drop one of the two.\n");
         return 2;
     }
     if (o.no_capture && !o.dump_halves.empty()) {
         std::fprintf(stderr,
-                     "strata generate: --dump-halves is CAPTURED into the layer graphs, so it needs the "
+                     "momoe generate: --dump-halves is CAPTURED into the layer graphs, so it needs the "
                      "captured path; `--no-capture` never records it. Drop one of the two.\n");
         return 2;
     }
 
     mem_mark("the expert cache and the graphs");
-    std::fprintf(stderr, "strata generate: session is up (engine %s)\n", STRATA_VERSION);
+    std::fprintf(stderr, "momoe generate: session is up (engine %s)\n", STRATA_VERSION);
     auto run_head = [&](void* stream) -> bool {
         if (!native_head.loaded())
             return strata::core::lm_head(wt, g, ss.block, d_logits, stream, err);
@@ -5782,7 +5782,7 @@ int main(int argc, char** argv) {
     };
     float* d_emb = nullptr;
     if (cudaMalloc(&d_emb, (size_t) g.n_embd * 4) != cudaSuccess) {
-        std::fprintf(stderr, "strata generate: the embedding buffer failed\n");
+        std::fprintf(stderr, "momoe generate: the embedding buffer failed\n");
         return 1;
     }
     // **`sample_tokens` TAKES DEVICE POINTERS.**  It is a kernel launch; `logits` and `out` are both read and
@@ -5791,7 +5791,7 @@ int main(int argc, char** argv) {
     // illegal access on a weight plane.  Nothing in the parameter names said device.
     int* d_next = nullptr;
     if (cudaMalloc(&d_next, sizeof(int)) != cudaSuccess) {
-        std::fprintf(stderr, "strata generate: the sampler output buffer failed\n");
+        std::fprintf(stderr, "momoe generate: the sampler output buffer failed\n");
         return 1;
     }
 
@@ -5802,7 +5802,7 @@ int main(int argc, char** argv) {
     void* token_stream = o.stream_token ? main_cs : nullptr;
     auto put_input = [&](int64_t tok, int64_t pos) -> bool {
         if (!strata::core::embed_row(wt, g, tok, d_emb, token_stream, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return false;
         }
         if (pos == 0) {
@@ -5811,7 +5811,7 @@ int main(int argc, char** argv) {
             for (int64_t c = 0; c < g.hc; ++c)
                 if (cudaMemcpyAsync(ss.R + (size_t) c * g.n_embd, d_emb, (size_t) g.n_embd * 4,
                                     cudaMemcpyDeviceToDevice, (cudaStream_t) token_stream) != cudaSuccess) {
-                    std::fprintf(stderr, "strata generate: the residual broadcast failed\n");
+                    std::fprintf(stderr, "momoe generate: the residual broadcast failed\n");
                     return false;
                 }
         }
@@ -5828,9 +5828,9 @@ int main(int argc, char** argv) {
     // per request instead
     if (!o.serve) {
         if (sp.greedy || sp.temperature <= 0.0f)
-            std::fprintf(stderr, "strata generate: sampling greedy\n");
+            std::fprintf(stderr, "momoe generate: sampling greedy\n");
         else
-            std::fprintf(stderr, "strata generate: sampling temperature=%g top_k=%d top_p=%g seed=%llu\n",
+            std::fprintf(stderr, "momoe generate: sampling temperature=%g top_k=%d top_p=%g seed=%llu\n",
                          (double) sp.temperature, sp.top_k > 0 && sp.top_k < 64 ? sp.top_k : 64, (double) sp.top_p,
                          (unsigned long long) sp.seed);
     }
@@ -5843,12 +5843,12 @@ int main(int argc, char** argv) {
     const int64_t dump_positions = (int64_t) o.tokens.size() - 1 + o.max_new;
     if (!o.dump_logits.empty()) {
         if (dump_positions > INT32_MAX || n_vocab > INT32_MAX) {
-            std::fprintf(stderr, "strata generate: logits dump dimensions exceed int32\n");
+            std::fprintf(stderr, "momoe generate: logits dump dimensions exceed int32\n");
             return 2;
         }
         dump = std::fopen(o.dump_logits.c_str(), "wb");
         if (dump == nullptr) {
-            std::fprintf(stderr, "strata generate: cannot write %s\n", o.dump_logits.c_str());
+            std::fprintf(stderr, "momoe generate: cannot write %s\n", o.dump_logits.c_str());
             return 1;
         }
         // **THE COUNT IS `n_prompt - 1 + max_new`, NOT `n_prompt + max_new`.**  The loop writes one row per
@@ -5872,12 +5872,12 @@ int main(int argc, char** argv) {
     if (!o.dump_layers.empty()) {
         layer_dump = std::fopen(o.dump_layers.c_str(), "wb");
         if (layer_dump == nullptr) {
-            std::fprintf(stderr, "strata generate: cannot write %s\n", o.dump_layers.c_str());
+            std::fprintf(stderr, "momoe generate: cannot write %s\n", o.dump_layers.c_str());
             return 1;
         }
         if (cudaHostAlloc((void**) &layer_stage, layer_floats * sizeof(float), cudaHostAllocDefault) !=
             cudaSuccess) {
-            std::fprintf(stderr, "strata generate: cannot pin the layer-dump staging buffer\n");
+            std::fprintf(stderr, "momoe generate: cannot pin the layer-dump staging buffer\n");
             return 1;
         }
     }
@@ -5917,7 +5917,7 @@ int main(int argc, char** argv) {
         double mix = 0, ffn = 0, post = 0;
         if (!strata::core::session_replay_stages(g, 0, 0, ss, gr, main_cs, mix, ffn, post, err)) {
             // #610: a native (IQ) pack captures no per-layer graphs; the serve path times its window's stages
-            std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(),
+            std::fprintf(stderr, "momoe generate: %s%s\n", err.c_str(),
                          native_pack ? " - a native (IQ) pack has no per-layer graphs to replay. Its decode window's GPU "
                                        "stages are printed per request by the serve path instead: STRATA_VERIFY_PROFILE=1 "
                                        "STRATA_DECODE_TIMING=1 with --serve (docs/DETAILS.md, \"Where a decode window's "
@@ -5928,7 +5928,7 @@ int main(int argc, char** argv) {
         double t_mix = 0, t_ffn = 0, t_post = 0;
         for (int r = 0; r < reps; ++r) {
             if (!strata::core::session_replay_stages(g, 0, 0, ss, gr, main_cs, mix, ffn, post, err)) {
-                std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
                 return 1;
             }
             t_mix += mix;
@@ -5959,7 +5959,7 @@ int main(int argc, char** argv) {
             double f2 = 0, p2 = 0;
             for (int r = 0; r < reps; ++r) {
                 if (!strata::core::session_replay_stages_per_layer(g, 0, 0, ss, gr, main_cs, per, f2, p2, err)) {
-                    std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                    std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
                     return 1;
                 }
                 for (int64_t l = 0; l < g.n_layers; ++l) acc[(size_t) l] += per[(size_t) l];
@@ -5991,7 +5991,7 @@ int main(int argc, char** argv) {
             std::vector<double> acc5(5, 0.0), per, s5;
             for (int r = 0; r < reps; ++r) {
                 if (!strata::core::session_replay_stage_prefixes(g, 0, 0, ss, gr, main_cs, s5, per, err)) {
-                    std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                    std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
                     return 1;
                 }
                 for (int k = 0; k < 5; ++k) acc5[(size_t) k] += s5[(size_t) k];
@@ -6032,7 +6032,7 @@ int main(int argc, char** argv) {
                     double acc = 0, one = 0;
                     for (int r = 0; r < reps; ++r) {
                         if (!strata::core::session_replay_stage_sweep(g, 0, 0, ss, gr, main_cs, k, one, err)) {
-                            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
                             return 1;
                         }
                         acc += one;
@@ -6064,23 +6064,23 @@ int main(int argc, char** argv) {
         strata::core::doorbell_reset(db);
         // one warm pass so the first launch does not pay for page mapping
         if (!strata::core::session_replay(g, 0, 0, ss, gr, main_cs, err)) {
-            std::fprintf(stderr, "strata generate: session_replay warm: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: session_replay warm: %s\n", err.c_str());
             return 1;
         }
         if (cudaDeviceSynchronize() != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: session_replay warm faulted\n");
+            std::fprintf(stderr, "momoe generate: session_replay warm faulted\n");
             return 1;
         }
         const int reps = 20;
         const Clock::time_point t0 = Clock::now();
         for (int r = 0; r < reps; ++r) {
             if (!strata::core::session_replay(g, 0, 0, ss, gr, main_cs, err)) {
-                std::fprintf(stderr, "strata generate: session_replay: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: session_replay: %s\n", err.c_str());
                 return 1;
             }
         }
         if (cudaDeviceSynchronize() != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: session_replay faulted: %s\n", cudaGetErrorString(cudaGetLastError()));
+            std::fprintf(stderr, "momoe generate: session_replay faulted: %s\n", cudaGetErrorString(cudaGetLastError()));
             return 1;
         }
         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count() / (double) reps;
@@ -6107,22 +6107,22 @@ int main(int argc, char** argv) {
         for (int r = -1; r < reps; ++r) {          // r == -1 is the warm pass, not counted
             const Clock::time_point t0 = Clock::now();
             if (!strata::core::session_replay_full(g, 0, 0, ss, gr, main_cs, err)) {
-                std::fprintf(stderr, "strata generate: session_replay_full: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: session_replay_full: %s\n", err.c_str());
                 return 1;
             }
             // The sync is INSIDE the interval on purpose: it is the wait for the GPU, so t1 - t0 is GPU time.
             if (cudaStreamSynchronize((cudaStream_t) main_cs) != cudaSuccess) {
-                std::fprintf(stderr, "strata generate: gpu-only-full layers faulted: %s\n",
+                std::fprintf(stderr, "momoe generate: gpu-only-full layers faulted: %s\n",
                              cudaGetErrorString(cudaGetLastError()));
                 return 1;
             }
             const Clock::time_point t1 = Clock::now();
             if (!run_head(main_cs)) {
-                std::fprintf(stderr, "strata generate: gpu-only-full lm_head: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: gpu-only-full lm_head: %s\n", err.c_str());
                 return 1;
             }
             if (cudaStreamSynchronize((cudaStream_t) main_cs) != cudaSuccess) {
-                std::fprintf(stderr, "strata generate: gpu-only-full head faulted: %s\n",
+                std::fprintf(stderr, "momoe generate: gpu-only-full head faulted: %s\n",
                              cudaGetErrorString(cudaGetLastError()));
                 return 1;
             }
@@ -6157,7 +6157,7 @@ int main(int argc, char** argv) {
     // passing a default-constructed one is an error rather than a fallback.  (It was, and the guard caught it -
     // which is the point of the guard.)  One allocation at setup either way.
     if (!loop_scratch.init((size_t) K * g.n_embd * 4, err)) {
-        std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+        std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
         return 1;
     }
     // Plan v0.3 P3: the whole token as ONE graph whenever nothing needs a host step between the ring and post[l]
@@ -6194,7 +6194,7 @@ int main(int argc, char** argv) {
         if (cudaMalloc((void**) &d_res, host_res.size() * sizeof(int32_t)) != cudaSuccess ||
             cudaMalloc((void**) &d_hit_count, sizeof(int32_t)) != cudaSuccess ||
             res_put(d_res) != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: the device residency table could not be staged\n");
+            std::fprintf(stderr, "momoe generate: the device residency table could not be staged\n");
             return 1;
         }
         thits.d_res = d_res;
@@ -6212,7 +6212,7 @@ int main(int argc, char** argv) {
                     if (host_res[i] != strata::core::kNotResident)
                         released += srcp->release((int64_t) i / g.n_expert, (int64_t) i % g.n_expert);
             if (released > 0)
-                std::fprintf(stderr, "strata generate: expert arena: %.2f GiB of VRAM-held experts handed back to the OS\n",
+                std::fprintf(stderr, "momoe generate: expert arena: %.2f GiB of VRAM-held experts handed back to the OS\n",
                              (double) released / (1024.0 * 1024.0 * 1024.0));
             rss_probe("after the release");
             int64_t pf = 0;
@@ -6229,7 +6229,7 @@ int main(int argc, char** argv) {
             if (cudaMalloc((void**) &st->d_res, host_res.size() * sizeof(int32_t)) != cudaSuccess ||
                 res_put(st->d_res) !=
                     cudaSuccess) {
-                std::fprintf(stderr, "strata generate: layer split: CUDA%d residency table failed\n", st->dev);
+                std::fprintf(stderr, "momoe generate: layer split: CUDA%d residency table failed\n", st->dev);
                 return 1;
             }
         }
@@ -6243,17 +6243,17 @@ int main(int argc, char** argv) {
         thits.scratch = drive.d.hit_scratch;
         thits.hit_out = drive.d.hit_out;
         drive.d.host_res = host_res.data();
-        std::fprintf(stderr, "strata generate: token graph hit path: %lld resident experts, decided on the device\n",
+        std::fprintf(stderr, "momoe generate: token graph hit path: %lld resident experts, decided on the device\n",
                      (long long) resident);
     }
     if (!o.no_capture && !o.no_token_graph && layer_dump == nullptr && half_dump == nullptr &&
         (hit_fn == nullptr || thits.on()) && !native_pack && !multi_gpu) {   // a split's token graph cannot span stages
         if (!strata::core::session_capture_token(wt, g, ss, d_parts, loop_scratch.y_miss, loop_scratch.parts_bytes,
                                                  tgraph, err, thits.on() ? &thits : nullptr)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "strata generate: token graph captured (48 layers, one launch per token)\n");
+        std::fprintf(stderr, "momoe generate: token graph captured (48 layers, one launch per token)\n");
     }
 
     // ================================ WHERE THE HOST TERM GOES, PER TOKEN ================================
@@ -6496,7 +6496,7 @@ int main(int argc, char** argv) {
         if (const char* v = std::getenv("STRATA_KV_GROW_STEP"); v != nullptr && std::atoll(v) > 0) kvg.step = std::atoll(v);
         // tests: the cache keeps this many slots (its size: the K/V grows into new VRAM only)
         if (const char* v = std::getenv("STRATA_KV_GROW_FLOOR"); v != nullptr && std::atoll(v) > 0) kvg.floor = std::atoll(v);
-        std::fprintf(stderr, "strata generate: elastic K/V: %lld of %lld cells in VRAM (%.2f of %.2f GiB); the expert "
+        std::fprintf(stderr, "momoe generate: elastic K/V: %lld of %lld cells in VRAM (%.2f of %.2f GiB); the expert "
                              "cache (%lld slots) gives the K/V room below slot %lld as the context grows\n",
                      (long long) kvg.cells, (long long) o.max_context,
                      (double) strata::core::qsa_kv_elastic_mapped_bytes() / 1073741824.0,
@@ -6571,7 +6571,7 @@ int main(int argc, char** argv) {
         // a device-to-device cudaMemcpy does not wait for the copy: the moves still read the slots given up, and a
         // chunk unmapped under a copy faults it (the error then sticks to whatever runs next)
         if (gave > 0 && cudaDeviceSynchronize() != cudaSuccess) {
-            std::fprintf(stderr, "strata: moving experts for the K/V failed: %s\n", cudaGetErrorString(cudaGetLastError()));
+            std::fprintf(stderr, "momoe: moving experts for the K/V failed: %s\n", cudaGetErrorString(cudaGetLastError()));
             return false;
         }
         {
@@ -6583,7 +6583,7 @@ int main(int argc, char** argv) {
         }
         if (gave > 0 &&
             cudaMemcpy(d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess) {
-            std::fprintf(stderr, "strata: the residency table upload failed: %s\n", cudaGetErrorString(cudaGetLastError()));
+            std::fprintf(stderr, "momoe: the residency table upload failed: %s\n", cudaGetErrorString(cudaGetLastError()));
             return false;
         }
         int64_t fresh = 0;
@@ -6596,14 +6596,14 @@ int main(int argc, char** argv) {
         kvg.fresh += fresh;
         kvg.cells = strata::core::qsa_kv_elastic_cells();
         ++kvg.grows;
-        std::fprintf(stderr, "strata: K/V grown to %lld cells (%.2f GiB); the expert cache gave %lld slots for it, "
+        std::fprintf(stderr, "momoe: K/V grown to %lld cells (%.2f GiB); the expert cache gave %lld slots for it, "
                              "%lld hotter experts moved to colder ones' slots (%lld of %lld slots hold experts)%s\n",
                      (long long) kvg.cells, (double) strata::core::qsa_kv_elastic_mapped_bytes() / 1073741824.0,
                      (long long) gave, (long long) moved, (long long) (kvg.lo + (xcache.slots() - kvg.top)),
                      (long long) xcache.slots(),
                      fresh > 0 ? " - and new VRAM, the cache being at its floor" : "");
         if (!ok)
-            std::fprintf(stderr, "strata: the K/V could not grow to %lld cells (%s)\n", (long long) target,
+            std::fprintf(stderr, "momoe: the K/V could not grow to %lld cells (%s)\n", (long long) target,
                          cudaGetErrorString(cudaGetLastError()));
         return ok;
     };
@@ -6632,7 +6632,7 @@ int main(int argc, char** argv) {
                     kvg.spare.pop_back();
                     return h;
                 }))
-                std::fprintf(stderr, "strata: the expert cache could not take its VRAM back from the K/V\n");
+                std::fprintf(stderr, "momoe: the expert cache could not take its VRAM back from the K/V\n");
         }
         const int64_t lo0 = kvg.lo;
         while (kvg.lo < kvg.top) {   // a slot whose chunks are all mapped again holds an expert again
@@ -6663,7 +6663,7 @@ int main(int argc, char** argv) {
             }
         }
         if (cudaDeviceSynchronize() != cudaSuccess) {
-            std::fprintf(stderr, "strata: refilling the expert cache failed: %s\n", cudaGetErrorString(cudaGetLastError()));
+            std::fprintf(stderr, "momoe: refilling the expert cache failed: %s\n", cudaGetErrorString(cudaGetLastError()));
             return false;
         }
         for (const auto& [i, s] : filled) host_res[i] = s;
@@ -6673,7 +6673,7 @@ int main(int argc, char** argv) {
         for (const strata::core::VmmChunk h : kvg.spare) strata::core::vmm_chunk_free(h);   // new ones, if any
         kvg.spare.clear();
         ++kvg.trims;
-        std::fprintf(stderr, "strata: K/V trimmed to %lld cells; %lld slots back to the expert cache, refilled from "
+        std::fprintf(stderr, "momoe: K/V trimmed to %lld cells; %lld slots back to the expert cache, refilled from "
                              "the profile\n", (long long) kvg.cells, (long long) (kvg.lo - lo0));
         return true;
     };
@@ -6692,7 +6692,7 @@ int main(int argc, char** argv) {
     // there the steps that overwrite something a window may still read wait for those windows (see adapt_tick);
     // STRATA_PIPELINE_ADAPT_ASYNC=0 keeps the blocking tier beside it instead.
     auto adapt_async_off = [&](const char* why) {
-        std::fprintf(stderr, "strata generate: --adapt-async 1 is off (%s): the blocking adaptive tier\n", why);
+        std::fprintf(stderr, "momoe generate: --adapt-async 1 is off (%s): the blocking adaptive tier\n", why);
         o.adapt_async = 0;
     };
     if (o.adapt_async) {
@@ -6724,7 +6724,7 @@ int main(int argc, char** argv) {
         const int ring = strata::program::split_ring_slots(std::getenv("STRATA_SPLIT_RING"), res_share);
         if (ring > 0) {
             strata::prefill::Prefill::set_ring_override(ring);
-            std::fprintf(stderr, "strata serve: layer split: %.0f%% of the experts resident, the prompt path's "
+            std::fprintf(stderr, "momoe serve: layer split: %.0f%% of the experts resident, the prompt path's "
                                  "streamed ring %d slots\n", 100.0 * res_share, ring);
         }
     };
@@ -6812,7 +6812,7 @@ int main(int argc, char** argv) {
             resident_ok = src.pin_cache_complement(xcache, err, o.resident_pin, stage_pairs, -1, o.resident_headroom,
                                                    strata::core::FileExpertSource::kResidentWhatFits, &rank_all);
             if (resident_ok)
-                std::fprintf(stderr, "strata generate: WARNING: the whole resident RAM mode does not fit (%s); %.2f "
+                std::fprintf(stderr, "momoe generate: WARNING: the whole resident RAM mode does not fit (%s); %.2f "
                                      "GiB of the experts the GPU does not hold, the hottest by the expert profile, are "
                                      "kept in RAM and the rest are read from the model folder through the OS file "
                                      "cache\n",
@@ -6826,9 +6826,9 @@ int main(int argc, char** argv) {
             std::string why;
             const auto end_t0 = std::chrono::steady_clock::now();
             startup_kept = !src.end_startup_unbuffered(why);
-            if (startup_kept) std::fprintf(stderr, "strata generate: WARNING: %s\n", why.c_str());
+            if (startup_kept) std::fprintf(stderr, "momoe generate: WARNING: %s\n", why.c_str());
             else
-                std::fprintf(stderr, "strata generate: the startup reads are done: experts.bin mapped again (%.0f ms)\n",
+                std::fprintf(stderr, "momoe generate: the startup reads are done: experts.bin mapped again (%.0f ms)\n",
                              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - end_t0).count());
         }
         // #669 / #765: a big chunk lends many cache slots to the prompt path, and each lent slot's expert is read back
@@ -6836,7 +6836,7 @@ int main(int argc, char** argv) {
         // Said, never capped: --prefill is the user's, and with the RAM for them it is the faster one (+21-35%).
         if (resident_ok && lend_from >= 0 && o.prefill_chunk > 8192 && xcache.slots() > lend_from &&
             src.resident_lent_slots() < xcache.slots() - lend_from)
-            std::fprintf(stderr, "strata generate: WARNING: a prompt chunk of %lld tokens lends %lld cache slots to the "
+            std::fprintf(stderr, "momoe generate: WARNING: a prompt chunk of %lld tokens lends %lld cache slots to the "
                                  "prompt path, but only %lld of their experts fit in RAM: the others are read from the "
                                  "SSD on every chunk, and prompts can read ~3x slower than with --prefill auto (#669). "
                                  "A smaller --prefill, or auto, keeps them all in RAM\n",
@@ -6853,10 +6853,10 @@ int main(int argc, char** argv) {
                 adapt_async_off("the exchange buffers could not be page-locked");
             if (o.adapt_every > 0 && o.adapt_swaps > 0 &&
                 !src.reserve_exchanges(std::min<int64_t>(o.adapt_swaps, 96), err)) {
-                std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: CPU expert residency: %s\n", err.c_str());
                 return 1;
             }
-            std::fprintf(stderr, "strata generate: resident RAM mode: %.2f GiB of experts in RAM (%s), %lld in the GPU "
+            std::fprintf(stderr, "momoe generate: resident RAM mode: %.2f GiB of experts in RAM (%s), %lld in the GPU "
                                  "cache; adaptive swaps %s\n",
                          (double) src.resident_bytes() / 1073741824.0,
                          src.complement_pinned() ? "page-locked" : src.locked_bytes() > 0 ? "locked" : "pageable",
@@ -6864,18 +6864,18 @@ int main(int argc, char** argv) {
                          o.adapt_every > 0 && o.adapt_swaps > 0 ? "exchange them with the GPU cache (no file reads)"
                                                                 : "off");
         } else if (o.resident_soft) {
-            std::fprintf(stderr, "strata generate: WARNING: the resident RAM mode does not fit (%s); the experts the "
+            std::fprintf(stderr, "momoe generate: WARNING: the resident RAM mode does not fit (%s); the experts the "
                                  "GPU does not hold are read from the model folder through the OS file cache "
                                  "(--mmap-experts), which is slower when the RAM cannot keep them\n", err.c_str());
         } else if (o.resident_budget > 0) {
             // #403: a RAM budget that cannot be kept is not a reason to stop - the experts it would have held are
             // read from the files like the ones outside it (pin_cache_complement leaves nothing half-built)
-            std::fprintf(stderr, "strata generate: WARNING: the RAM budget (--resident-budget-gib) cannot be kept (%s); "
+            std::fprintf(stderr, "momoe generate: WARNING: the RAM budget (--resident-budget-gib) cannot be kept (%s); "
                                  "every expert the GPU does not hold is read from the model files %s "
                                  "(--mmap-experts), which is slower\n", err.c_str(),
                          src.unbuffered() ? "with unbuffered I/O" : "through the OS file cache");
         } else {
-            std::fprintf(stderr, "strata generate: CPU expert residency: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: CPU expert residency: %s\n", err.c_str());
             return 1;
         }
         // #577: the unbuffered choice above was made before the RAM copy existed, from the budget asked for; now the
@@ -6887,7 +6887,7 @@ int main(int argc, char** argv) {
             std::string why;
             const bool was = src.unbuffered();
             const bool ub = src.recheck_unbuffered(why);
-            std::fprintf(stderr, "strata generate: the file tier reads %s%s (%s)\n",
+            std::fprintf(stderr, "momoe generate: the file tier reads %s%s (%s)\n",
                          ub ? "unbuffered" : "through the file cache", ub == was ? "" : " (changed)", why.c_str());
         }
 #endif
@@ -6898,12 +6898,12 @@ int main(int argc, char** argv) {
     if (srcp == &src && src.unbuffered() && std::getenv("STRATA_KEEP_MAPPING") == nullptr) {
         std::string why;
         const bool dropped = src.drop_mapping(why);
-        std::fprintf(stderr, "strata generate: the mapped view of the experts %s (%s)\n",
+        std::fprintf(stderr, "momoe generate: the mapped view of the experts %s (%s)\n",
                      dropped ? "is closed" : "stays open", why.c_str());
         // --ple-io mmap / ram maps the PLE shard for the whole run; when that shard also holds experts, NTFS still runs
         // the unbuffered reads of that one file one at a time (the default --ple-io direct keeps no mapping)
         if (dropped && src.gguf_mode() && !o.ple_gguf.empty() && o.ple_io != "direct")
-            std::fprintf(stderr, "strata generate: note: --ple-io %s keeps %s mapped; if that shard holds experts, their "
+            std::fprintf(stderr, "momoe generate: note: --ple-io %s keeps %s mapped; if that shard holds experts, their "
                                  "reads stay serialized (--ple-io direct, the default, keeps no mapping)\n",
                          o.ple_io.c_str(), o.ple_gguf.c_str());
     }
@@ -6928,10 +6928,10 @@ int main(int argc, char** argv) {
         if (v.arm) return true;
         const char* ev = std::getenv("STRATA_PREFILL_CPU_SHARE");
         if (ev == nullptr)
-            std::fprintf(stderr, "strata: the CPU prefill share is not armed by default: %s. STRATA_PREFILL_CPU_SHARE=auto "
+            std::fprintf(stderr, "momoe: the CPU prefill share is not armed by default: %s. STRATA_PREFILL_CPU_SHARE=auto "
                                  "turns it on anyway\n", v.why.c_str());
         else if (std::strcmp(ev, "0") != 0)
-            std::fprintf(stderr, "strata: WARNING STRATA_PREFILL_CPU_SHARE=%s is set and kept, but %s: the share can slow "
+            std::fprintf(stderr, "momoe: WARNING STRATA_PREFILL_CPU_SHARE=%s is set and kept, but %s: the share can slow "
                                  "prompts or fail on a machine this short of memory (STRATA_PREFILL_CPU_SHARE=0 turns it off)\n",
                          ev, v.why.c_str());
         return false;
@@ -6939,7 +6939,7 @@ int main(int argc, char** argv) {
     if (o.serve) {
         if (o.spec < 2 || (o.prefill_chunk <= 0 && !no_prompt_path) ||
             (graph_hits && (thits.d_res == nullptr || host_res.empty()))) {
-            std::fprintf(stderr, "strata serve: needs --spec T and --prefill CHUNK (and a fillable "
+            std::fprintf(stderr, "momoe serve: needs --spec T and --prefill CHUNK (and a fillable "
                                  "--expert-cache; the graphed hit path additionally needs --expert-profile P)\n");
             return 2;
         }
@@ -6963,7 +6963,7 @@ int main(int argc, char** argv) {
             srcp != nullptr && !multi_gpu && stages.empty() && o.batch <= 0 && !prefill_helpers.empty()) {
             prefill_helper_src = std::make_unique<strata::core::RemotePrefillSource>(*srcp, prefill_helpers);
             prefill_src = prefill_helper_src.get();
-            std::fprintf(stderr, "strata serve: the prompt path reads the experts a helper cache holds from that "
+            std::fprintf(stderr, "momoe serve: the prompt path reads the experts a helper cache holds from that "
                                  "cache (STRATA_PREFILL_HELPER_SOURCE)\n");
         }
         strata::prefill::Prefill sp;
@@ -6980,9 +6980,9 @@ int main(int argc, char** argv) {
                                          (2ull << 30);   // checkpoints and prompt staging
                 const auto cv = strata::platform::host_limits::commit_verdict((uint64_t) cs.ullAvailPageFile,
                                                                               (uint64_t) cs.ullTotalPageFile, planned, 4ull << 30);
-                std::fprintf(stderr, "strata serve: Windows commit: %.1f GiB left of a %.1f GiB limit (RAM + page file)\n",
+                std::fprintf(stderr, "momoe serve: Windows commit: %.1f GiB left of a %.1f GiB limit (RAM + page file)\n",
                              (double) cs.ullAvailPageFile / 1073741824.0, (double) cs.ullTotalPageFile / 1073741824.0);
-                if (cv.warn) std::fprintf(stderr, "strata serve: %s\n", cv.text.c_str());
+                if (cv.warn) std::fprintf(stderr, "momoe serve: %s\n", cv.text.c_str());
             }
         }
 #endif
@@ -6990,7 +6990,7 @@ int main(int argc, char** argv) {
         bool share_has_work = strata::prefill::share_rules::default_share_has_work(
             (int64_t) xcache.slots(), (int64_t) (g.n_layers * g.n_expert));   // #1595
         if (!share_has_work)
-            std::fprintf(stderr, "strata serve: every expert is in the GPU cache (%lld of %lld): the CPU prefill share has "
+            std::fprintf(stderr, "momoe serve: every expert is in the GPU cache (%lld of %lld): the CPU prefill share has "
                                  "nothing to take, so it is not armed by default (STRATA_PREFILL_CPU_SHARE=auto forces it)\n",
                          (long long) xcache.slots(), (long long) (g.n_layers * g.n_expert));
         if (share_pool && stages.empty() && !multi_gpu && share_has_work && !share_default_ok()) share_has_work = false;   // H11
@@ -7159,14 +7159,14 @@ int main(int argc, char** argv) {
                     }
                     const std::string pct =
                         o.prefill_auto ? ", and lend at most " + std::to_string(kAutoLendPct) + "%" : "";
-                    std::fprintf(stderr, "strata serve: WARNING: prompt chunk %lld tokens, not %lld: CUDA%d (%s) "
+                    std::fprintf(stderr, "momoe serve: WARNING: prompt chunk %lld tokens, not %lld: CUDA%d (%s) "
                                          "has %lld expert-cache slots, and a %lld-token chunk borrows %lld of them "
                                          "(it must keep 128%s) - prompts read slower than on CUDA0 alone (#448)\n",
                                  (long long) chunk, (long long) alone, dev, prop.name,
                                  (long long) p.cache->slots(), (long long) alone,
                                  (long long) part_slots(p, alone), pct.c_str());
                     // the helper tiers start at CUDA1 without a split (and are enabled in order)
-                    std::fprintf(stderr, "strata serve:   a card this small can serve as a helper expert cache "
+                    std::fprintf(stderr, "momoe serve:   a card this small can serve as a helper expert cache "
                                          "instead of a split stage: without --layer-split, with %s "
                                          "(docs/SECOND_GPU.md)\n",
                                  dev == 1 ? "--expert-cache-device1 N" : "--expert-cache-device1..3 N, in order");
@@ -7177,11 +7177,11 @@ int main(int argc, char** argv) {
                     // the RESOLVED ring, not the room offered: ring_slots() clamps to [16, RING_MAX] and a chunk
                     // under stream_all_min() gets STAGE, and STRATA_PREFILL_RING overrides both.  This is what
                     // `init` lays out, and what the INFO line reports to the Monitor tab.
-                    std::fprintf(stderr, "strata serve: prompt chunk auto: %lld tokens, a %lld-slot ring\n",
+                    std::fprintf(stderr, "momoe serve: prompt chunk auto: %lld tokens, a %lld-slot ring\n",
                                  (long long) chunk,
                                  (long long) strata::prefill::Prefill::ring_slots_for(chunk));
                 else if (chunk != o.prefill_chunk)
-                    std::fprintf(stderr, "strata serve: prompt chunk %lld -> %lld tokens so its buffers fit in "
+                    std::fprintf(stderr, "momoe serve: prompt chunk %lld -> %lld tokens so its buffers fit in "
                                          "every expert cache\n", (long long) o.prefill_chunk, (long long) chunk);
                 o.prefill_chunk = chunk;
                 for (PfPart& p : pf_parts) {
@@ -7205,7 +7205,7 @@ int main(int argc, char** argv) {
                         if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { (void) cudaGetLastError(); continue; }
                         const uint64_t need = strata::prefill::Prefill::bytes_needed(g, *p.ses, chunk, srcp != nullptr);
                         if ((uint64_t) fb >= need + (3ull << 29)) {
-                            std::fprintf(stderr, "strata serve:   CUDA%d keeps its own prompt buffers (%.2f GiB of "
+                            std::fprintf(stderr, "momoe serve:   CUDA%d keeps its own prompt buffers (%.2f GiB of "
                                                  "%.2f GiB free): no loan\n", p.dev < 0 ? 0 : p.dev,
                                          (double) need / 1073741824.0, (double) fb / 1073741824.0);
                             p.first = -1;
@@ -7223,10 +7223,10 @@ int main(int argc, char** argv) {
                 // here and so do we, rather than refusing to start - but say what every stage has, because a split
                 // stage that has to allocate these on top of a cache that already filled its VRAM will not fit,
                 // and `init` would otherwise report only that the buffers do not fit.
-                std::fprintf(stderr, "strata serve: no stage can lend the prompt path its %lld-token buffers, so "
+                std::fprintf(stderr, "momoe serve: no stage can lend the prompt path its %lld-token buffers, so "
                                      "each stage allocates its own:\n", (long long) o.prefill_chunk);
                 for (const PfPart& p : pf_parts)
-                    std::fprintf(stderr, "strata serve:   CUDA%d has %lld slots, and a %lld-token chunk needs "
+                    std::fprintf(stderr, "momoe serve:   CUDA%d has %lld slots, and a %lld-token chunk needs "
                                          "the last %lld of them\n", p.dev < 0 ? 0 : p.dev,
                                  (long long) p.cache->slots(), (long long) o.prefill_chunk,
                                  (long long) part_slots(p, o.prefill_chunk));
@@ -7238,10 +7238,10 @@ int main(int argc, char** argv) {
         for (size_t i = 1; i < pf_parts.size(); ++i) any_loan = any_loan || pf_parts[i].first >= 0;
         if (any_loan) {
             if (borrow != nullptr)
-                std::fprintf(stderr, "strata serve: the prompt path borrows %lld CUDA0 cache slots (%.2f GiB)\n",
+                std::fprintf(stderr, "momoe serve: the prompt path borrows %lld CUDA0 cache slots (%.2f GiB)\n",
                              (long long) (xcache.slots() - lend_first), (double) borrow_bytes / 1073741824.0);
             for (size_t i = 1; i < pf_parts.size(); ++i)   // one loan per stage, from that stage's own cache
-                if (pf_parts[i].first >= 0) std::fprintf(stderr, "strata serve:   CUDA%d prompt path borrows %lld of its %lld slots (%.2f GiB)\n",
+                if (pf_parts[i].first >= 0) std::fprintf(stderr, "momoe serve:   CUDA%d prompt path borrows %lld of its %lld slots (%.2f GiB)\n",
                              pf_parts[i].dev, (long long) (pf_parts[i].cache->slots() - pf_parts[i].first),
                              (long long) pf_parts[i].cache->slots(),
                              (double) part_bytes(pf_parts[i], pf_parts[i].first) / 1073741824.0);
@@ -7254,18 +7254,18 @@ int main(int argc, char** argv) {
                 for (size_t i = 1; i < pf_parts.size(); ++i)
                     if (pf_parts[i].first >= 0) borrowed += pf_parts[i].cache->slots() - pf_parts[i].first;
                 const int64_t kept = src.resident_lent_slots();
-                std::fprintf(stderr, "strata serve: lend sizing: the prompt path borrows %lld slots (ring %lld slots at "
+                std::fprintf(stderr, "momoe serve: lend sizing: the prompt path borrows %lld slots (ring %lld slots at "
                                      "chunk %lld), %lld of them keep their experts in RAM too\n",
                              (long long) borrowed,
                              (long long) strata::prefill::Prefill::ring_slots_for(o.prefill_chunk),
                              (long long) o.prefill_chunk, (long long) kept);
                 if (kept < borrowed)
-                    std::fprintf(stderr, "strata serve: WARNING: %lld of the %lld borrowed slots have no RAM copy: "
+                    std::fprintf(stderr, "momoe serve: WARNING: %lld of the %lld borrowed slots have no RAM copy: "
                                          "their experts are streamed from the model file during every chunk\n",
                                  (long long) (borrowed - kept), (long long) borrowed);
             }
         } else if (!no_prompt_path) {
-            std::fprintf(stderr, "strata serve: the prompt path allocates its own buffers (too few cache slots to borrow)\n");
+            std::fprintf(stderr, "momoe serve: the prompt path allocates its own buffers (too few cache slots to borrow)\n");
         }
         rss_probe("the prompt path set up");
         // layer split across GPUs: a prompt path per stage, each handing its chunk's rows to the next.
@@ -7330,7 +7330,7 @@ int main(int argc, char** argv) {
                     if (s < o.prefill_chunk && own_fits(s, d2, n2, f2)) { c = s; break; }
                 }
                 if (c > 0) {
-                    std::fprintf(stderr, "strata serve: a %lld-token chunk's prompt buffers need %lld MiB on CUDA%d, "
+                    std::fprintf(stderr, "momoe serve: a %lld-token chunk's prompt buffers need %lld MiB on CUDA%d, "
                                          "%lld MiB free: %lld-token chunks\n", (long long) o.prefill_chunk,
                                  (long long) (need >> 20), dev, (long long) (fb >> 20), (long long) c);
                     o.prefill_chunk = c;
@@ -7344,7 +7344,7 @@ int main(int argc, char** argv) {
             for (const int64_t c : kStepChunks)
                 if (c < o.prefill_chunk) { next = c; break; }
             if (r == 2 && next > 0) {
-                std::fprintf(stderr, "strata serve: %s: trying a %lld-token chunk\n", err.c_str(), (long long) next);
+                std::fprintf(stderr, "momoe serve: %s: trying a %lld-token chunk\n", err.c_str(), (long long) next);
                 // start the prompt paths over (a failed init may hold buffers), and consume the failed allocation's
                 // error: it is sticky, and the next launch check would report "out of memory" for a kernel
                 for (auto& stp : stages) {
@@ -7368,9 +7368,9 @@ int main(int argc, char** argv) {
                 err.clear();
                 continue;
             }
-            std::fprintf(stderr, "strata serve: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe serve: %s\n", err.c_str());
             if (err.find("fit") != std::string::npos)   // #85: say what frees VRAM
-                std::fprintf(stderr, "strata serve: the GPU has too little free VRAM for the prompt path: turn images "
+                std::fprintf(stderr, "momoe serve: the GPU has too little free VRAM for the prompt path: turn images "
                                      "off (setup: --vision no), close other programs using the GPU, use a shorter "
                                      "context, or read prompts in smaller chunks (--prefill 512)\n");
             return 1;
@@ -7378,7 +7378,7 @@ int main(int argc, char** argv) {
         if (peer.valid() && o.peer_prefill_rows != 0) {
             const int64_t rows = o.peer_prefill_rows > 0 ? o.peer_prefill_rows : o.prefill_chunk * K / 2;
             if (!sp.set_peer(&peer, rows, err)) {
-                std::fprintf(stderr, "strata serve: %s - the prompt path stays on the primary GPU\n", err.c_str());
+                std::fprintf(stderr, "momoe serve: %s - the prompt path stays on the primary GPU\n", err.c_str());
                 err.clear();
             }
         }
@@ -7390,7 +7390,7 @@ int main(int argc, char** argv) {
             for (size_t i = 0; i < paths.size(); ++i) {
                 const strata::core::OnDevice on(paths[i].second);
                 if (!paths[i].first->set_stage_helper(paths[(i + 1) % paths.size()].first, err)) {
-                    std::fprintf(stderr, "strata serve: %s - stage %zu reads its prompts alone\n", err.c_str(), i);
+                    std::fprintf(stderr, "momoe serve: %s - stage %zu reads its prompts alone\n", err.c_str(), i);
                     err.clear();
                 }
             }
@@ -7420,7 +7420,7 @@ int main(int argc, char** argv) {
                         if (r >= first_s) { r = strata::core::kNotResident; ++n; }
                     }
                 evicted += n;
-                std::fprintf(stderr, "strata serve:   CUDA%d keeps %lld slots for %lld-token prompts (%lld experts "
+                std::fprintf(stderr, "momoe serve:   CUDA%d keeps %lld slots for %lld-token prompts (%lld experts "
                                      "no longer resident)\n", p.dev < 0 ? 0 : p.dev,
                              (long long) (p.cache->slots() - first_s), (long long) S, (long long) n);
             }
@@ -7444,7 +7444,7 @@ int main(int argc, char** argv) {
         std::vector<int32_t> hist_stage(kHistSlots, -1);
         const int hist_dev = last_st ? last_st->dev : -1;   // with the head: the last stage's device
         if (const strata::core::OnDevice on_h(hist_dev); cudaMalloc(&d_hist, kHistSlots * sizeof(int32_t)) != cudaSuccess) {
-            std::fprintf(stderr, "strata serve: the penalty-history allocation failed\n");
+            std::fprintf(stderr, "momoe serve: the penalty-history allocation failed\n");
             return 1;
         }
         strata::core::Verifier ver;
@@ -7459,7 +7459,7 @@ int main(int argc, char** argv) {
             if (const char* v = std::getenv("STRATA_ROUTE_RESIDENT_RANKS")) std::sscanf(v, "%d-%d", &lo, &hi);
             if (margin > 0.0f) {
                 mtp.set_route_resident(thits.d_res + (size_t) (g.n_layers - 1) * (size_t) g.n_expert, margin, lo, hi);
-                std::fprintf(stderr, "strata generate: STRATA_ROUTE_RESIDENT_MTP: the MTP draft's router is biased toward layer %lld's resident experts (margin %g, ranks %d-%d; experimental)\n",
+                std::fprintf(stderr, "momoe generate: STRATA_ROUTE_RESIDENT_MTP: the MTP draft's router is biased toward layer %lld's resident experts (margin %g, ranks %d-%d; experimental)\n",
                              (long long) (g.n_layers - 1), margin, lo, hi);
             }
         }
@@ -7498,7 +7498,7 @@ int main(int argc, char** argv) {
                 const strata::core::OnDevice on(stages[(size_t) st - 1]->dev);
                 ok_p = cudaStreamCreateWithFlags(&pl_stream[(size_t) st], cudaStreamNonBlocking) == cudaSuccess;
             }
-            if (!ok_p) { std::fprintf(stderr, "strata serve: --pipeline-windows: stream creation failed\n"); return 1; }
+            if (!ok_p) { std::fprintf(stderr, "momoe serve: --pipeline-windows: stream creation failed\n"); return 1; }
             for (int st = 0; st < n_stages; ++st)
                 for (int par = 0; par < 2; ++par) {
                     stage_ver_p(st, par).set_stream(pl_stream[(size_t) st]);
@@ -7513,7 +7513,7 @@ int main(int argc, char** argv) {
                 float* hh = nullptr;
                 if (cudaHostAlloc((void**) &hh, hb, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
                     cudaHostGetDevicePointer((void**) &h, hh, 0) != cudaSuccess) {
-                    std::fprintf(stderr, "strata serve: the layer-split hand-off allocation failed\n");
+                    std::fprintf(stderr, "momoe serve: the layer-split hand-off allocation failed\n");
                     return 1;
                 }
                 std::memset(hh, 0, hb);
@@ -7553,7 +7553,7 @@ int main(int argc, char** argv) {
                     split_drive.pcie_num[st] = pcie_num_of(gs.pcie_frac);
                 }
                 if (!ok_s) {
-                    std::fprintf(stderr, "strata serve: layer split, stage %d: %s\n", st + 1, err.c_str());
+                    std::fprintf(stderr, "momoe serve: layer split, stage %d: %s\n", st + 1, err.c_str());
                     return 1;
                 }
             }
@@ -7562,7 +7562,7 @@ int main(int argc, char** argv) {
             for (int st = 1; st < n_stages; ++st)
                 plan_s += ", " + std::to_string(split_at[(size_t) st - 1]) + "-" + std::to_string(split_drive.end[st] - 1) +
                           " (CUDA" + std::to_string(split_same ? 0 : stages[(size_t) st - 1]->dev) + ")";
-            std::fprintf(stderr, "strata serve: layer split: layers %s, one hand-off per window\n", plan_s.c_str());
+            std::fprintf(stderr, "momoe serve: layer split: layers %s, one hand-off per window\n", plan_s.c_str());
         }
         // --pipeline-windows: the odd windows' verifiers and their hand-off (initialized before `ver`, which stays the
         // watchdog's verifier), and the drafter's own row buffer, which either parity's rows are copied into
@@ -7575,7 +7575,7 @@ int main(int argc, char** argv) {
                 float* hh = nullptr;
                 if (cudaHostAlloc((void**) &hh, hb, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
                     cudaHostGetDevicePointer((void**) &h, hh, 0) != cudaSuccess) {
-                    std::fprintf(stderr, "strata serve: --pipeline-windows: the second hand-off allocation failed\n");
+                    std::fprintf(stderr, "momoe serve: --pipeline-windows: the second hand-off allocation failed\n");
                     return 1;
                 }
                 std::memset(hh, 0, hb);
@@ -7595,19 +7595,19 @@ int main(int argc, char** argv) {
                 vs.slot_off = gs.cache.slot_offsets();
                 vs.n_slots = gs.cache.slots();
                 if (!gs.ver_b.init(gs.wt, g, gs.ss, vs, gs.head.loaded() ? &gs.head : nullptr, o.spec, err)) {
-                    std::fprintf(stderr, "strata serve: --pipeline-windows: the second verifier on CUDA%d (stage %d): %s "
+                    std::fprintf(stderr, "momoe serve: --pipeline-windows: the second verifier on CUDA%d (stage %d): %s "
                                          "(raise --vram-reserve-mib by ~200, or --pipeline-windows 0)\n",
                                  gs.dev, st + 1, err.c_str());
                     return 1;
                 }
                 if (last && cudaMalloc((void**) &pl_mtp_R, (size_t) strata::kernels::kVerifyMaxT * (size_t) (g.hc * g.n_embd) *
                                                                sizeof(float)) != cudaSuccess) {
-                    std::fprintf(stderr, "strata serve: --pipeline-windows: the drafter's row buffer does not fit\n");
+                    std::fprintf(stderr, "momoe serve: --pipeline-windows: the drafter's row buffer does not fit\n");
                     return 1;
                 }
             }
             if (!ver_b.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.spec, err)) {
-                std::fprintf(stderr, "strata serve: --pipeline-windows: the second verifier on CUDA0 (the first card): "
+                std::fprintf(stderr, "momoe serve: --pipeline-windows: the second verifier on CUDA0 (the first card): "
                                      "%s (raise --vram-reserve-mib by ~200, or --pipeline-windows 0)\n", err.c_str());
                 return 1;
             }
@@ -7620,7 +7620,7 @@ int main(int argc, char** argv) {
                       batch_mtp ? strata::kernels::kVerifyMaxT : std::max(o.spec, o.batch), err) ||
             (use_mtp && !mtp.bind(last_st ? last_st->wt : wt, last_st ? &last_st->head : &native_head,
                                   pipe ? pl_mtp_R : ver.final_R_all(), err))) {
-            std::fprintf(stderr, "strata serve: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe serve: %s\n", err.c_str());
             return 1;
         }
         if (pipe) mtp.set_source_R(ver.final_R_all());   // the serial decode's rows (the last stage's even verifier)
@@ -7634,14 +7634,14 @@ int main(int argc, char** argv) {
                 float* r = nullptr;
                 const size_t bytes = (size_t) o.spec * (size_t) g.hc * (size_t) g.n_embd * sizeof(float);
                 if (cudaMalloc((void**) &r, bytes) != cudaSuccess) {
-                    std::fprintf(stderr, "strata serve: batch MTP slot %d residual buffer does not fit%s\n",
+                    std::fprintf(stderr, "momoe serve: batch MTP slot %d residual buffer does not fit%s\n",
                                  b, vram_free_note().c_str());
                     return 1;
                 }
                 slot_mtp_rows.emplace_back(r, free_slot_mtp_rows);
                 if (!slot_mtp[(size_t) b]->bind(last_st ? last_st->wt : wt, last_st ? &last_st->head : &native_head, r, err,
                                                 &mtp)) {
-                    std::fprintf(stderr, "strata serve: batch MTP slot %d: %s%s\n", b, err.c_str(),
+                    std::fprintf(stderr, "momoe serve: batch MTP slot %d: %s%s\n", b, err.c_str(),
                                  vram_free_note().c_str());
                     return 1;
                 }
@@ -7655,7 +7655,7 @@ int main(int argc, char** argv) {
                 strata::core::Verifier& vk = k == 0 ? ver : stages[k - 1]->ver;
                 const strata::core::OnDevice on_k(k == 0 ? 0 : stages[k - 1]->dev);
                 if (!vk.init_slots(ptrs, err)) {
-                    std::fprintf(stderr, "strata serve: --batch, stage %zu: %s\n", k + 1, err.c_str());
+                    std::fprintf(stderr, "momoe serve: --batch, stage %zu: %s\n", k + 1, err.c_str());
                     return 1;
                 }
             }
@@ -7713,7 +7713,7 @@ int main(int argc, char** argv) {
                 sn.state = (void*) sst.gdn_state;
                 const strata::core::OnDevice on(sn.dev);
                 if (cudaMalloc((void**) &sn.buf[0], sn.bytes) != cudaSuccess) {
-                    std::fprintf(stderr, "strata serve: --pipeline-windows 2: the GDN snapshot of stage %d (%.1f MiB) does "
+                    std::fprintf(stderr, "momoe serve: --pipeline-windows 2: the GDN snapshot of stage %d (%.1f MiB) does "
                                          "not fit; the decode stays serial\n", st + 1, (double) sn.bytes / 1048576.0);
                     cudaGetLastError();
                     sn.buf[0] = nullptr;
@@ -7734,7 +7734,7 @@ int main(int argc, char** argv) {
             }
         }
         if (pipe)
-            std::fprintf(stderr, "strata serve: --pipeline-windows %d: two verifiers per stage, %d stages overlap across "
+            std::fprintf(stderr, "momoe serve: --pipeline-windows %d: two verifiers per stage, %d stages overlap across "
                                  "windows%s\n", o.pipeline_windows, n_stages,
                          !pl_snap_ok ? "" : pl_snap_overlap ? " (decode too; the GDN snapshots beside the window)"
                                                             : " (decode too; the GDN snapshot on the critical path)");
@@ -7898,7 +7898,7 @@ int main(int argc, char** argv) {
             // cache is full, evict the long conversation they were interleaved with (oldest first) - the reuse it
             // wanted.  Returning true is the same non-error skip the byte-budget and RAM-floor paths below take.
             if (!conversations.wants((int64_t) live.size())) {
-                std::fprintf(stderr, "strata serve: conversation cache: skip parking (%zu tokens, below the %lld "
+                std::fprintf(stderr, "momoe serve: conversation cache: skip parking (%zu tokens, below the %lld "
                                      "minimum; parked=%zu)\n",
                              live.size(), (long long) o.conversation_cache_min_tokens, conversations.size());
                 return true;
@@ -7906,7 +7906,7 @@ int main(int argc, char** argv) {
             // #342: before make_room evicts oldest-first, the copies of this conversation a turn back go (they hold
             // nothing the outgoing chain does not, apart from the tail this conversation rewrote)
             if (const size_t dropped = conversations.drop_superseded(live, live_imgs, checks, cvec_cached))
-                std::fprintf(stderr, "strata serve: conversation cache: dropped %zu superseded cop%s of this "
+                std::fprintf(stderr, "momoe serve: conversation cache: dropped %zu superseded cop%s of this "
                              "conversation; parked=%zu\n", dropped, dropped == 1 ? "y" : "ies", conversations.size());
             // A layer split parks one image per stage: the first stage's (with the draft layer's K/V) and one per
             // later stage (without it - the draft ring is saved once).  The checkpoints are MOVED apart into their
@@ -7935,7 +7935,7 @@ int main(int argc, char** argv) {
                 const strata::core::ConversationView view_k{live, live_imgs, cs.parts[k], cvec_cached};
                 size_t b = 0;
                 if (!strata::core::conversation_snapshot_bytes(view_k, st->ss, g, draft_of(k), b, err)) {
-                    std::fprintf(stderr, "strata serve: conversation cache: skip parking (stage CUDA%d: %s)\n",
+                    std::fprintf(stderr, "momoe serve: conversation cache: skip parking (stage CUDA%d: %s)\n",
                                  st->dev, err.c_str());
                     err.clear();
                     return true;
@@ -7955,7 +7955,7 @@ int main(int argc, char** argv) {
             }
             size_t estimate = 0;
             if (!strata::core::conversation_snapshot_bytes(view, ss, g, draft0, estimate, err)) {
-                std::fprintf(stderr, "strata serve: conversation cache: skip parking (%s)\n", err.c_str());
+                std::fprintf(stderr, "momoe serve: conversation cache: skip parking (%s)\n", err.c_str());
                 err.clear(); // A recoverable miss must not poison the batched draft prefill's error channel.
                 return true;
             }
@@ -7974,7 +7974,7 @@ int main(int argc, char** argv) {
             // capacity and directories, and put() charges that same true size -
             // a capped figure would under-evict and overfill the budget.
             if (!conversations.make_room(estimate, held)) {
-                std::fprintf(stderr, "strata serve: conversation cache: skip parking (snapshot %zu MiB exceeds available budget)\n",
+                std::fprintf(stderr, "momoe serve: conversation cache: skip parking (snapshot %zu MiB exceeds available budget)\n",
                              estimate >> 20);
                 return true;
             }
@@ -8004,13 +8004,13 @@ int main(int argc, char** argv) {
                        conversations.evict_oldest())
                     ++evicted;
                 if (!admit()) {
-                    std::fprintf(stderr, "strata serve: conversation cache: skip parking (physical RAM admission; need %zu MiB plus %lld MiB floor, %s; evicted %zu, %zu still parked)\n",
+                    std::fprintf(stderr, "momoe serve: conversation cache: skip parking (physical RAM admission; need %zu MiB plus %lld MiB floor, %s; evicted %zu, %zu still parked)\n",
                                  additional >> 20, (long long) o.conversation_cache_min_free_mib, ram_note(mem).c_str(),
                                  evicted, conversations.size());
                     return true;
                 }
                 if (evicted)
-                    std::fprintf(stderr, "strata serve: conversation cache: evicted %zu parked conversation%s to admit this snapshot (%zu MiB plus %lld MiB floor)\n",
+                    std::fprintf(stderr, "momoe serve: conversation cache: evicted %zu parked conversation%s to admit this snapshot (%zu MiB plus %lld MiB floor)\n",
                                  evicted, evicted == 1 ? "" : "s", additional >> 20,
                                  (long long) o.conversation_cache_min_free_mib);
                 strata::core::SavedConversation image;
@@ -8031,20 +8031,20 @@ int main(int argc, char** argv) {
                 const auto mem_after = strata::core::sample_host_memory();
                 if (!strata::core::conversation_memory_admit(
                         mem_after ? std::optional<uint64_t>(mem_after->available) : std::nullopt, 0, floor)) {
-                    std::fprintf(stderr, "strata serve: conversation cache: skip parking (RAM floor after capture: %lld MiB needed, %s)\n",
+                    std::fprintf(stderr, "momoe serve: conversation cache: skip parking (RAM floor after capture: %lld MiB needed, %s)\n",
                                  (long long) o.conversation_cache_min_free_mib, ram_note(mem_after).c_str());
                     return true;
                 }
                 const size_t snapshot_bytes = image.bytes();
                 const bool stored = conversations.put(std::move(image), held);
-                std::fprintf(stderr, "strata serve: conversation cache: %s %zu tokens in %.1f ms; parked=%zu bytes=%zu evictions=%zu snapshot_bytes=%zu reused_kv_bytes=%zu\n",
+                std::fprintf(stderr, "momoe serve: conversation cache: %s %zu tokens in %.1f ms; parked=%zu bytes=%zu evictions=%zu snapshot_bytes=%zu reused_kv_bytes=%zu\n",
                              stored ? "parked" : "skipped", live.size(),
                              std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
                              conversations.size(), conversations.bytes(), conversations.evictions(), snapshot_bytes, reused_bytes);
             } catch (const std::bad_alloc&) {
                 // The active state has not been touched. Continue with normal
                 // prompt processing rather than killing a serving process.
-                std::fprintf(stderr, "strata serve: conversation cache: allocation failed; skip parking\n");
+                std::fprintf(stderr, "momoe serve: conversation cache: allocation failed; skip parking\n");
             }
             return true;
         };
@@ -8053,7 +8053,7 @@ int main(int argc, char** argv) {
         auto park_current = [&](size_t held) -> bool {
             try { return park_current_body(held); }
             catch (const std::bad_alloc&) {
-                std::fprintf(stderr, "strata serve: conversation cache: allocation failed; skip parking\n");
+                std::fprintf(stderr, "momoe serve: conversation cache: allocation failed; skip parking\n");
                 return true;
             }
         };
@@ -8072,7 +8072,7 @@ int main(int argc, char** argv) {
         auto nonfinite_hit = [&](const strata::core::Verifier& v, const char* what) -> bool {
             const int row = v.nonfinite_row();
             if (row < 0) return false;
-            std::fprintf(stderr, "strata serve: non-finite logits (#879) in a %s window at position %lld (row %d): its "
+            std::fprintf(stderr, "momoe serve: non-finite logits (#879) in a %s window at position %lld (row %d): its "
                                  "tokens are not emitted, the request ends (DONE nonfinite) and the next request reads "
                                  "its prompt from token 0\n", what, (long long) v.nonfinite_pos(), row);
             std::fflush(stderr);
@@ -8190,17 +8190,17 @@ int main(int argc, char** argv) {
                     if (!said && (batched || (e.empty() && why != nullptr))) {
                         said = true;
                         if (batched)
-                            std::fprintf(stderr, "strata serve: draft layer prompt K/V batched on CUDA%d (E-9 on the layer "
+                            std::fprintf(stderr, "momoe serve: draft layer prompt K/V batched on CUDA%d (E-9 on the layer "
                                                  "split, K/V mode %d)\n", stages.back()->dev, mtp.kv_state().kv_mode);
                         else
-                            std::fprintf(stderr, "strata serve: STRATA_SPLIT_MTP_BATCH=1 declined, the drafter's own pass "
+                            std::fprintf(stderr, "momoe serve: STRATA_SPLIT_MTP_BATCH=1 declined, the drafter's own pass "
                                                  "runs: %s\n", why);
                     }
                 }
             }
             if (!e.empty() || (use_mtp && !batched && !mtp.prefill(R_rows, nxt.data(), T, p0, e))) return false;
             if (use_mtp && std::getenv("STRATA_SNAPSHOT_VERIFY") != nullptr)
-                std::fprintf(stderr, "strata serve: DRAFT_PREFILL path=%s mode=%d cells=%lld\n",
+                std::fprintf(stderr, "momoe serve: DRAFT_PREFILL path=%s mode=%d cells=%lld\n",
                              batched ? "batched" : "token", mtp.kv_state().kv_mode, (long long) T);
             // progress for the server window: PP <position reached> <prompt tokens> <ms> <fresh tokens/s>
             const int64_t done = p0 + T;
@@ -8310,12 +8310,12 @@ int main(int argc, char** argv) {
                                          o.peer_device < 0 && g.has_indexer;
             if (tse == nullptr && nearly_all_cached && o.batch == 0 && o.peer_device < 0 && decode_defaults_arch_ok() &&
                 g.has_indexer)
-                std::fprintf(stderr, "strata serve: STRATA_ROUTE_TAIL_SKIP is off by default: %.1f%% of the experts are in the GPU cache, so "
+                std::fprintf(stderr, "momoe serve: STRATA_ROUTE_TAIL_SKIP is off by default: %.1f%% of the experts are in the GPU cache, so "
                                      "few are missed and skipping them costs more draft acceptance than it saves; "
                                      "STRATA_ROUTE_TAIL_SKIP=7 turns it on\n", 100.0 * (double) cached_experts / (double) host_res.size());
             if (tail_default_ok) strata::core::set_tail_skip_rank(7);
             if (strata::core::tail_skip_rank() > 0 && !all_experts_resident)
-                std::fprintf(stderr, "strata serve: STRATA_ROUTE_TAIL_SKIP=%d is ON%s: a missed expert that every token of a verify window routes at rank %d or "
+                std::fprintf(stderr, "momoe serve: STRATA_ROUTE_TAIL_SKIP=%d is ON%s: a missed expert that every token of a verify window routes at rank %d or "
                                      "lower is skipped (+10..20%% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); "
                                      "STRATA_ROUTE_TAIL_SKIP=0 turns it off\n", strata::core::tail_skip_rank(),
                              tse == nullptr ? " (default)" : "", strata::core::tail_skip_rank());
@@ -8336,7 +8336,7 @@ int main(int argc, char** argv) {
         std::vector<double> heat;
         if (!o.expert_profile_save.empty() && !all_experts_resident) {
             if (drive.d.usage.empty() || host_res.empty())
-                std::fprintf(stderr, "strata serve: --expert-profile-save needs the adaptive tier (--adapt-every and "
+                std::fprintf(stderr, "momoe serve: --expert-profile-save needs the adaptive tier (--adapt-every and "
                                      "--adapt-swaps above 0) and --expert-profile: nothing will be saved\n");
             else
                 heat.assign(drive.d.usage.size(), 0.0);
@@ -8344,7 +8344,7 @@ int main(int argc, char** argv) {
         Clock::time_point profile_saved_at = Clock::now();
         cudaStream_t adapt_stream = nullptr;
         if (cudaStreamCreateWithFlags(&adapt_stream, cudaStreamNonBlocking) != cudaSuccess) {
-            std::fprintf(stderr, "strata serve: cannot create the refill stream\n");
+            std::fprintf(stderr, "momoe serve: cannot create the refill stream\n");
             return 1;
         }
         // plan v0.3 P6: swaps in flight - (residency index, slot) admitted when adapt_ev has completed
@@ -8385,10 +8385,10 @@ int main(int argc, char** argv) {
             }
             aov = why == nullptr;
             if (aov)
-                std::fprintf(stderr, "strata serve: adaptive overlap (STRATA_ADAPT_OVERLAP=0 turns it off): the adaptive tier's copies land while the next window runs "
+                std::fprintf(stderr, "momoe serve: adaptive overlap (STRATA_ADAPT_OVERLAP=0 turns it off): the adaptive tier's copies land while the next window runs "
                                      "(same tokens, a layer waits for its own copies)\n");
             else if (std::getenv("STRATA_ADAPT_OVERLAP") != nullptr)   // quiet when it was only the default
-                std::fprintf(stderr, "strata serve: STRATA_ADAPT_OVERLAP=1 is off: %s\n", why);
+                std::fprintf(stderr, "momoe serve: STRATA_ADAPT_OVERLAP=1 is off: %s\n", why);
         }
         // a layer split's later stages keep a copy of the residency table on their devices, and swap on their own
         auto res_upload = [&]() {
@@ -8525,7 +8525,7 @@ int main(int argc, char** argv) {
                     adapt_copy_h2d(gs ? gs->cache.device_slot(slot) : xcache.device_slot(slot), b,
                                    (size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer),
                                    gs ? gs->adapt_stream : adapt_stream) != cudaSuccess) {
-                    std::fprintf(stderr, "strata serve: adaptive swap copy failed (layer %d, slot %d, pinned %d): %s\n",
+                    std::fprintf(stderr, "momoe serve: adaptive swap copy failed (layer %d, slot %d, pinned %d): %s\n",
                                  (int) s.layer, (int) slot, pin_live.empty() ? 0 : 1, cudaGetErrorString(cudaGetLastError()));
                     return false;
                 }
@@ -8547,7 +8547,7 @@ int main(int argc, char** argv) {
             }
             if (!cp_dst.empty() && strata::core::copy_blobs(cp_dst.data(), cp_src.data(), cp_bytes.data(), cp_dst.size(),
                                                             adapt_stream, dma_mode) != cudaSuccess) {
-                std::fprintf(stderr, "strata serve: adaptive swap copy failed (batched): %s\n",
+                std::fprintf(stderr, "momoe serve: adaptive swap copy failed (batched): %s\n",
                              cudaGetErrorString(cudaGetLastError()));
                 return false;
             }
@@ -8568,7 +8568,7 @@ int main(int argc, char** argv) {
                 std::string perr;
                 if (!peer.adapt(drive.d.usage.data(), r0.data(),
                                 o.peer_adapt_swaps >= 0 ? o.peer_adapt_swaps : o.adapt_swaps, perr)) {
-                    std::fprintf(stderr, "strata serve: %s\n", perr.c_str());
+                    std::fprintf(stderr, "momoe serve: %s\n", perr.c_str());
                     return false;
                 }
             }
@@ -8631,7 +8631,7 @@ int main(int argc, char** argv) {
             ahomes.push_back({&xcache, adapt_stream, adapt_ev, 0, false});
             for (auto& st : stages) ahomes.push_back({&st->cache, st->adapt_stream, st->adapt_ev, st->dev, false});
             ajob = std::make_unique<JobThread>();
-            std::fprintf(stderr, "strata serve: adaptive tier asynchronous (--adapt-async 1): up to %lld swaps per round, "
+            std::fprintf(stderr, "momoe serve: adaptive tier asynchronous (--adapt-async 1): up to %lld swaps per round, "
                                  "a round every %d windows\n", (long long) a_cap, o.adapt_every);
         }
         // the pipelined loop's side (see above): whether stage `st` has no window in flight; per home, the copies back
@@ -8695,7 +8695,7 @@ int main(int argc, char** argv) {
                     if (const cudaError_t e = cudaMemcpyAsync(src.exchange_buffer(w.j), h.cache->device_slot(w.slot),
                                                               (size_t) strata::kernels::cpu::expert_layout().blob_bytes(w.layer),
                                                               cudaMemcpyDeviceToHost, h.stream); e != cudaSuccess) {
-                        std::fprintf(stderr, "strata serve: adaptive tier: copy back of layer %d slot %d (CUDA%d) failed: %s\n",
+                        std::fprintf(stderr, "momoe serve: adaptive tier: copy back of layer %d slot %d (CUDA%d) failed: %s\n",
                                      (int) w.layer, (int) w.slot, h.dev, cudaGetErrorString(e));
                         a_err = true;
                     }
@@ -8710,7 +8710,7 @@ int main(int argc, char** argv) {
             // pageable, or not in the RAM copy: through a bounce buffer (an async copy)
             uint8_t* bb = src.exchange_buffer(a_cap + w.j);
             if (bb == nullptr || !src.copy_blob(w.layer, w.in, bb)) {
-                std::fprintf(stderr, "strata serve: adaptive tier: layer %d expert %d could not be read\n", (int) w.layer,
+                std::fprintf(stderr, "momoe serve: adaptive tier: layer %d expert %d could not be read\n", (int) w.layer,
                              (int) w.in);
                 a_err = true;
                 return nullptr;
@@ -8723,7 +8723,7 @@ int main(int argc, char** argv) {
             if (const cudaError_t e = cudaMemcpyAsync(h.cache->device_slot(w.slot), b,
                                                       (size_t) strata::kernels::cpu::expert_layout().blob_bytes(w.layer),
                                                       cudaMemcpyHostToDevice, h.stream); e != cudaSuccess) {
-                std::fprintf(stderr, "strata serve: adaptive tier: copy of layer %d into slot %d (CUDA%d) failed: %s\n",
+                std::fprintf(stderr, "momoe serve: adaptive tier: copy of layer %d into slot %d (CUDA%d) failed: %s\n",
                              (int) w.layer, (int) w.slot, h.dev, cudaGetErrorString(e));
                 a_err = true;
             }
@@ -8834,7 +8834,7 @@ int main(int argc, char** argv) {
                         const size_t out = (size_t) w.layer * g.n_expert + w.out;
                         if (host_res[out] != w.slot) continue;   // the table moved since the snapshot: not this one
                         if (w.exchange && !src.stage_exchange(w.layer, w.in, w.out, w.j)) {
-                            std::fprintf(stderr, "strata serve: adaptive tier: stage_exchange refused layer %d in %d out %d\n",
+                            std::fprintf(stderr, "momoe serve: adaptive tier: stage_exchange refused layer %d in %d out %d\n",
                                          (int) w.layer, (int) w.in, (int) w.out);
                             return false;
                         }
@@ -8913,7 +8913,7 @@ int main(int argc, char** argv) {
                 for (int st = 0; st < (int) ahomes.size(); ++st) a_gap(st);
                 if (a_res_dirty) res_upload();
             } else {   // the loop did not drain (a window failed): the round cannot go on, the next tick says so
-                std::fprintf(stderr, "strata serve: adaptive tier: a window is still in flight after the pipelined loop\n");
+                std::fprintf(stderr, "momoe serve: adaptive tier: a window is still in flight after the pipelined loop\n");
                 a_err = true;
             }
             a_pl_idle = nullptr;
@@ -8932,10 +8932,10 @@ int main(int argc, char** argv) {
             const auto ranked = strata::core::rank_learned_profile(g.n_layers, g.n_expert, resident, heat,
                                                                    profile_loaded);
             if (strata::core::write_expert_profile(o.expert_profile_save, g.n_layers, g.n_expert, ranked, e))
-                std::fprintf(stderr, "strata serve: expert profile saved to %s (%s)\n", o.expert_profile_save.c_str(),
+                std::fprintf(stderr, "momoe serve: expert profile saved to %s (%s)\n", o.expert_profile_save.c_str(),
                              why);
             else
-                std::fprintf(stderr, "strata serve: the expert profile was not saved: %s\n", e.c_str());
+                std::fprintf(stderr, "momoe serve: the expert profile was not saved: %s\n", e.c_str());
             profile_saved_at = Clock::now();
         };
         // stdin is read on its own thread, so a STOP line reaches a request that is still running (the client went
@@ -8999,7 +8999,7 @@ int main(int argc, char** argv) {
         const bool trace = std::getenv("STRATA_TRACE") != nullptr;
         auto tr = [&](const char* what, long long a = -1, long long b = -1) {
             if (!trace) return;
-            std::fprintf(stderr, "strata trace: %s %lld %lld\n", what, a, b);
+            std::fprintf(stderr, "momoe trace: %s %lld %lld\n", what, a, b);
             std::fflush(stderr);
         };
         {
@@ -9011,29 +9011,29 @@ int main(int argc, char** argv) {
             // the driver page GPU memory, and a verify graph spinning on a host flag then never finishes
             const int64_t free_mib = (int64_t) (free_b >> 20);
             if (free_mib >= 256) {
-                std::fprintf(stderr, "strata serve: %lld MiB of VRAM free with everything loaded\n", (long long) free_mib);
+                std::fprintf(stderr, "momoe serve: %lld MiB of VRAM free with everything loaded\n", (long long) free_mib);
 #ifdef _WIN32
                 if (free_mib < 512 && o.prefill_auto)   // #1275: said, never changed (the chunk is the operator's to cap)
-                    std::fprintf(stderr, "strata serve: that is little room for the verify windows' buffers under WDDM; if the "
+                    std::fprintf(stderr, "momoe serve: that is little room for the verify windows' buffers under WDDM; if the "
                                          "engine exits right after this line, --prefill auto:8192 (a smaller prompt chunk "
                                          "borrows fewer cache slots) or a larger --vram-reserve-mib leaves more\n");
 #endif
                 rss_probe("serving");
             } else if (reserve_adapted) {
                 // #496: the reserve was already lowered to make the cache fit - a bigger one would leave it no room
-                std::fprintf(stderr, "strata serve: WARNING: %lld MiB of VRAM free with everything loaded - this card "
+                std::fprintf(stderr, "momoe serve: WARNING: %lld MiB of VRAM free with everything loaded - this card "
                                      "only just fits the model (the VRAM reserve was lowered to %d MiB so the expert "
                                      "cache fits): requests may stall. Close other programs that use the GPU, or lower "
                                      "--max-context\n", (long long) free_mib, o.vram_reserve_mib);
             } else {
-                std::fprintf(stderr, "strata serve: %lld MiB of VRAM free with everything loaded - LOW: requests may stall;"
+                std::fprintf(stderr, "momoe serve: %lld MiB of VRAM free with everything loaded - LOW: requests may stall;"
                                      " add --vram-reserve-mib %lld to the config's args (or lower --max-context)\n",
                              (long long) free_mib, (long long) (o.vram_reserve_mib + 512 - free_mib));
                 // #781 / #831: an explicit --expert-cache N is a byte budget that is not checked against the VRAM once
                 // the slots are written (auto is), so on a card it fills a smaller N is the cure: a few hundred slots
                 // can be the difference between 14 and 100 tok/s under WDDM.  Said, never changed.
                 if (!auto_cache)
-                    std::fprintf(stderr, "strata serve: the expert cache was set with --expert-cache (%lld slots): a "
+                    std::fprintf(stderr, "momoe serve: the expert cache was set with --expert-cache (%lld slots): a "
                                          "smaller one - or --expert-cache auto, which checks the free VRAM once the "
                                          "slots are written - leaves room; decode can be several times slower with the "
                                          "card this full\n", (long long) xcache.slots());
@@ -9113,7 +9113,7 @@ int main(int argc, char** argv) {
                                 io_last = a;
                                 if (!io_noted) {
                                     io_noted = true;
-                                    std::fprintf(stderr, "strata serve: no step finished for %d s, but the file tier is still being read "
+                                    std::fprintf(stderr, "momoe serve: no step finished for %d s, but the file tier is still being read "
                                                          "(slow storage or low RAM): waiting up to %d s in all (STRATA_WATCHDOG_IO_S) (#1407)\n",
                                                  limit, io_limit);
                                 }
@@ -9123,7 +9123,7 @@ int main(int argc, char** argv) {
                         }
                         // a blocking step's explicit allowance (session files): still within it, not yet stuck
                         if (strata::core::progress_now_ms() < p.allow_until_ms.load()) continue;
-                        std::fprintf(stderr, "strata serve: no progress for %d s during a request (%s) - stopping "
+                        std::fprintf(stderr, "momoe serve: no progress for %d s during a request (%s) - stopping "
                                              "the engine so the server starts it again (issue #29)%s\n",
                                      limit, stage_text().c_str(),
                                      launch_blocking() ? "; CUDA_LAUNCH_BLOCKING=1 is set, and no verify window can "
@@ -9261,7 +9261,7 @@ int main(int argc, char** argv) {
             }
             relend();
             cudaMemGetInfo(&free_b, &total_b);
-            std::fprintf(stderr, "strata serve: VRAM %lld MiB kept free: the expert cache %lld -> %lld of %lld slots "
+            std::fprintf(stderr, "momoe serve: VRAM %lld MiB kept free: the expert cache %lld -> %lld of %lld slots "
                                  "(%.2f of %.2f GiB), %lld MiB free now, prompt chunk %lld, in %.0f ms%s\n",
                          reserve, (long long) before, (long long) xcache.slots(), (long long) xcache.full_slots(),
                          (double) xcache.mapped_bytes() / 1073741824.0, (double) xcache.full_bytes() / 1073741824.0,
@@ -9525,7 +9525,7 @@ int main(int argc, char** argv) {
                 bool nf = false;   // #879: a row of this slot held non-finite logits: the slot ends, nothing emitted
                 for (int r = first[t]; r < first[t] + (batch_mtp ? 2 : 1); ++r) nf = nf || ver.nonfinite_in(r);
                 if (nf) {
-                    std::fprintf(stderr, "strata batch: non-finite logits (#879) in slot %d at position %lld: it ends "
+                    std::fprintf(stderr, "momoe batch: non-finite logits (#879) in slot %d at position %lld: it ends "
                                          "(BDONE nonfinite) and the next request reads its prompt from token 0\n", b,
                                  (long long) pos[first[t]]);
                     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
@@ -9609,7 +9609,7 @@ int main(int argc, char** argv) {
                 else if (!drive.d.usage.empty())
                     std::snprintf(adapt_txt, sizeof adapt_txt, "; adaptive tier: %lld rounds, %lld experts swapped in",
                                   (long long) bt_adapt_rounds, (long long) bt_adapt_swaps);
-                std::fprintf(stderr, "strata batch: %lld windows, avg %.2f rows, %.2f ms/window = run %.2f (CUDA0 GPU-reach "
+                std::fprintf(stderr, "momoe batch: %lld windows, avg %.2f rows, %.2f ms/window = run %.2f (CUDA0 GPU-reach "
                                      "wait %.2f + CPU experts %.2f) + commit %.2f + emit %.2f + adapt wait %.2f; per stage "
                                      "(ms/window): %s; per layer-window: CPU experts %.2f, VRAM hits %.2f, PCIe %.2f; routed "
                                      "entries per window: VRAM %.1f (%.1f%%), PCIe %.1f (%.1f%%), CPU %.1f (%.1f%%)%s; %.1f rows/s "
@@ -9626,7 +9626,7 @@ int main(int argc, char** argv) {
                     if (!pr.empty()) std::fprintf(stderr, "strata batch GPU stages, stage %zu (ms/window):%s\n", k + 1, pr.c_str());
                 }
                 if (batch_mtp)   // each slot-window offers one proposal and yields 1 + (accepted) tokens
-                    std::fprintf(stderr, "strata batch: MTP proposals accepted %lld of %lld (%.1f%%)\n",
+                    std::fprintf(stderr, "momoe batch: MTP proposals accepted %lld of %lld (%.1f%%)\n",
                                  (long long) bt_accepted, (long long) (bt_rows - bt_accepted),
                                  100.0 * (double) bt_accepted / (double) std::max<int64_t>(bt_rows - bt_accepted, 1));
                 bt_run = bt_commit = bt_emit = bt_adapt_wait = 0;
@@ -9639,7 +9639,7 @@ int main(int argc, char** argv) {
         const bool piped = o.batch > 0 && o.batch_groups > 1 && n_pipe > 1;
         if (piped && batch_mtp)   // #1413: said, not silent
             std::fprintf(stderr,
-                         "strata generate: WARNING: --batch-groups %d runs the pipelined path, which builds one row per slot: "
+                         "momoe generate: WARNING: --batch-groups %d runs the pipelined path, which builds one row per slot: "
                          "--batch-mtp's per-slot MTP drafts do not run there (their drafters still hold VRAM, about 0.9 GB per "
                          "slot). Drop --batch-mtp, or use --batch-groups 1.\n", o.batch_groups);
         const int GS = piped ? o.batch / o.batch_groups : o.batch;
@@ -9683,7 +9683,7 @@ int main(int argc, char** argv) {
                     BSlot& sl = bs[(size_t) (gi * GS + t)];
                     if (!sl.active) continue;
                     if (vk.nonfinite_in(t)) {   // #879: the slot ends, nothing emitted
-                        std::fprintf(stderr, "strata batch: non-finite logits (#879) in slot %d at position %lld: it "
+                        std::fprintf(stderr, "momoe batch: non-finite logits (#879) in slot %d at position %lld: it "
                                              "ends (BDONE nonfinite) and the next request reads its prompt from token 0\n",
                                      gi * GS + t, (long long) sl.p);
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
@@ -9865,7 +9865,7 @@ int main(int argc, char** argv) {
                 auto ms = [&] { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); };
                 auto refuse = [&](const std::string& why, strata::core::SessionError kind = strata::core::SessionError::invalid,
                                   bool published = false) {
-                    std::fprintf(stderr, "strata serve: session %s %s: %s\n", save ? "save" : "restore", path.c_str(),
+                    std::fprintf(stderr, "momoe serve: session %s %s: %s\n", save ? "save" : "restore", path.c_str(),
                                  why.c_str());
                     std::string one = why;   // one protocol line
                     for (char& c : one) if (c == '\n' || c == '\r') c = ' ';
@@ -9946,7 +9946,7 @@ int main(int argc, char** argv) {
                                 if (tail_ckpt_len >= 0 && std::none_of(checks.begin(), checks.end(), [&](const auto& c) {
                                         return int64_t(c.ids.size()) == tail_ckpt_len;
                                     })) tail_ckpt_len = -1;
-                                std::fprintf(stderr, "strata serve: save reclaimed %zu checkpoints, %zu parked, "
+                                std::fprintf(stderr, "momoe serve: save reclaimed %zu checkpoints, %zu parked, "
                                                      "%zu host bytes; checking RAM again\n",
                                              freed.checkpoints, freed.parked, freed.bytes);
                             }
@@ -9989,13 +9989,13 @@ int main(int argc, char** argv) {
                             continue;
                         }
                         if (st.dir_flush_unsupported)
-                            std::fprintf(stderr, "strata serve: session saved to %s; this filesystem cannot flush a "
+                            std::fprintf(stderr, "momoe serve: session saved to %s; this filesystem cannot flush a "
                                                  "folder, so the new name is not flushed\n", path.c_str());
                     } catch (const std::bad_alloc&) {
                         refuse("not enough RAM to save the session", strata::core::SessionError::memory);
                         continue;
                     }
-                    std::fprintf(stderr, "strata serve: session saved %zu tokens, %zu of %zu checkpoints, %zu bytes to %s "
+                    std::fprintf(stderr, "momoe serve: session saved %zu tokens, %zu of %zu checkpoints, %zu bytes to %s "
                                  "in %.1f ms (state %.1f ms)\n", live.size(), kept, checks.size(), bytes,
                                  path.c_str(), ms(), capture_ms);
                     std::printf("SAVED %zu %zu %.1f\n", live.size(), bytes, ms());
@@ -10053,7 +10053,7 @@ int main(int argc, char** argv) {
                         strata::core::ConversationRestore::restored) {
                         // validated above: a failure here is a transfer failure, after device writes began - never
                         // decode from a partial state; the server starts the engine again
-                        std::fprintf(stderr, "strata serve: session restore %s: transfer failed: %s\n", path.c_str(),
+                        std::fprintf(stderr, "momoe serve: session restore %s: transfer failed: %s\n", path.c_str(),
                                      err.c_str());
                         std::printf("FATAL restoring the session file failed after the device state was changed: %s\n",
                                     err.c_str());
@@ -10069,11 +10069,11 @@ int main(int argc, char** argv) {
                     if (nan_flush) {   // #879: the file replaced the poisoned session; the parked ones go (no slots here)
                         nan_flush = false;
                         const size_t n_parked = conversations.clear();
-                        std::fprintf(stderr, "strata serve: after non-finite logits (#879): the restored session "
+                        std::fprintf(stderr, "momoe serve: after non-finite logits (#879): the restored session "
                                              "replaces the live one; dropped %zu parked conversation%s\n", n_parked,
                                      n_parked == 1 ? "" : "s");
                     }
-                    std::fprintf(stderr, "strata serve: session restored %zu tokens, %zu checkpoints, %zu bytes from %s "
+                    std::fprintf(stderr, "momoe serve: session restored %zu tokens, %zu checkpoints, %zu bytes from %s "
                                  "in %.1f ms (read+check %.1f ms)\n", live.size(), checks.size(), bytes, path.c_str(),
                                  ms(), read_ms);
                     std::printf("RESTORED %zu %zu %.1f\n", live.size(), bytes, ms());
@@ -10329,7 +10329,7 @@ int main(int argc, char** argv) {
                         sl.checks.clear();
                         ++n_slots;
                     }
-                std::fprintf(stderr, "strata serve: after non-finite logits (#879): dropped the live session, %zu "
+                std::fprintf(stderr, "momoe serve: after non-finite logits (#879): dropped the live session, %zu "
                                      "checkpoint%s, %zu parked conversation%s and %zu idle slot%s (%zu running slot%s "
                                      "not kept after their reply); reading this prompt from token 0\n", n_checks,
                              n_checks == 1 ? "" : "s", n_parked, n_parked == 1 ? "" : "s", n_slots,
@@ -10374,14 +10374,14 @@ int main(int argc, char** argv) {
             // Reject the entire image before parking/overwriting the outgoing
             // state. Invalid entries can safely fall back to its existing prefix.
             if (incoming && incoming->stage_images.size() != stages.size()) {
-                std::fprintf(stderr, "strata serve: conversation cache: discard snapshot (stage count)\n");
+                std::fprintf(stderr, "momoe serve: conversation cache: discard snapshot (stage count)\n");
                 incoming.reset();
             }
             if (incoming) for (size_t i = 0; i < stages.size(); ++i) {
                 const strata::core::OnDevice on(stages[i]->dev);
                 if (!strata::core::conversation_snapshot_validate(incoming->stage_images[i], stages[i]->ss, g,
                         use_mtp && i + 1 == stages.size() ? &mtp.kv_state() : nullptr, err)) {   // the draft: the last stage's
-                    std::fprintf(stderr, "strata serve: conversation cache: discard invalid stage snapshot (%s)\n",
+                    std::fprintf(stderr, "momoe serve: conversation cache: discard invalid stage snapshot (%s)\n",
                                  err.c_str());
                     incoming.reset();
                     err.clear();
@@ -10390,7 +10390,7 @@ int main(int argc, char** argv) {
             }
             if (incoming && !strata::core::conversation_snapshot_validate(*incoming, ss, g,
                     use_mtp && stages.empty() ? &mtp.kv_state() : nullptr, err)) {
-                std::fprintf(stderr, "strata serve: conversation cache: discard invalid snapshot (%s)\n", err.c_str());
+                std::fprintf(stderr, "momoe serve: conversation cache: discard invalid snapshot (%s)\n", err.c_str());
                 incoming.reset();
                 err.clear();
             }
@@ -10413,7 +10413,7 @@ int main(int argc, char** argv) {
                 const auto t0 = Clock::now();
                 if (!copy_from_slot(slot_source, slot_ck, err)) {
                     // the main session may be half written: read this prompt from the start
-                    std::fprintf(stderr, "strata batch: restoring slot %d failed (%s); reading the prompt\n",
+                    std::fprintf(stderr, "momoe batch: restoring slot %d failed (%s); reading the prompt\n",
                                  slot_source, err.c_str());
                     err.clear();
                     live.clear();
@@ -10440,7 +10440,7 @@ int main(int argc, char** argv) {
                     live_imgs.clear();
                     resume = slot_tokens;
                     from_live = true;
-                    std::fprintf(stderr, "strata batch: slot %d gave back %lld tokens of this conversation (%s) in "
+                    std::fprintf(stderr, "momoe batch: slot %d gave back %lld tokens of this conversation (%s) in "
                                  "%.1f ms\n", slot_source, (long long) slot_tokens,
                                  slot_ck != nullptr ? "its turn checkpoint" : "all it holds",
                                  std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
@@ -10481,7 +10481,7 @@ int main(int argc, char** argv) {
                         std::printf("ERR verifying restored draft KV: %s\n", err.c_str());
                         return 1;
                     }
-                    std::fprintf(stderr, "strata serve: SNAPSHOT_VERIFY draft=%016llx cells=%lld mode=%d source=%s resident=%lld\n",
+                    std::fprintf(stderr, "momoe serve: SNAPSHOT_VERIFY draft=%016llx cells=%lld mode=%d source=%s resident=%lld\n",
                                  (unsigned long long) draft_hash, (long long) draft_kv.cells,
                                  mtp.kv_state().kv_mode, "ram",
                                  (long long) (mtp.kv_state().n_slots * strata::kernels::qsa_real_shapes().page_size));
@@ -10505,7 +10505,7 @@ int main(int argc, char** argv) {
                     conversations.retain(std::move(incoming->kv), int64_t(live.size()), std::move(stage_kv));
                 }
                 incoming.reset(); // Running-state/checkpoint copies are no longer needed.
-                std::fprintf(stderr, "strata serve: conversation cache: restored %lld tokens (%s) in %.1f ms; parked=%zu bytes=%zu\n",
+                std::fprintf(stderr, "momoe serve: conversation cache: restored %lld tokens (%s) in %.1f ms; parked=%zu bytes=%zu\n",
                              (long long) resume, from_live ? "live" : "checkpoint",
                              std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
                              conversations.size(), conversations.bytes());
@@ -10563,7 +10563,7 @@ int main(int argc, char** argv) {
                         cudaStreamSynchronize(st->stream);
                     }
                     reread_to = resume;
-                    std::fprintf(stderr, "strata serve: STRATA_CKPT_REREAD: reading %lld tokens again instead of "
+                    std::fprintf(stderr, "momoe serve: STRATA_CKPT_REREAD: reading %lld tokens again instead of "
                                          "restoring\n", (long long) resume);
                 } else if (c == nullptr || !checkpoint_restore(*c, ss, g) || c->stage_parts.size() != stages.size() ||
                            [&] {
@@ -10849,7 +10849,7 @@ int main(int argc, char** argv) {
                 }
                 if (n_parts > 0) res_upload();
                 if (trace && n_parts > 0) {
-                    std::fprintf(stderr, "strata trace: refilled %lld slots on %lld stage(s) in %.1f ms\n",
+                    std::fprintf(stderr, "momoe trace: refilled %lld slots on %lld stage(s) in %.1f ms\n",
                                  (long long) n_lent, (long long) n_parts,
                                  std::chrono::duration<double, std::milli>(Clock::now() - t_rf).count());
                     std::fflush(stderr);
@@ -10903,7 +10903,7 @@ int main(int argc, char** argv) {
                 if (trace) {
                     int64_t n_lent = 0;
                     for (const PfPart& p : pf_parts) n_lent += (int64_t) p.lent.size();
-                    std::fprintf(stderr, "strata trace: lent %lld slots for %lld tokens in %.1f ms\n", (long long) n_lent,
+                    std::fprintf(stderr, "momoe trace: lent %lld slots for %lld tokens in %.1f ms\n", (long long) n_lent,
                                  (long long) want, std::chrono::duration<double, std::milli>(Clock::now() - t_ln).count());
                     std::fflush(stderr);
                 }
@@ -10982,14 +10982,14 @@ int main(int argc, char** argv) {
                                     sl.checks.push_back(c);
                             yielded_at = q;
                             yielded_slot = ys;
-                            std::fprintf(stderr, "strata batch: the prompt read gives way at %lld of %lld tokens; slot %d "
+                            std::fprintf(stderr, "momoe batch: the prompt read gives way at %lld of %lld tokens; slot %d "
                                                  "holds it (copied in %.1f ms)\n", (long long) q, (long long) n, ys,
                                          std::chrono::duration<double, std::milli>(Clock::now() - ty).count());
                             e = "yield";
                             return false;
                         }
                         if (can) bs[(size_t) ys].cached = false;   // half written
-                        std::fprintf(stderr, "strata batch: BYIELD %d not taken at %lld of %lld%s%s\n", ys, (long long) q,
+                        std::fprintf(stderr, "momoe batch: BYIELD %d not taken at %lld of %lld%s%s\n", ys, (long long) q,
                                      (long long) n, ye.empty() ? "" : ": ", ye.c_str());
                     }
                     if (decode_share <= 0.0 || !batch_on()) continue;
@@ -11003,7 +11003,7 @@ int main(int argc, char** argv) {
                     ++il_parts;
                     il_ms += std::chrono::duration<double, std::milli>(Clock::now() - td).count();
                     if (trace) {
-                        std::fprintf(stderr, "strata trace: prompt chunk to %lld, then the slots decoded %.0f ms\n",
+                        std::fprintf(stderr, "momoe trace: prompt chunk to %lld, then the slots decoded %.0f ms\n",
                                      (long long) q, std::chrono::duration<double, std::milli>(Clock::now() - td).count());
                         std::fflush(stderr);
                     }
@@ -11043,7 +11043,7 @@ int main(int argc, char** argv) {
                 const bool want = req_aux_cpus < 0 ? aux_start : req_aux_cpus != 0;
                 strata::aux_cpus::set_enabled(want);
                 if (want != was_on)
-                    std::fprintf(stderr, "strata serve: aux cpus %s for this request%s\n", strata::aux_cpus::enabled() ? "ON" : "off",
+                    std::fprintf(stderr, "momoe serve: aux cpus %s for this request%s\n", strata::aux_cpus::enabled() ? "ON" : "off",
                                  want && !strata::aux_cpus::enabled() ? " (asked for, but no CPU is spare: see the start-up line)" : "");
             }
             drive.d.pcie_num = std::max(0, std::min(256, (int) (req_pcie_frac * 256.0 + 0.5)));
@@ -11108,14 +11108,14 @@ int main(int argc, char** argv) {
             };
             if (req_pin > 0) {
                 if (o.prompt_cache < 3 || !req_ckpt)
-                    std::fprintf(stderr, "strata serve: pin=%lld ignored: %s\n", (long long) req_pin,
+                    std::fprintf(stderr, "momoe serve: pin=%lld ignored: %s\n", (long long) req_pin,
                                  req_ckpt ? "it needs --prompt-cache 3 or more" : "ckpt=0 keeps no checkpoint");
                 else if (req_pin >= n - 1)
-                    std::fprintf(stderr, "strata serve: pin=%lld ignored: the prefix must be shorter than the prompt "
+                    std::fprintf(stderr, "momoe serve: pin=%lld ignored: the prefix must be shorter than the prompt "
                                  "(%lld tokens)\n", (long long) req_pin, (long long) n);
                 else if (req_pin > read_from) pin_at = req_pin;
                 else if (!pin_checkpoint(req_pin))
-                    std::fprintf(stderr, "strata serve: pin=%lld: the cache has no checkpoint there to pin (it resumed from "
+                    std::fprintf(stderr, "momoe serve: pin=%lld: the cache has no checkpoint there to pin (it resumed from "
                                  "%lld)\n", (long long) req_pin, (long long) read_from);
             }
             std::vector<int64_t> cuts = {reread_to, root_at, message_at, turn_at, n - 1};
@@ -11141,7 +11141,7 @@ int main(int argc, char** argv) {
                 const bool sp_ok = win ? read_windows(at, to, err) : read_part(at, to, err);
                 if (sp_ok) pp_exact = true;
                 if (trace) {
-                    std::fprintf(stderr, "strata trace: read %lld tokens (%s) in %.1f ms\n", (long long) (to - at),
+                    std::fprintf(stderr, "momoe trace: read %lld tokens (%s) in %.1f ms\n", (long long) (to - at),
                                  win ? "windows" : "batched",
                                  std::chrono::duration<double, std::milli>(Clock::now() - tsp).count());
                     std::fflush(stderr);
@@ -11152,7 +11152,7 @@ int main(int argc, char** argv) {
                 }
                 if (!sp_ok) {
                     if (yielded_at < 0 && (batch_fatal || !stop_req.load())) {
-                        std::fprintf(stderr, "strata serve: %s\n", err.c_str());
+                        std::fprintf(stderr, "momoe serve: %s\n", err.c_str());
                         std::printf("ERR %s\n", err.c_str());
                         // #224: a CUDA fault (an illegal address) poisons the context for the whole process, and
                         // unwinding the destructors on it could hang until the 60 s watchdog: leave at once
@@ -11173,9 +11173,9 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 if (to == pin_at && !pin_checkpoint(pin_at))
-                    std::fprintf(stderr, "strata serve: pin=%lld: its checkpoint was not kept\n", (long long) pin_at);
+                    std::fprintf(stderr, "momoe serve: pin=%lld: its checkpoint was not kept\n", (long long) pin_at);
                 if (trace && to == message_at)
-                    std::fprintf(stderr, "strata serve: message boundary checkpoint: %lld tokens, %lld tail\n",
+                    std::fprintf(stderr, "momoe serve: message boundary checkpoint: %lld tokens, %lld tail\n",
                                  (long long) message_at, (long long) (turn_at - message_at));
             }
             if (!refill(err)) {
@@ -11184,7 +11184,7 @@ int main(int argc, char** argv) {
             }
             tr("prompt done (slots refilled)");
             if (il_parts > 0)
-                std::fprintf(stderr, "strata batch: the prompt was read in %lld parts, the slots decoding %.0f ms between "
+                std::fprintf(stderr, "momoe batch: the prompt was read in %lld parts, the slots decoding %.0f ms between "
                                      "them\n", (long long) il_parts + 1, il_ms);
             const double prompt_ms = std::chrono::duration<double, std::milli>(Clock::now() - r0).count();
             std::printf("REUSED %lld\n", (long long) resume);   // the prompt is read; the first window comes next
@@ -11259,7 +11259,7 @@ int main(int argc, char** argv) {
             if (pl_serial != nullptr) {   // said once per reason
                 static std::set<std::string> said;
                 if (said.insert(pl_serial).second)
-                    std::fprintf(stderr, "strata serve: --pipeline-windows: a request with %s decodes serially\n",
+                    std::fprintf(stderr, "momoe serve: --pipeline-windows: a request with %s decodes serially\n",
                                  pl_serial);
             }
             if (pl_want && pl_serial == nullptr && !cancelled && produced_n < max_new) {
@@ -11334,7 +11334,7 @@ int main(int argc, char** argv) {
                 // window in flight keeps spinning on a flag nobody raises, and the tier's thread can finish (the
                 // asynchronous tier's job does host work alone: it ends)
                 auto die = [&](const std::string& m) -> int {
-                    std::fprintf(stderr, "strata serve: pipelined decode: %s\n", m.c_str());
+                    std::fprintf(stderr, "momoe serve: pipelined decode: %s\n", m.c_str());
                     strata::core::diag_pipeline_fn().store(nullptr);
                     strata::core::release_gpu_waits(stderr);
                     if (pl_adapt_thr.joinable()) pl_adapt_thr.join();
@@ -11668,7 +11668,7 @@ int main(int argc, char** argv) {
                                 b_done = true;
                                 tre("CD", A.seq, chain_kind, (int) (1000.0f * B.p_on));
                                 if (pl_log)
-                                    std::fprintf(stderr, "strata pipeline: chain %d for p=%lld T=%d: B T=%d p_on %.3f (%d "
+                                    std::fprintf(stderr, "momoe pipeline: chain %d for p=%lld T=%d: B T=%d p_on %.3f (%d "
                                                          "outputs)\n", chain_kind, (long long) A.p, A.T, B.T, B.p_on, k);
                             }
                         }
@@ -11786,7 +11786,7 @@ int main(int argc, char** argv) {
                         last_verdict = now;
                     }
                     if (pl_log)
-                        std::fprintf(stderr, "strata pipeline: verdict p=%lld T=%d a=%d B %s%s (B front %d%s, A com %x) out",
+                        std::fprintf(stderr, "momoe pipeline: verdict p=%lld T=%d a=%d B %s%s (B front %d%s, A com %x) out",
                                      (long long) A.p, A.T, a, B.launched ? "launched" : B.ready ? "ready" : "none",
                                      on ? " ON" : "", B.fr, B.fl ? "+" : "", A.com);
                     if (pl_log) {
@@ -11877,7 +11877,7 @@ int main(int argc, char** argv) {
                 dt_run += pl_ms;
                 if (dec_timing) {
                     auto avg = [](double s_, double n_) { return n_ > 0 ? s_ / n_ : 0.0; };
-                    std::fprintf(stderr, "strata pipeline: %lld windows in %.0f ms (%.2f ms/window): %lld speculative, %lld on "
+                    std::fprintf(stderr, "momoe pipeline: %lld windows in %.0f ms (%.2f ms/window): %lld speculative, %lld on "
                                          "the path, %lld rolled back, %lld below the gate (theta %.2f)\n",
                                  (long long) dec_windows, pl_ms, avg(pl_ms, (double) dec_windows), (long long) pl_spec,
                                  (long long) pl_on, (long long) pl_undo, (long long) pl_gate, theta);
@@ -12002,7 +12002,7 @@ int main(int argc, char** argv) {
                         const std::string path = std::string(fl) + "." + std::to_string(fl_n++);
                         std::FILE* f = ver.copy_logits(0, row.data()) ? std::fopen(path.c_str(), "wb") : nullptr;
                         if (f == nullptr || std::fwrite(row.data(), sizeof(float), row.size(), f) != row.size())
-                            std::fprintf(stderr, "strata serve: STRATA_DUMP_FIRST_LOGITS: cannot write %s\n", path.c_str());
+                            std::fprintf(stderr, "momoe serve: STRATA_DUMP_FIRST_LOGITS: cannot write %s\n", path.c_str());
                         if (f) std::fclose(f);
                     }
                 }
@@ -12072,7 +12072,7 @@ int main(int argc, char** argv) {
                                           ? pcie_auto.window(drive.d.ms_run, drive.d.multi_misses, o.pcie_frac, &tc_us, &rate)
                                           : (pcie_auto.mark(drive.d.ms_run, drive.d.multi_misses), -1.0);
                     if (nf >= 0.0) {
-                        std::fprintf(stderr, "strata serve: PCIe share: the CPU pool takes %.0f us per missed expert (%.1f GB/s of expert bytes), "
+                        std::fprintf(stderr, "momoe serve: PCIe share: the CPU pool takes %.0f us per missed expert (%.1f GB/s of expert bytes), "
                                              "the link %.1f GB/s -> pcie_frac %.2f (was %.2f; --pcie-frac N fixes it, "
                                              "STRATA_PCIE_FRAC_DEFAULT=old keeps the start-up rule)\n",
                                      tc_us, rate, pcie_auto.link_gbps, nf, o.pcie_frac);
@@ -12087,7 +12087,7 @@ int main(int argc, char** argv) {
                             gs.pcie_frac = std::min(0.60, std::max(0.10, std::round(gs.link_gbps / (gs.link_gbps +
                                                PcieAuto::kPoolFactor * rate) * 20.0) / 20.0));
                             split_drive.pcie_num[st] = pcie_num_of(gs.pcie_frac);
-                            std::fprintf(stderr, "strata serve: PCIe share: stage %d (link %.1f GB/s) -> pcie_frac %.2f\n", st + 1,
+                            std::fprintf(stderr, "momoe serve: PCIe share: stage %d (link %.1f GB/s) -> pcie_frac %.2f\n", st + 1,
                                          gs.link_gbps, gs.pcie_frac);
                         }
                     }
@@ -12140,7 +12140,7 @@ int main(int argc, char** argv) {
                     else std::fprintf(stderr, "strata decode GPU stages, stage %d (ms/window):%s\n", st, pr.c_str());
                 }
             }
-            if (drive.d.fs) std::fprintf(stderr, "strata serve: %s\n", drive.d.fs->report().c_str());
+            if (drive.d.fs) std::fprintf(stderr, "momoe serve: %s\n", drive.d.fs->report().c_str());
             if (!cancelled) {
                 // a prompt stopped halfway leaves the session somewhere between two chunks: nothing to continue from
                 // (the checkpoints taken while reading it are still good)
@@ -12156,7 +12156,7 @@ int main(int argc, char** argv) {
                 live.assign(cur.begin(), cur.begin() + pp_reached);
                 live_imgs = imgs_below(req_imgs, pp_reached);
                 live_ok = true;
-                std::fprintf(stderr, "strata serve: cancelled request keeps its conversation: %lld tokens live\n",
+                std::fprintf(stderr, "momoe serve: cancelled request keeps its conversation: %lld tokens live\n",
                              (long long) pp_reached);
             }
             static const bool state_hash = std::getenv("STRATA_STATE_HASH") != nullptr;
@@ -12209,7 +12209,7 @@ int main(int argc, char** argv) {
                         std::snprintf(b, sizeof(b), "%04llx ", (unsigned long long) (hash_dev((const uint8_t*) ss.gdn_state + i * per, per, 1469598103934665603ull) & 0xffff));
                         s += b;
                     }
-                    std::fprintf(stderr, "strata serve: STATE_HASH_GDN %s\n", s.c_str());
+                    std::fprintf(stderr, "momoe serve: STATE_HASH_GDN %s\n", s.c_str());
                 }
                 uint64_t h_ple = hash_dev(ss.ple_hist, ss.ple_hist ? z.ple : 0, 1469598103934665603ull);
                 uint64_t h_tail = 1469598103934665603ull, h_pool = h_tail, h_kv = h_tail, h_stale = h_tail;
@@ -12264,7 +12264,7 @@ int main(int argc, char** argv) {
                     std::printf("ERR reading state fingerprint\n");
                     return 1;
                 }
-                std::fprintf(stderr, "strata serve: STATE_HASH L=%lld gdn=%016llx ple=%016llx tail=%016llx pooled=%016llx "
+                std::fprintf(stderr, "momoe serve: STATE_HASH L=%lld gdn=%016llx ple=%016llx tail=%016llx pooled=%016llx "
                                      "kv=%016llx mtp=%016llx stale=%016llx dead=%016llx pooled_full=%016llx ple_prev=%d,%d\n", (long long) L,
                              (unsigned long long) h_gdn, (unsigned long long) h_ple, (unsigned long long) h_tail,
                              (unsigned long long) h_pool, (unsigned long long) h_kv, (unsigned long long) h_mtp,
@@ -12303,7 +12303,7 @@ int main(int argc, char** argv) {
                             (int64_t) live.size() == p;
                 const auto tc0 = Clock::now();
                 if (cont && !copy_to_slot(admit_slot, live, err)) {
-                    std::fprintf(stderr, "strata serve: batch admission failed: %s\n", err.c_str());
+                    std::fprintf(stderr, "momoe serve: batch admission failed: %s\n", err.c_str());
                     bs[(size_t) admit_slot].cached = false;   // its sessions may be half written
                     cont = false;
                 }
@@ -12321,7 +12321,7 @@ int main(int argc, char** argv) {
                     if (batch_mtp) {
                         if (!slot_mtp[(size_t) admit_slot]->draft_first(1, ver.final_R_all(), sl.x,
                                                                         sl.p - 1, sl.draft.data(), err)) {
-                            std::fprintf(stderr, "strata batch: MTP admission for slot %d failed: %s\n",
+                            std::fprintf(stderr, "momoe batch: MTP admission for slot %d failed: %s\n",
                                          admit_slot, err.c_str());
                             return 1;
                         }
@@ -12335,7 +12335,7 @@ int main(int argc, char** argv) {
                             std::equal(c.ids.begin(), c.ids.end(), live.begin()))
                             best = &c;
                     if (best != nullptr && !sl.img) sl.checks.push_back(*best);
-                    std::fprintf(stderr, "strata batch: slot %d takes %lld tokens (copied in %.1f ms)\n", admit_slot,
+                    std::fprintf(stderr, "momoe batch: slot %d takes %lld tokens (copied in %.1f ms)\n", admit_slot,
                                  (long long) live.size(), std::chrono::duration<double, std::milli>(Clock::now() - tc0).count());
                 }
                 std::printf("BADM %d %d\n", admit_slot, cont ? 1 : 0);
@@ -12349,7 +12349,7 @@ int main(int argc, char** argv) {
                 std::snprintf(read_txt, sizeof(read_txt), "%lld of %lld", (long long) read_n, (long long) fresh);
             else
                 std::snprintf(read_txt, sizeof(read_txt), "%lld", (long long) fresh);
-            std::fprintf(stderr, "strata serve: prompt %lld tokens = %lld reused + %s read in %.0f ms (%.1f tok/s), "
+            std::fprintf(stderr, "momoe serve: prompt %lld tokens = %lld reused + %s read in %.0f ms (%.1f tok/s), "
                                  "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld, %zu checkpoints%s\n",
                          (long long) n, (long long) resume, read_txt, prompt_ms,
                          prompt_ms > 0 ? 1000.0 * read_n / prompt_ms : 0.0, (long long) produced_n, decode_ms,
@@ -12365,31 +12365,31 @@ int main(int argc, char** argv) {
                                   "all %lld routed)", (long long) req_offload,
                                   100.0 * (double) req_offload / (double) (req_look + req_offload),
                                   (long long) (req_look + req_offload));
-                std::fprintf(stderr, "strata serve: decode expert cache hit rate: %.1f%% (%lld hits / %lld lookups)%s\n",
+                std::fprintf(stderr, "momoe serve: decode expert cache hit rate: %.1f%% (%lld hits / %lld lookups)%s\n",
                              100.0 * (double) req_hits / (double) req_look,
                              (long long) req_hits, (long long) req_look, off);
             }
             if (drive.d.tail_experts > 0)   // STRATA_ROUTE_TAIL_SKIP, cumulative
-                std::fprintf(stderr, "strata serve: route tail skip: %lld missed experts skipped (%lld entries) since the "
+                std::fprintf(stderr, "momoe serve: route tail skip: %lld missed experts skipped (%lld entries) since the "
                                      "start\n", (long long) drive.d.tail_experts, (long long) drive.d.tail_skipped);
             // the resident RAM mode, cumulative: experts read from experts.bin since the copy was made (what the plain
             // mmap mode reads through the OS file cache, from the SSD when the RAM could not keep it)
             if (src.complement_ready())
-                std::fprintf(stderr, "strata serve: resident RAM: %.2f GiB of experts in RAM, %lld exchanged with the "
+                std::fprintf(stderr, "momoe serve: resident RAM: %.2f GiB of experts in RAM, %lld exchanged with the "
                                      "VRAM tier, %lld blob reads from the file\n",
                              (double) src.resident_bytes() / 1073741824.0, (long long) src.exchanges(),
                              (long long) src.file_reads());
             if (ajob)   // --adapt-async, cumulative (a round may still be in flight: it lands before the next request)
-                std::fprintf(stderr, "strata serve: asynchronous adaptive tier: %lld rounds, %lld experts swapped in, "
+                std::fprintf(stderr, "momoe serve: asynchronous adaptive tier: %lld rounds, %lld experts swapped in, "
                                      "%.1f ms per round (start to flip, between windows)\n",
                              (long long) a_rounds, (long long) a_swapped, a_rounds > 0 ? a_ms / (double) a_rounds : 0.0);
             if (src.exchange_rotation())
-                std::fprintf(stderr, "strata serve: exchange rotation: %llu blocks, %llu host memcpy bytes avoided (cumulative payload)\n",
+                std::fprintf(stderr, "momoe serve: exchange rotation: %llu blocks, %llu host memcpy bytes avoided (cumulative payload)\n",
                              (unsigned long long)src.rotated_exchanges(),
                              (unsigned long long)src.avoided_exchange_copy_bytes());
             // CS-T: the tiers, cumulative - GPU cache hits (the decode lookups above), RAM copy, files (SSD / OS cache)
             if (srcp == &src) {
-                std::fprintf(stderr, "strata serve: expert tiers: GPU %lld hits this request; since the start RAM %lld blobs, files %lld blobs "
+                std::fprintf(stderr, "momoe serve: expert tiers: GPU %lld hits this request; since the start RAM %lld blobs, files %lld blobs "
                                      "%.1f MB read%s\n", (long long) req_hits, (long long) src.ram_reads(),
                              (long long) src.file_reads(), (double) src.file_read_bytes() / 1e6,
                              src.gguf_mode() ? " (the GGUF in place)" : "");
@@ -12402,7 +12402,7 @@ int main(int argc, char** argv) {
                 const strata::core::FileExpertSource::IoCounters ic = src.io_counters();
                 const uint64_t fb = src.file_read_bytes();
                 if (io_now.valid) {
-                    std::fprintf(stderr, "strata serve: file tier I/O this request: the OS read %.1f MB from storage (%llu major faults) for "
+                    std::fprintf(stderr, "momoe serve: file tier I/O this request: the OS read %.1f MB from storage (%llu major faults) for "
                                          "%.1f MB of expert reads", (double) (io_now.read_bytes - io_prev.read_bytes) / 1e6,
                                  (unsigned long long) (io_now.major_faults - io_prev.major_faults), (double) (fb - fb_prev) / 1e6);
                     if (src.io_stats())
@@ -12432,7 +12432,7 @@ int main(int argc, char** argv) {
                 for (int st = 0; st < n_stages; ++st) {
                     const strata::core::Verifier& v = stage_ver(st);
                     const double w = v.windows > 0 ? (double) v.windows : 1.0;
-                    std::fprintf(stderr, "strata serve: stage %d: %lld windows; per window: wait for the GPU %.3f ms, "
+                    std::fprintf(stderr, "momoe serve: stage %d: %lld windows; per window: wait for the GPU %.3f ms, "
                                          "pool + plan %.3f ms, host staging %.3f ms, commit %.3f ms\n", st,
                                  (long long) v.windows, v.ms_wait / w, v.ms_pool / w, v.ms_host / w, v.ms_commit / w);
                 }
@@ -12446,29 +12446,29 @@ int main(int argc, char** argv) {
                         strata::kernels::kv_stream_counters(ss.qsa_states[ss.qsa_ord0 + j].map);
                     miss += c.misses; look += c.lookups; over = over || c.overflow;
                 }
-                std::fprintf(stderr, "strata serve: KV streaming: %.2f%% of %llu block reads hit VRAM, %.1f MiB read "
+                std::fprintf(stderr, "momoe serve: KV streaming: %.2f%% of %llu block reads hit VRAM, %.1f MiB read "
                                      "from RAM%s\n", look ? 100.0 * (double) (look - miss) / (double) look : 100.0,
                              (unsigned long long) look, (double) miss * 4224.0 / 1048576.0,
                              over ? " (more than the resident cells hold: the rest read from RAM in place)" : "");
             }
             if (sfx_windows > 0)
-                std::fprintf(stderr, "strata serve: suffix drafts: %lld windows, %lld of %lld drafts accepted\n",
+                std::fprintf(stderr, "momoe serve: suffix drafts: %lld windows, %lld of %lld drafts accepted\n",
                              (long long) sfx_windows, (long long) sfx_ok, (long long) sfx_drafts);
             if (o.lookup_chain > 0)
-                std::fprintf(stderr, "strata serve: lookup chain: %lld of %lld windows, %lld of %lld chained drafts accepted\n",
+                std::fprintf(stderr, "momoe serve: lookup chain: %lld of %lld windows, %lld of %lld chained drafts accepted\n",
                              (long long) chain_windows, (long long) dec_windows, (long long) chain_ok, (long long) chain_drafts);
             if (std::getenv("STRATA_SPEC_DEPTH") != nullptr)
-                std::fprintf(stderr, "strata serve: spec depth: accepted/tested %lld/%lld %lld/%lld %lld/%lld %lld/%lld %lld/%lld\n",
+                std::fprintf(stderr, "momoe serve: spec depth: accepted/tested %lld/%lld %lld/%lld %lld/%lld %lld/%lld %lld/%lld\n",
                              (long long) dp_ok[0], (long long) dp_tested[0], (long long) dp_ok[1], (long long) dp_tested[1],
                              (long long) dp_ok[2], (long long) dp_tested[2], (long long) dp_ok[3], (long long) dp_tested[3],
                              (long long) dp_ok[4], (long long) dp_tested[4]);
             if (strata::core::MtpDrafter::top2_env())
-                std::fprintf(stderr, "strata serve: mtp top2: rejected/runner-up by depth %lld/%lld %lld/%lld %lld/%lld %lld/%lld "
+                std::fprintf(stderr, "momoe serve: mtp top2: rejected/runner-up by depth %lld/%lld %lld/%lld %lld/%lld %lld/%lld "
                                      "of %lld windows\n", (long long) t2_rej[0], (long long) t2_hit[0], (long long) t2_rej[1],
                              (long long) t2_hit[1], (long long) t2_rej[2], (long long) t2_hit[2], (long long) t2_rej[3],
                              (long long) t2_hit[3], (long long) dec_windows);
             for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
-                std::fprintf(stderr, "strata serve: CUDA%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
+                std::fprintf(stderr, "momoe serve: CUDA%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
                                      "(%.1f MiB with full rows) in this request; host %.0f ms staging+launching, %.0f ms "
                                      "waiting for it in this request\n", r + 1,
                              (long long) (remote_experts[(size_t) r].computed() - remote_before[(size_t) r]),
@@ -12479,7 +12479,7 @@ int main(int argc, char** argv) {
                              remote_experts[(size_t) r].ms_wait() - wait_before[(size_t) r]);
             if (prefill_helper_src) {
                 const uint64_t blobs = prefill_helper_src->helper_blobs(), bytes = prefill_helper_src->helper_bytes();
-                std::fprintf(stderr, "strata serve: prefill helper source: %lld blobs / %.1f MiB taken from a helper's "
+                std::fprintf(stderr, "momoe serve: prefill helper source: %lld blobs / %.1f MiB taken from a helper's "
                                      "cache in this request\n",
                              (long long) (blobs - helper_blobs_before), (double) (bytes - helper_bytes_before) / 1048576.0);
                 helper_blobs_before = blobs;
@@ -12528,7 +12528,7 @@ int main(int argc, char** argv) {
             }
             if (o.prefill_auto) {
                 o.prefill_chunk = k > 0 ? chunk : request_chunk(n_batched, 1024);
-                std::fprintf(stderr, "strata generate: prompt chunk auto: %lld tokens\n", (long long) o.prefill_chunk);
+                std::fprintf(stderr, "momoe generate: prompt chunk auto: %lld tokens\n", (long long) o.prefill_chunk);
             } else if (chunk != o.prefill_chunk) {
                 k = 0;                                 // a fixed chunk that does not fit: its own buffers, as before
             }
@@ -12548,22 +12548,22 @@ int main(int argc, char** argv) {
                 borrow = xcache.device_slot(first);
                 borrow_bytes = xcache.slot_offsets() ? (uint64_t) (xcache.bytes() - (int64_t) xcache.slot_offsets()[first])
                                                      : (uint64_t) k * (uint64_t) blob;
-                std::fprintf(stderr, "strata generate: prompt path borrows %lld cache slots (%.2f GiB)\n", (long long) k,
+                std::fprintf(stderr, "momoe generate: prompt path borrows %lld cache slots (%.2f GiB)\n", (long long) k,
                              (double) borrow_bytes / 1073741824.0);
             }
         }
         if (borrow == nullptr)
-            std::fprintf(stderr, "strata generate: prompt path allocates its own buffers (no cache slots to borrow)\n");
+            std::fprintf(stderr, "momoe generate: prompt path allocates its own buffers (no cache slots to borrow)\n");
         if (!multi_gpu && !o.no_pool) prefill.set_cpu_pool(&pool);
         if (!prefill.init(wt, g, ss, srcp, o.expert_cache > 0 ? &xcache : nullptr,
                           host_res.empty() ? nullptr : host_res.data(), o.prefill_chunk, main_cs, err, borrow,
                           borrow_bytes)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         if (!o.mtp.empty()) {
             if (!mtp.bind(wt, &native_head, nullptr, err)) {
-                std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
                 return 1;
             }
             prefill.on_chunk = [&](const float* R_rows, int64_t T, int64_t p0, std::string& e) -> bool {
@@ -12581,7 +12581,7 @@ int main(int argc, char** argv) {
         }
         const Clock::time_point tp0 = Clock::now();
         if (!prefill.run(o.tokens.data(), n_batched, 0, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         // refill the lent slots from the arena and give them back to the decode tier
@@ -12592,14 +12592,14 @@ int main(int argc, char** argv) {
                 const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
                 if (b == nullptr || !(refill_blocking() ? xcache.fill_slot_blocking(slot, b, err, nb)
                                                         : xcache.fill_slot_queued(slot, b, err, nb))) {
-                    std::fprintf(stderr, "strata generate: refilling a lent slot failed: %s\n", err.c_str());
+                    std::fprintf(stderr, "momoe generate: refilling a lent slot failed: %s\n", err.c_str());
                     return 1;
                 }
                 if (!refill_blocking()) srcp->note_async_read(b, nullptr);   // #1237
                 host_res[(size_t) i] = slot;
             }
             if (!xcache.sync_queued(err)) {
-                std::fprintf(stderr, "strata generate: refilling the lent slots failed: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: refilling the lent slots failed: %s\n", err.c_str());
                 return 1;
             }
 #if defined(_WIN32)
@@ -12607,7 +12607,7 @@ int main(int argc, char** argv) {
                 srcp->release(i / g.n_expert, i % g.n_expert);
 #endif
             res_put(d_res);
-            std::fprintf(stderr, "strata generate: %zu lent slots refilled in %.1f ms\n", lent.size(),
+            std::fprintf(stderr, "momoe generate: %zu lent slots refilled in %.1f ms\n", lent.size(),
                          std::chrono::duration<double, std::milli>(Clock::now() - tr).count());
         }
         prefill_batched_ms = std::chrono::duration<double, std::milli>(Clock::now() - tp0).count();
@@ -12618,7 +12618,7 @@ int main(int argc, char** argv) {
         ss.ple_prev[0] = pos_start >= 2 ? (int32_t) o.tokens[(size_t) (pos_start - 2)] : -1;
         ss.ple_prev[1] = pos_start >= 1 ? (int32_t) o.tokens[(size_t) (pos_start - 1)] : -1;
         const strata::prefill::PrefillStats& ps = prefill.stats();
-        std::fprintf(stderr, "strata generate: prefill %lld tokens in %lld chunks, %.1f ms (%.1f tok/s); experts "
+        std::fprintf(stderr, "momoe generate: prefill %lld tokens in %lld chunks, %.1f ms (%.1f tok/s); experts "
                              "streamed %lld (%lld by DMA, host %.1f ms), resident %lld, on the CPU %lld (share %.2f); PLE %.1f ms\n",
                      (long long) ps.tokens, (long long) ps.chunks, ps.ms_total,
                      ps.ms_total > 0 ? 1000.0 * (double) ps.tokens / ps.ms_total : 0.0, (long long) ps.experts_streamed,
@@ -12635,7 +12635,7 @@ int main(int argc, char** argv) {
         // plan v0.3 P6: a native pack's last prompt token is the first verify window (T = 1)
         if (native_pack) { spec_pos = pos; break; }
         if (pos >= o.max_context) {
-            std::fprintf(stderr, "strata generate: ran out of context at position %lld\n", (long long) pos);
+            std::fprintf(stderr, "momoe generate: ran out of context at position %lld\n", (long long) pos);
             return 2;
         }
         // **THE TOKEN TIMER STARTS HERE, BEFORE ANY OF THE TOKEN'S WORK (A7).**  It used to start after
@@ -12654,7 +12654,7 @@ int main(int argc, char** argv) {
         // Plan v0.3 P2: the 16 SSD reads start here and complete while the embedding is staged; `ms_ple` is
         // the issue plus the time still spent WAITING afterwards, i.e. the part the embedding did not hide.
         if (ss.ple.ready() && !strata::core::ple_issue_token(ss.ple, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         {
@@ -12669,7 +12669,7 @@ int main(int argc, char** argv) {
             tp = n;
         }
         if (ss.ple.ready() && !strata::core::ple_finish_token(ss.ple, token_stream, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         {
@@ -12679,7 +12679,7 @@ int main(int argc, char** argv) {
         }
 
         if (pos % 256 == 0 || pos + 1 >= n_prompt - 1)
-            std::fprintf(stderr, "strata generate: position %lld, token %lld%s\n", (long long) pos, (long long) tok,
+            std::fprintf(stderr, "momoe generate: position %lld, token %lld%s\n", (long long) pos, (long long) tok,
                          pos < n_prompt ? " (prompt)" : "");
         // **`d.layers` IS THE BLOB'S LAYER AXIS, NOT A COUNTER.**  The adapter uses it to index
         // `experts.bin` as `layer * n_expert + expert`, so it MUST restart at 0 for every token.  Leaving it
@@ -12693,7 +12693,7 @@ int main(int argc, char** argv) {
         if (o.no_capture) {
             if (!strata::core::session_token(wt, g, pos, /*pos_base=*/0, ss, d_parts, main_cs,
                                              o.sync_every_layer, err)) {
-                std::fprintf(stderr, "strata generate: session_token: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: session_token: %s\n", err.c_str());
                 return 1;
             }
         } else {
@@ -12701,12 +12701,12 @@ int main(int argc, char** argv) {
             if (tgraph.captured) {
                 if (!strata::core::session_run_token(g, pos, /*pos_base=*/0, ss, tgraph, pool_fn, pool_user,
                                                      loop_scratch.y_miss, main_cs, err)) {
-                    std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                    std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
                     return 1;
                 }
             } else if (!strata::core::session_loop(g, pos, /*pos_base=*/0, ss, gr, pool_fn, hit_fn, pool_user, /*overlap=*/true, main_cs,
                                         err, layer_stage, &loop_scratch)) {
-                std::fprintf(stderr, "strata generate: session_loop: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: session_loop: %s\n", err.c_str());
                 return 1;
             }
         }
@@ -12717,7 +12717,7 @@ int main(int argc, char** argv) {
             std::fwrite(final_r_host.data(), sizeof(float), final_r_host.size(), final_r);
         }
         if (drive.d.failed) {
-            std::fprintf(stderr, "strata generate: the expert pool failed at layer %lld expert %lld: %s\n",
+            std::fprintf(stderr, "momoe generate: the expert pool failed at layer %lld expert %lld: %s\n",
                          (long long) drive.d.fail_layer, (long long) drive.d.fail_expert,
                          drive.d.fail ? drive.d.fail : "(no message)");
             return 1;
@@ -12734,7 +12734,7 @@ int main(int argc, char** argv) {
             std::fwrite(half_stage, sizeof(float), (size_t) g.n_layers * (size_t) half_stride, half_dump);
         }
         if (!run_head(token_stream)) {
-            std::fprintf(stderr, "strata generate: lm_head: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: lm_head: %s\n", err.c_str());
             return 1;
         }
         // **A CHECKPOINT AFTER THE HEAD, BECAUSE AN ASYNC FAULT IS STICKY AND LIES ABOUT WHERE IT HAPPENED.**
@@ -12743,7 +12743,7 @@ int main(int argc, char** argv) {
         // faulted had completed its own error checks successfully - because its kernels had not run yet.  A
         // sticky error surfaces at the next SYNCHRONISING call, which is whatever happens to come next.
         if (!o.stream_token && cudaDeviceSynchronize() != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: the device faulted in lm_head at position %lld: %s\n",
+            std::fprintf(stderr, "momoe generate: the device faulted in lm_head at position %lld: %s\n",
                          (long long) pos, cudaGetErrorString(cudaGetLastError()));
             return 1;
         }
@@ -12758,25 +12758,25 @@ int main(int argc, char** argv) {
         if (read_logits && (cudaMemcpyAsync(logits.data(), d_logits, (size_t) n_vocab * 4,
                                            cudaMemcpyDeviceToHost, (cudaStream_t) token_stream) != cudaSuccess ||
                             cudaStreamSynchronize((cudaStream_t) token_stream) != cudaSuccess)) {
-            std::fprintf(stderr, "strata generate: reading the logits back failed\n");
+            std::fprintf(stderr, "momoe generate: reading the logits back failed\n");
             return 1;
         }
         int bad = 0;
         if (read_logits) for (float v : logits) if (!std::isfinite(v)) ++bad;
         if (bad != 0) {
-            std::fprintf(stderr, "strata generate: %d of %lld logits are not finite at position %lld\n", bad,
+            std::fprintf(stderr, "momoe generate: %d of %lld logits are not finite at position %lld\n", bad,
                          (long long) n_vocab, (long long) pos);
             return 1;
         }
         // the header with the first row (see `hdr`): a run that dumps nothing leaves an empty file
         if (emit_logits && !hdr_written && std::fwrite(hdr, sizeof hdr, 1, dump) != 1) {
-            std::fprintf(stderr, "strata generate: cannot write logits header\n");
+            std::fprintf(stderr, "momoe generate: cannot write logits header\n");
             std::fclose(dump);
             return 1;
         }
         if (emit_logits) hdr_written = true;
         if (emit_logits && std::fwrite(logits.data(), sizeof(float), (size_t) n_vocab, dump) != (size_t) n_vocab) {
-            std::fprintf(stderr, "strata generate: cannot write logits at position %lld\n", (long long) pos);
+            std::fprintf(stderr, "momoe generate: cannot write logits at position %lld\n", (long long) pos);
             std::fclose(dump);
             return 1;
         }
@@ -12800,7 +12800,7 @@ int main(int argc, char** argv) {
         if (cudaMemcpyAsync(&next, d_next, sizeof(int), cudaMemcpyDeviceToHost,
                             (cudaStream_t) token_stream) != cudaSuccess ||
             cudaStreamSynchronize((cudaStream_t) token_stream) != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: reading the sampled token back failed: %s\n",
+            std::fprintf(stderr, "momoe generate: reading the sampled token back failed: %s\n",
                          cudaGetErrorString(cudaGetLastError()));
             return 1;
         }
@@ -12811,13 +12811,13 @@ int main(int argc, char** argv) {
             const int64_t i = ss.qsa_ord0 + j;   // the global ordinal, as the session's carve names it
             const int32_t status = ss.qsa_states[i].host_step[strata::kernels::kStepCount];
             if (status != 0) {
-                std::fprintf(stderr, "strata generate: native attention status %d at QSA layer %lld, position %lld\n",
+                std::fprintf(stderr, "momoe generate: native attention status %d at QSA layer %lld, position %lld\n",
                              status, (long long) i, (long long) pos);
                 return 1;
             }
         }
         if (next < 0 || next >= n_vocab) {
-            std::fprintf(stderr, "strata generate: the sampler returned %d, outside 0..%lld\n", next,
+            std::fprintf(stderr, "momoe generate: the sampler returned %d, outside 0..%lld\n", next,
                          (long long) (n_vocab - 1));
             return 1;
         }
@@ -12869,18 +12869,18 @@ int main(int argc, char** argv) {
         };
         std::vector<int64_t> oracle, follow;
         if (!o.spec_oracle.empty() && !read_ids(o.spec_oracle, oracle)) {
-            std::fprintf(stderr, "strata generate: cannot read --spec-oracle %s\n", o.spec_oracle.c_str());
+            std::fprintf(stderr, "momoe generate: cannot read --spec-oracle %s\n", o.spec_oracle.c_str());
             return 2;
         }
         if (!o.spec_follow.empty() && !read_ids(o.spec_follow, follow)) {
-            std::fprintf(stderr, "strata generate: cannot read --spec-follow %s\n", o.spec_follow.c_str());
+            std::fprintf(stderr, "momoe generate: cannot read --spec-follow %s\n", o.spec_follow.c_str());
             return 2;
         }
         // --spec-follow: the run ends with the continuation
         const int64_t max_new = follow.empty() ? o.max_new : std::min<int64_t>(o.max_new, (int64_t) follow.size());
         int64_t follow_differ = 0, follow_emitted = 0;
         if (thits.d_res == nullptr) {
-            std::fprintf(stderr, "strata generate: --spec needs the device residency table (--expert-profile, "
+            std::fprintf(stderr, "momoe generate: --spec needs the device residency table (--expert-profile, "
                                  "--expert-cache and the token graph)\n");
             return 2;
         }
@@ -12894,12 +12894,12 @@ int main(int argc, char** argv) {
         vh.slot_off = xcache.slot_offsets();   // E-6: the device plan's pointers
         vh.n_slots = xcache.slots();
         if (!ver.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.spec, err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         const bool use_mtp = !o.mtp.empty();
         if (use_mtp && !mtp.bind(wt, &native_head, ver.final_R_all(), err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         mem_mark("the verifier and the drafter's binding");
@@ -12925,7 +12925,7 @@ int main(int argc, char** argv) {
         double ms_adapt = 0;
         cudaStream_t adapt_stream = nullptr;
         if (!drive.d.usage.empty() && cudaStreamCreateWithFlags(&adapt_stream, cudaStreamNonBlocking) != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: cannot create the refill stream\n");
+            std::fprintf(stderr, "momoe generate: cannot create the refill stream\n");
             return 1;
         }
         // plan v0.3 P6: swaps in flight - (residency index, slot) admitted when adapt_ev has completed
@@ -12942,12 +12942,12 @@ int main(int argc, char** argv) {
             if (wait) cudaEventSynchronize(adapt_ev);
             else if (cudaEventQuery(adapt_ev) != cudaSuccess) {
                 if (trace_pending)
-                    std::fprintf(stderr, "strata: PENDING not landed, %zu stay non-resident this window\n",
+                    std::fprintf(stderr, "momoe: PENDING not landed, %zu stay non-resident this window\n",
                                  pending.size());
                 return;
             }
             if (trace_pending)
-                std::fprintf(stderr, "strata: PENDING landed, %zu experts become resident\n", pending.size());
+                std::fprintf(stderr, "momoe: PENDING landed, %zu experts become resident\n", pending.size());
             unpin_blobs(pin_live);
             src.commit_exchanges();   // the resident RAM mode: the evicted experts take their places in RAM
             for (const auto& [i, slot] : pending) {
@@ -12971,11 +12971,11 @@ int main(int argc, char** argv) {
             static const bool trace_adapt = std::getenv("STRATA_TRACE_ADAPT") != nullptr;
             if (!pending.empty()) {
                 if (trace_adapt)
-                    std::fprintf(stderr, "strata: ADAPT round=%lld SKIPPED, %zu swaps still in flight\n",
+                    std::fprintf(stderr, "momoe: ADAPT round=%lld SKIPPED, %zu swaps still in flight\n",
                                  (long long) adapt_rounds, pending.size());
                 return true;   // the previous swaps are still in flight
             }
-            if (trace_adapt) std::fprintf(stderr, "strata: ADAPT round=%lld considering\n", (long long) adapt_rounds);
+            if (trace_adapt) std::fprintf(stderr, "momoe: ADAPT round=%lld considering\n", (long long) adapt_rounds);
             struct Swap { float gain; int32_t layer, in, out; };
             std::vector<Swap> swaps;
             std::vector<std::pair<float, int32_t>> cand, vict;
@@ -13003,7 +13003,7 @@ int main(int argc, char** argv) {
             // this (non-serve) path refills CUDA0's cache only, so its copies back read CUDA0's cache too
             if (!resident_stage_swaps(src, host_res, g.n_expert, swaps,
                                       [&](int64_t) -> SwapHome { return {&xcache, adapt_stream, -1}; })) {
-                std::fprintf(stderr, "strata generate: an adaptive refill failed (copying evicted experts back)\n");
+                std::fprintf(stderr, "momoe generate: an adaptive refill failed (copying evicted experts back)\n");
                 return false;
             }
             if (pin_blobs_on()) {   // lock the batch's source pages (a file-backed arena on AMD; see pin_blobs)
@@ -13026,7 +13026,7 @@ int main(int argc, char** argv) {
                 const size_t blob_n = (size_t) strata::kernels::cpu::expert_layout().blob_bytes(s.layer);
                 // asynchronous: the copies run while the MTP drafts; the next window waits for them
                 if (slot < 0 || b == nullptr) {
-                    std::fprintf(stderr, "strata generate: an adaptive refill failed\n");
+                    std::fprintf(stderr, "momoe generate: an adaptive refill failed\n");
                     return false;
                 }
                 if (dma_mode != 0) {
@@ -13034,7 +13034,7 @@ int main(int argc, char** argv) {
                     cp_src.push_back(b);
                     cp_bytes.push_back(blob_n);
                 } else if (adapt_copy_h2d(xcache.device_slot(slot), b, blob_n, adapt_stream) != cudaSuccess) {
-                    std::fprintf(stderr, "strata generate: an adaptive refill failed\n");
+                    std::fprintf(stderr, "momoe generate: an adaptive refill failed\n");
                     return false;
                 }
                 host_res[out] = strata::core::kNotResident;   // evicted now: the CPU computes it meanwhile
@@ -13043,12 +13043,12 @@ int main(int argc, char** argv) {
             }
             if (!cp_dst.empty() && strata::core::copy_blobs(cp_dst.data(), cp_src.data(), cp_bytes.data(), cp_dst.size(),
                                                             adapt_stream, dma_mode) != cudaSuccess) {
-                std::fprintf(stderr, "strata generate: an adaptive refill failed\n");
+                std::fprintf(stderr, "momoe generate: an adaptive refill failed\n");
                 return false;
             }
             if (!swaps.empty()) cudaEventRecord(adapt_ev, adapt_stream);
             if (trace_adapt)
-                std::fprintf(stderr, "strata: ADAPT round=%lld swapped %zu of %d slots, usage decayed\n",
+                std::fprintf(stderr, "momoe: ADAPT round=%lld swapped %zu of %d slots, usage decayed\n",
                              (long long) adapt_rounds, swaps.size(), o.adapt_swaps);
             for (float& v : drive.d.usage) v *= o.adapt_decay;
             swaps_total += (int64_t) swaps.size();
@@ -13073,20 +13073,20 @@ int main(int argc, char** argv) {
                 if (!ver.run(T, win.data(), q, &drive_pool_multi, &drive, outw.data(), err) || drive.d.failed ||
                     !ver.commit(T, err) || (use_mtp && !mtp.prefill(ver.final_R_all(), nxt.data(), T, q, err))) {
                     if (drive.d.failed && drive.d.fail) err = drive.d.fail;
-                    std::fprintf(stderr, "strata generate: reading the prompt through the verify windows: %s\n",
+                    std::fprintf(stderr, "momoe generate: reading the prompt through the verify windows: %s\n",
                                  err.c_str());
                     return 1;
                 }
                 q += T;
             }
             if (!ver.wait_commit(err)) {
-                std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
                 return 1;
             }
             ver.set_head_sampling(true);
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - tw).count();
             prefill_ms += ms;
-            std::fprintf(stderr, "strata generate: prompt read through the verify windows: %lld tokens in %.1f ms "
+            std::fprintf(stderr, "momoe generate: prompt read through the verify windows: %lld tokens in %.1f ms "
                                  "(%.1f tok/s)\n", (long long) spec_pos, ms, ms > 0 ? 1000.0 * (double) spec_pos / ms : 0.0);
         }
         int64_t p = spec_pos;
@@ -13099,14 +13099,14 @@ int main(int argc, char** argv) {
         bool first_window = native_pack;
         if (use_mtp && !first_window &&
             !mtp.draft_first(o.spec, ss.R, x, p - 1, drafts.data(), err, dprob.data(), (float) o.spec_min_p)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         std::vector<int32_t> window((size_t) o.spec), outv((size_t) o.spec);
         std::vector<uint8_t> fdiff((size_t) o.spec, 0);
         std::FILE* hashes = o.window_hashes.empty() ? nullptr : std::fopen(o.window_hashes.c_str(), "w");
         if (!o.window_hashes.empty() && hashes == nullptr) {
-            std::fprintf(stderr, "strata generate: cannot write %s\n", o.window_hashes.c_str());
+            std::fprintf(stderr, "momoe generate: cannot write %s\n", o.window_hashes.c_str());
             return 1;
         }
         std::vector<float> hash_rows;
@@ -13175,7 +13175,7 @@ int main(int argc, char** argv) {
             const bool timed_round = !first_window;
             ++window_hist[(size_t) T];
             if (p + T > o.max_context) {
-                std::fprintf(stderr, "strata generate: ran out of context at position %lld\n", (long long) p);
+                std::fprintf(stderr, "momoe generate: ran out of context at position %lld\n", (long long) p);
                 return 2;
             }
             window[0] = x;
@@ -13197,11 +13197,11 @@ int main(int argc, char** argv) {
                 else if (pending.empty() || ++pending_age >= adapt_lag()) apply_pending(true);
             if (use_mtp && mtp.prob() && !from_sfx && T_mtp > 1 && o.spec_corrupt <= 0) ver.set_spec_q(mtp.spec_q(), T_mtp - 1);
             if (!ver.run(T, window.data(), p, &drive_pool_multi, &drive, outv.data(), err)) {
-                std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
                 return 1;
             }
             if (drive.d.failed) {
-                std::fprintf(stderr, "strata generate: the expert pool failed at layer %lld expert %lld: %s\n",
+                std::fprintf(stderr, "momoe generate: the expert pool failed at layer %lld expert %lld: %s\n",
                              (long long) drive.d.fail_layer, (long long) drive.d.fail_expert,
                              drive.d.fail ? drive.d.fail : "(no message)");
                 return 1;
@@ -13236,7 +13236,7 @@ int main(int argc, char** argv) {
                     std::vector<float> row((size_t) ver.vocab());
                     std::FILE* f = ver.copy_logits(0, row.data()) ? std::fopen(fl, "wb") : nullptr;
                     if (f == nullptr || std::fwrite(row.data(), sizeof(float), row.size(), f) != row.size())
-                        std::fprintf(stderr, "strata generate: STRATA_DUMP_FIRST_LOGITS: cannot write %s\n", fl);
+                        std::fprintf(stderr, "momoe generate: STRATA_DUMP_FIRST_LOGITS: cannot write %s\n", fl);
                     if (f) std::fclose(f);
                 }
             }
@@ -13248,7 +13248,7 @@ int main(int argc, char** argv) {
                 adapt_thr = std::thread([&] { strata::aux_cpus::pin_current_thread(); adapt_ok = adapt(); });
             if (!ver.commit(a + 1, err)) {
                 if (adapt_thr.joinable()) adapt_thr.join();
-                std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
                 return 1;
             }
             ++rounds;
@@ -13275,7 +13275,7 @@ int main(int argc, char** argv) {
             if (adapt_thr.joinable()) adapt_thr.join();
             if (!adapt_ok) return 1;
             if (!drafted) {
-                std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
                 return 1;
             }
             x = outv[(size_t) a];
@@ -13285,12 +13285,12 @@ int main(int argc, char** argv) {
             if (timed_round && chain_n == 0) policy.observe(from_sfx, T, a, sfx_match, round_ms);
             else if (timed_round) policy.observe_chain(T_mtp, chain_n, a, cm, round_ms);
             if (rounds % 64 == 0)
-                std::fprintf(stderr, "strata generate: position %lld, %lld tokens, %lld rounds\n", (long long) p,
+                std::fprintf(stderr, "momoe generate: position %lld, %lld tokens, %lld rounds\n", (long long) p,
                              (long long) produced.size(), (long long) rounds);
         }
         // the last commit (set_commit_async) before anything reads the session again
         if (!ver.wait_commit(err)) {
-            std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+            std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
             return 1;
         }
         if (hashes != nullptr) std::fclose(hashes);
@@ -13379,7 +13379,7 @@ int main(int argc, char** argv) {
     }
 
     if (dump != nullptr && std::fclose(dump) != 0) {
-        std::fprintf(stderr, "strata generate: cannot finish logits dump\n");
+        std::fprintf(stderr, "momoe generate: cannot finish logits dump\n");
         return 1;
     }
     if (layer_dump != nullptr) {
@@ -13420,12 +13420,12 @@ int main(int argc, char** argv) {
         std::vector<float> mx((size_t) g.n_embd);
         if (cudaMemcpy(mx.data(), ss.block.mixed, mx.size() * sizeof(float), cudaMemcpyDeviceToHost) !=
             cudaSuccess) {
-            std::fprintf(stderr, "strata generate: reading mixed back failed\n");
+            std::fprintf(stderr, "momoe generate: reading mixed back failed\n");
             return 1;
         }
         std::FILE* mf = std::fopen(o.dump_mixed.c_str(), "wb");
         if (mf == nullptr) {
-            std::fprintf(stderr, "strata generate: cannot write %s\n", o.dump_mixed.c_str());
+            std::fprintf(stderr, "momoe generate: cannot write %s\n", o.dump_mixed.c_str());
             return 1;
         }
         std::fwrite(mx.data(), sizeof(float), mx.size(), mf);
@@ -13440,12 +13440,12 @@ int main(int argc, char** argv) {
     if (!o.dump_residual.empty()) {
         std::vector<float> R((size_t) g.hc * g.n_embd);
         if (cudaMemcpy(R.data(), ss.R, R.size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: reading R back failed\n");
+            std::fprintf(stderr, "momoe generate: reading R back failed\n");
             return 1;
         }
         std::FILE* rf = std::fopen(o.dump_residual.c_str(), "wb");
         if (rf == nullptr) {
-            std::fprintf(stderr, "strata generate: cannot write %s\n", o.dump_residual.c_str());
+            std::fprintf(stderr, "momoe generate: cannot write %s\n", o.dump_residual.c_str());
             return 1;
         }
         const int32_t hdr[2] = {(int32_t) g.hc, (int32_t) g.n_embd};

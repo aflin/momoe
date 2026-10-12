@@ -212,7 +212,7 @@ class WindowsDetection(unittest.TestCase):
          "HardwareInformation.qwMemorySize": 16 << 30},
     ]
     LIST = ("device 0: AMD Radeon(TM) Graphics\n  arch gfx1036, 28.1 GiB, wave32\n"
-            "  cannot run: GPU 0 (AMD Radeon(TM) Graphics, gfx1036) is not an architecture this Strata engine was "
+            "  cannot run: GPU 0 (AMD Radeon(TM) Graphics, gfx1036) is not an architecture this Momoe engine was "
             "compiled for (gfx1100,gfx1101,gfx1102,gfx1200,gfx1201,gfx1030); ...\n"
             "device 1: AMD Radeon RX 9070 XT\n  arch gfx1201, 15.9 GiB, wave32\n"
             "device 2: AMD Radeon RX 7800 XT\n  arch gfx1101, 16.0 GiB, wave32\n")

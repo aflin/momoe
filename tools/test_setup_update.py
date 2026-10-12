@@ -52,7 +52,7 @@ class Update(unittest.TestCase):
         self.assertEqual(dv.call_args[0][1], "en")                 # the model's own subset is kept
         start.assert_not_called()
         call.assert_not_called()
-        self.assertIn("Strata is updated", out)
+        self.assertIn("Momoe is updated", out)
 
     def test_build_keeps_the_compiled_engine_path(self):
         with tempfile.TemporaryDirectory() as d:
@@ -79,11 +79,11 @@ class Update(unittest.TestCase):
             broken.write_text("{\"args\": [", encoding="utf-8")
             rc, pip, eng, dv, start, call, out = self.run_update([other, broken, p])
         self.assertEqual(rc, 0, out)
-        self.assertIn('skipped strata-notes.json (no "exe" or "args"): it is not a Strata model config', out)
+        self.assertIn('skipped strata-notes.json (no "exe" or "args"): it is not a Momoe model config', out)
         self.assertIn("skipped strata-cut.json (not valid JSON)", out)
         dv.assert_called_once()                                     # the real model is still refreshed
         self.assertIn("Qwen IQ3_S: up to date", out)
-        self.assertIn("Strata is updated", out)
+        self.assertIn("Momoe is updated", out)
 
     def test_installed_configs_lists_only_model_configs(self):
         with tempfile.TemporaryDirectory() as d:
@@ -111,7 +111,7 @@ class SettingsLine(unittest.TestCase):
     fields), so a change made by hand to strata-<model>.json shows without reading the log."""
 
     CFG = {"exe": "x", "host": "0.0.0.0", "port": 8081, "api_key": "secret", "gpu": [0, 1], "fit_max_tokens": True,
-           "args": ["--native", "E:\\Strata\\packs\\iq3_s", "--mtp", "/s/mtp/rt", "m.gguf", "--kv", "int8",
+           "args": ["--native", "E:\\Momoe\\packs\\iq3_s", "--mtp", "/s/mtp/rt", "m.gguf", "--kv", "int8",
                     "--kv-resident", "32768", "--spec-min-p", "0.5", "--vram-reserve-mib", "2048", "--mmap-experts",
                     "--prefill", "auto"]}
 

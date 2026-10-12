@@ -213,7 +213,7 @@ bool MtpDrafter::make_q4_dense(const std::vector<uint8_t>& blob, std::string& er
     if (cudaMalloc((void**) &dense4_, (size_t) total) != cudaSuccess) { err = "mtp: the Q4_0 projections do not fit"; return false; }
     cudaMemcpy(dense4_, host.data(), (size_t) total, cudaMemcpyHostToDevice);
     vram_ += total;
-    std::fprintf(stderr, "strata mtp: --mtp-q4: %zu projections as Q4_0 (%.1f MiB)\n", plan.size(), (double) total / 1048576.0);
+    std::fprintf(stderr, "momoe mtp: --mtp-q4: %zu projections as Q4_0 (%.1f MiB)\n", plan.size(), (double) total / 1048576.0);
     return true;
 #else
     (void) blob;
@@ -239,7 +239,7 @@ bool MtpDrafter::make_q4_head(std::string& err) {
     // the Q4_0 rows replace the subset in place (they are smaller)
     if (cudaMemcpy(dhead_, dst.data(), dst.size(), cudaMemcpyHostToDevice) != cudaSuccess) { err = "mtp: writing the draft head"; return false; }
     dhead_type_ = GGML_Q4_0;
-    std::fprintf(stderr, "strata mtp: --mtp-q4: draft head over %lld tokens as Q4_0 (%.1f MiB read per step, was %.1f)\n",
+    std::fprintf(stderr, "momoe mtp: --mtp-q4: draft head over %lld tokens as Q4_0 (%.1f MiB read per step, was %.1f)\n",
                  (long long) n_dvocab_, (double) dst.size() / 1048576.0, (double) src.size() / 1048576.0);
     return true;
 #else
@@ -506,7 +506,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
     if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[ss.qsa_primary()], ring) == 0) {
         if (st_.kv_mode == 0) { err = "mtp: state init failed"; return false; }
-        std::fprintf(stderr, "strata mtp: no pinned RAM left for the draft layer's K/V copy; keeping it in VRAM\n");
+        std::fprintf(stderr, "momoe mtp: no pinned RAM left for the draft layer's K/V copy; keeping it in VRAM\n");
         cudaGetLastError();
         cudaFree(state_arena_);
         st_ = QsaState{};
@@ -612,11 +612,11 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
 #endif
     const double files_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_files).count();
     if (shared != nullptr) {
-        std::fprintf(stderr, "strata mtp: shared draft weights, %.0f MiB of private state and buffers\n",
+        std::fprintf(stderr, "momoe mtp: shared draft weights, %.0f MiB of private state and buffers\n",
                      (double) vram_ / 1048576.0);
     } else {
         const double xbytes = (double) g.n_expert * (double) (xblob_ > 0 ? xblob_ : strata::kernels::cpu::BLOB);
-        std::fprintf(stderr, "strata mtp: draft layer loaded%s, %.0f MiB of VRAM (experts %.0f, dense %.0f), files read in %.2f s (%.0f MiB/s)\n",
+        std::fprintf(stderr, "momoe mtp: draft layer loaded%s, %.0f MiB of VRAM (experts %.0f, dense %.0f), files read in %.2f s (%.0f MiB/s)\n",
                      gguf_layer ? " from the model file" : "", (double) vram_ / 1048576.0, xbytes / 1048576.0,
                      (double) tensors_.back().off / 1048576.0, files_s,
                      files_s > 0 ? (xbytes + (double) tensors_.back().off) / 1048576.0 / files_s : 0.0);
@@ -679,7 +679,7 @@ bool MtpDrafter::setup_coupled(std::string& err) {
     const int64_t nv = dhead_ != nullptr ? n_dvocab_ : n_vocab_;
     const size_t scratch = strata::kernels::coupled_draft_scratch_bytes((int) nv);
     if (scratch == 0) {
-        std::fprintf(stderr, "strata mtp: STRATA_SPEC_COUPLED: %lld draft logits are too wide for the coupled sampler; "
+        std::fprintf(stderr, "momoe mtp: STRATA_SPEC_COUPLED: %lld draft logits are too wide for the coupled sampler; "
                              "argmax drafts\n", (long long) nv);
         return true;
     }
@@ -717,11 +717,11 @@ bool MtpDrafter::setup_coupled(std::string& err) {
     }
     coupled_ok_ = true;
     if (spec_prob_env())
-        std::fprintf(stderr, "strata mtp: probabilistic draft acceptance on (STRATA_SPEC_PROB): sampled requests draft by "
+        std::fprintf(stderr, "momoe mtp: probabilistic draft acceptance on (STRATA_SPEC_PROB): sampled requests draft by "
                              "sampling the draft head's distribution over %lld tokens; the verifier accepts with "
                              "min(1, p/q) and resamples the residual\n", (long long) nv);
     else
-        std::fprintf(stderr, "strata mtp: coupled draft sampling on (STRATA_SPEC_COUPLED): sampled requests draft with the "
+        std::fprintf(stderr, "momoe mtp: coupled draft sampling on (STRATA_SPEC_COUPLED): sampled requests draft with the "
                              "target's chain and Philox draw over %lld tokens\n", (long long) nv);
     return true;
 }
@@ -753,7 +753,7 @@ void draft_head_hint(int64_t n_tokens, int64_t row_bytes) {
         std::snprintf(b, sizeof(b), " and %.0f MiB is free", (double) free_b / 1048576.0);
         free_s = b;
     }
-    std::fprintf(stderr, "strata mtp: the draft head over %lld tokens needs %.0f MiB of VRAM%s.\n",
+    std::fprintf(stderr, "momoe mtp: the draft head over %lld tokens needs %.0f MiB of VRAM%s.\n",
                  (long long) n_tokens, mib(n_tokens), free_s.c_str());
     struct Subset { const char* name; int64_t tokens; const char* what; };
     static const Subset smaller[] = {{"cyrillic", 58963, "English, code and the Cyrillic script"},
@@ -767,13 +767,13 @@ void draft_head_hint(int64_t n_tokens, int64_t row_bytes) {
             opts += b;
         }
     if (!opts.empty())
-        std::fprintf(stderr, "strata mtp: hint: a smaller draft vocabulary needs less VRAM: %s. Start once with it - "
+        std::fprintf(stderr, "momoe mtp: hint: a smaller draft vocabulary needs less VRAM: %s. Start once with it - "
                              "START-HERE.bat --draft-vocab en (Windows) or ./setup.sh --draft-vocab en - and the model "
                              "keeps it (\"draft_vocab\" in its strata-*.json config); or a smaller --context in "
                              "setup.\n",
                      opts.c_str());
     else
-        std::fprintf(stderr, "strata mtp: hint: this is already the smallest shipped draft vocabulary: a smaller "
+        std::fprintf(stderr, "momoe mtp: hint: this is already the smallest shipped draft vocabulary: a smaller "
                              "--context (or closing what else uses the GPU) leaves it room.\n");
 }
 }  // namespace
@@ -823,7 +823,7 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
             strata::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dvocab_, n_dvocab_, dhead_, nullptr);
             cudaDeviceSynchronize();
             vram_ += (uint64_t) (n_dvocab_ * row_bytes) + raw.size();
-            std::fprintf(stderr, "strata mtp: draft head over %lld tokens (%.1f MiB)\n", (long long) n_dvocab_,
+            std::fprintf(stderr, "momoe mtp: draft head over %lld tokens (%.1f MiB)\n", (long long) n_dvocab_,
                          (double) (n_dvocab_ * row_bytes) / 1048576.0);
             dhead_type_ = head->type();
             if (q4_head_ && !make_q4_head(err)) return false;

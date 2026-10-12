@@ -1222,7 +1222,7 @@ def config_toolkit(cfg: dict) -> int:
 def gpu_problem(g, together=False):
     """Why Strata cannot use this card, in plain words (None: it can)."""
     if int(g["arch"]) < 75 and not (sm60_card(g["arch"]) and experimental_sm60()):
-        return (f"not supported - older than the RTX 20 series (compute capability {cc(g)}; Strata needs 7.5 or "
+        return (f"not supported - older than the RTX 20 series (compute capability {cc(g)}; Momoe needs 7.5 or "
                 "newer" + ("; experimental: choose it with --gpu " + str(g["index"]) + " (the CUDA 12 engine, "
                           "docs/OLDER_GPUS.md)" if sm60_card(g["arch"]) else "") + ")")
     if together and g["vram_gb"] < SPLIT_MIN_VRAM_GB - 0.5:
@@ -1274,7 +1274,7 @@ def parse_gpus(text, found) -> list:
         sel = [g["index"] for g in together_ok(found)]
         if not sel:
             gpu_table(found)
-            fail("--gpus all: this PC does not have two GPUs Strata can use together")
+            fail("--gpus all: this PC does not have two GPUs Momoe can use together")
         return sel
     try:
         sel = [int(x) for x in str(text).split(",") if x.strip()]
@@ -1310,7 +1310,7 @@ def check_gpus(sel, found, what="", yes=False, named=False) -> None:
         ones = " or ".join(f"--gpu {x['index']}" for x in single)
         both = "--gpus " + ",".join(str(x["index"]) for x in can) if can else ""
         hint = ((f"use these together: {both}" + (f" (or one card: {ones})" if not together else "")) if can else
-                f"use one card: {ones}" if single else "Strata needs an NVIDIA RTX 20 series or newer card")
+                f"use one card: {ones}" if single else "Momoe needs an NVIDIA RTX 20 series or newer card")
         fail(f"GPU {i}{'' if g is None else ' (' + g['name'] + ')'} {what}cannot be used: {p}", hint)
 
 
@@ -1371,12 +1371,12 @@ def choose_gpus(a, found) -> list:
     single = sorted([g for g in found if gpu_problem(g) is None], key=lambda x: (-round(x["vram_gb"]), x["index"]))
     if not single:
         gpu_table(found)
-        fail("none of your GPUs can run Strata", "it needs an NVIDIA RTX 20 series or newer (compute capability 7.5+)")
+        fail("none of your GPUs can run Momoe", "it needs an NVIDIA RTX 20 series or newer (compute capability 7.5+)")
     can = together_ok(found)
     if not can:
         return [single[0]["index"]]
     say()
-    say(f"  Strata can run the model on one GPU, or share it across {'these' if len(can) > 2 else 'both'}: then each"
+    say(f"  Momoe can run the model on one GPU, or share it across {'these' if len(can) > 2 else 'both'}: then each"
         " card holds the")
     say("  experts of its own layers, so together they hold about twice as many, and prompts are read about 20%")
     say("  faster (details: docs/MULTI_GPU.md). A much slower extra card can also make it slower.")
@@ -1636,7 +1636,7 @@ def offer_together(cfg_path: Path, cfg: dict, yes: bool) -> dict:
     # #642: the engines from RESIDENT_SPLIT_ENGINE keep it on both cards, so they are offered as for any config
     resident = "--resident-experts" in cfg.get("args", []) and not resident_split()
     say()
-    say("  This PC has " + " and ".join(gpu_name(g) for g in pair) + ": Strata can share the model across both.")
+    say("  This PC has " + " and ".join(gpu_name(g) for g in pair) + ": Momoe can share the model across both.")
     say("  Together they hold about twice the model's experts and read prompts about 20% faster (docs/MULTI_GPU.md).")
     if resident:
         say("  This model runs in the low-RAM mode with its experts kept in RAM, on one GPU (recommended: steady RAM")
@@ -1914,7 +1914,7 @@ def gguf_dir_shards(folder: Path, fam: dict, model: str) -> list[Path]:
 # #444: the quantization in a GGUF's name (Unsloth's UD-IQ3_XXS, a K-quant's Q2_K_XL, a GSQ-RCO IQ3_S, ...)
 GGUF_QUANT = re.compile(r"(?<![A-Za-z0-9])((?:UD-)?(?:I?Q\d+(?:_[A-Za-z0-9]+)*|BF16|F16|F32))"
                         r"(?=-\d{5}-of-\d{5}\.gguf$|\.gguf$)", re.I)
-SUPPORTED_GGUFS = ("Strata runs ISTA-DASLab's GSQ-RCO files (Qwen3.8-Flash-Next Q2_0, IQ2_XS, IQ3_XXS, IQ3_S; Swift "
+SUPPORTED_GGUFS = ("Momoe runs ISTA-DASLab's GSQ-RCO files (Qwen3.8-Flash-Next Q2_0, IQ2_XS, IQ3_XXS, IQ3_S; Swift "
                    "1.5's; the Coder's IQ1_M) and Unsloth's UD-Q4_K_XL and UD-IQ4_XS only (and Unsloth's "
                    "Qwen3.6-35B-A3B-MTP UD-IQ4_XS and UD-IQ3_S; Ornith-1.5-35B-A3B's IQ4_XS and IQ3_XXS by "
                    "bartowski; the other Qwen3.6-35B-A3B and KAT-Coder files of docs/QWEN35MOE_GGUFS.md, by their "
@@ -1949,7 +1949,7 @@ def gguf_dir_problem(folder: Path, first: Path, fam: dict, model: str) -> tuple 
     folder without GGUFs stays check_shards' "missing")."""
     bad = gguf_unsupported(first.name) if first.exists() else None
     if bad:
-        return f"{first.name} is {bad}, a GGUF Strata cannot run", SUPPORTED_GGUFS
+        return f"{first.name} is {bad}, a GGUF Momoe cannot run", SUPPORTED_GGUFS
     if first.exists():
         return None
     firsts = sorted(p.name for p in folder.glob("*.gguf")
@@ -2481,7 +2481,7 @@ def amd_gpus(sysfs="/sys"):
 
 def amd_problem(g):
     if g["arch"] not in AMD_ARCHS:
-        return (f"not supported - Strata's AMD backend runs on {AMD_CARDS} only, this is {g['arch']}"
+        return (f"not supported - Momoe's AMD backend runs on {AMD_CARDS} only, this is {g['arch']}"
                 + (" (an integrated Radeon, not Strix Halo)" if g["arch"] in ("gfx1150", "gfx1152", "gfx1103") else ""))
     if g.get("cannot_run"):                            # Windows: the installed engine's own check (--list-devices)
         return g["cannot_run"]
@@ -2519,7 +2519,7 @@ def amd_parse_gpus(text, amd) -> list:
             fail(f"--gpus takes AMD GPU numbers as setup lists them, e.g. --gpus 1,0 (or --gpus all), not {text!r}")
     if len(sel) < 2 or len(set(sel)) != len(sel):
         fail("--gpus takes two or more different GPUs, e.g. --gpus 1,0 (one GPU: --gpu 1)",
-             "this PC has " + (f"{len(usable)} AMD card{'s' if len(usable) != 1 else ''} Strata can use"
+             "this PC has " + (f"{len(usable)} AMD card{'s' if len(usable) != 1 else ''} Momoe can use"
                                + (": " + ", ".join(f"GPU {g['index']} ({g['name']})" for g in usable) if usable else "")))
     byid = {g["index"]: g for g in amd}
     for i in sel:
@@ -2756,7 +2756,7 @@ def hip_runtime_beside_exe(eng: Path) -> None:
                 shutil.copy2(src, dst)
             except OSError as e:                   # e.g. the engine is running and holds the old copy
                 warn(f"could not put {src.name} next to the AMD engine ({e}); if the engine stops on its first "
-                     "request, close Strata and run START-HERE.bat again")
+                     "request, close Momoe and run START-HERE.bat again")
 
 
 def hip_match(card: dict, listed: list[dict], hip: list[dict]) -> dict | None:
@@ -2897,7 +2897,7 @@ def rocm_root(archs):
         if (ver is None or ver >= ROCM_SYSTEM_MIN) and not missing:
             return sysroot, [str(sysroot / "lib")]
         if ver is not None and ver < ROCM_SYSTEM_MIN:
-            warn(f"the ROCm in {sysroot} is {ver[0]}.{ver[1]}; Strata needs {ROCM_SYSTEM_MIN[0]}.{ROCM_SYSTEM_MIN[1]} "
+            warn(f"the ROCm in {sysroot} is {ver[0]}.{ver[1]}; Momoe needs {ROCM_SYSTEM_MIN[0]}.{ROCM_SYSTEM_MIN[1]} "
                  "or newer: using AMD's wheels in .venv instead")
         else:                                          # #446: a runtime-only ROCm (no -dev packages): cmake would fail
             warn(f"the ROCm in {sysroot} has no HIP development files ({', '.join(missing)}): using AMD's wheels in "
@@ -3007,7 +3007,7 @@ def build_engine_hip(gpu, llama, vision="none", more=False) -> Path:
     os.environ["PATH"] = os.pathsep.join([str(root / "bin"), str(root / "llvm" / "bin"), os.environ.get("PATH", "")])
     say("  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
         if meta.get("backend") == "hip" and (eng / EXE).exists() and has_archs
-        else f"  Compiling the Strata engine for your AMD GPU{'s' if len(archs) > 1 else ''} ({', '.join(archs)}; "
+        else f"  Compiling the Momoe engine for your AMD GPU{'s' if len(archs) > 1 else ''} ({', '.join(archs)}; "
              "10-20 minutes, once) ...")
     cmake_build(ROOT, ROOT / "build-hip", "strata",
                 ["-DSTRATA_ENABLE_HIP=ON", "-DSTRATA_ENABLE_CUDA=OFF", "-DSTRATA_BUILD_TESTS=OFF",
@@ -3762,7 +3762,7 @@ def build_engine(gpu, vision, yes, llama, toolkit=None, more=False) -> Path:
         say("  Compiling the engine for " + ", ".join(f"sm_{x}" for x in archs) + " (a card it had no code for; "
             "10-20 minutes, once) ..." if new_arch else
             "  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
-            if local and (eng / EXE).exists() else "  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
+            if local and (eng / EXE).exists() else "  Compiling the Momoe engine for your GPU (10-20 minutes, once) ...")
         cmake_build(ROOT, bdir, "strata",
                     # STRATA_Q6K_EXPERTS named: a build folder configured when it was off by default keeps it off
                     ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", "-DSTRATA_Q6K_EXPERTS=ON",
@@ -4200,7 +4200,7 @@ def data_folder(requested: str | None) -> tuple:
             elsewhere.append(folder)                    # in use, or a copy the data folder already has
             warn(f"some model files are still in {folder} (in use, or already in {dest})")
         else:
-            ok(f"model files from {folder} moved to {dest} (a new copy of Strata finds them there)")
+            ok(f"model files from {folder} moved to {dest} (a new copy of Momoe finds them there)")
     installs = [str(ROOT)] + [p for p in settings.get("installs", []) if p != str(ROOT) and Path(p).is_dir()]
     save_settings({**settings, "data_dir": str(dest), "installs": installs[:20]})
     return dest, elsewhere
@@ -4414,7 +4414,7 @@ def model_config(path: Path, quiet=False) -> bool:
     except ValueError:
         why = "not valid JSON"
     if not quiet:
-        warn(f"skipped {path.name} ({why}): it is not a Strata model config")
+        warn(f"skipped {path.name} ({why}): it is not a Momoe model config")
     return False
 
 
@@ -4524,7 +4524,7 @@ def calibrate_config(cfg_path: Path) -> bool:
     import calibrate as CAL
     cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
     say()
-    say("  Tuning Strata for this PC: the output speed is measured with a few engine settings (the PCIe share, the")
+    say("  Tuning Momoe for this PC: the output speed is measured with a few engine settings (the PCIe share, the")
     say("  draft depth, the CPU threads, the expert cache). It takes roughly 15-30 minutes (3 rounds of each value); the PC is busy meanwhile.")
     try:
         since = os.path.getsize(cfg["log"]) if cfg.get("log") and os.path.isfile(cfg["log"]) else 0
@@ -4607,7 +4607,7 @@ def update_install(have: list, a) -> int:
     keeps its engine (update_installed_engine says to close it and run this again)."""
     have = [p for p in have if model_config(p)]        # #549: a strata-*.json that is no model config is skipped
     if not have:
-        say("  No model is installed in this Strata folder yet: run START-HERE.bat (Linux: ./setup.sh) to set it up -")
+        say("  No model is installed in this Momoe folder yet: run START-HERE.bat (Linux: ./setup.sh) to set it up -")
         say("  it finds an earlier install's model files next to it and reuses them.")
         return 0
     pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
@@ -4625,7 +4625,7 @@ def update_install(have: list, a) -> int:
         ok(f"{cfg.get('model_name', cfg_path.stem)}: up to date")
     ver = engine_version(Path(json.loads(have[0].read_text(encoding="utf-8-sig"))["exe"]))
     say()
-    ok("Strata is updated" + (f" (engine {'.'.join(map(str, ver))})" if any(ver) else "") +
+    ok("Momoe is updated" + (f" (engine {'.'.join(map(str, ver))})" if any(ver) else "") +
        ". Start the model with " + ("START-HERE.bat" if WIN else "./setup.sh") + " when you want it.")
     return 0
 
@@ -5188,7 +5188,7 @@ def write_run_script(model, cfg_path, port, open_browser=True):
              "--port", str(port)] + (["--open"] if open_browser else [])
     if WIN:
         script = ROOT / f"run-{model.lower()}.bat"
-        script.write_text("@echo off\r\ntitle Strata " + model + "\r\ncd /d \"" + str(ROOT) + "\"\r\n" +
+        script.write_text("@echo off\r\ntitle Momoe " + model + "\r\ncd /d \"" + str(ROOT) + "\"\r\n" +
                           " ".join(f'"{x}"' for x in serve) + "\r\nif errorlevel 1 pause\r\n", encoding="utf-8")
     else:
         script = ROOT / f"run-{model.lower()}.sh"
@@ -5258,7 +5258,7 @@ def sycl_setup(argv) -> int:
             rest.append(x)
     script = ROOT / "sycl" / "setup_intel.py"
     if not script.exists():
-        fail(f"{script} is missing", "use a full Strata checkout (git clone) - docs/INTEL_ARC.md")
+        fail(f"{script} is missing", "use a full Momoe checkout (git clone) - docs/INTEL_ARC.md")
     return subprocess.call([sys.executable, str(script), *rest])
 
 
@@ -5308,7 +5308,7 @@ def main() -> int:
     ap.add_argument("--browser", dest="browser", action="store_true",
                     help="open the chat page again when the model is ready (the default; undoes --no-browser)")
     ap.add_argument("--data-dir", help="where the model files go (~70-120 GB): default Strata-data next to this folder, "
-                                       "remembered for every Strata folder on this PC")
+                                       "remembered for every Momoe folder on this PC")
     ap.add_argument("--models-dir", help="where the GGUF files go (default: <data folder>/models)")
     ap.add_argument("--gguf-dir", help="use GGUF files you already have (a folder with every shard: "
                                        "<name>-00001-of-0000N.gguf ... -0000N-of-0000N.gguf)")
@@ -5331,7 +5331,7 @@ def main() -> int:
                          "(mainland China: the same files, checked against ModelScope's published SHA-256; "
                          "STRATA_SOURCE)")
     ap.add_argument("--inspect", nargs="+", metavar=("SOURCE", "VARIANT"),
-                    help="what a GGUF is and whether Strata runs it, from its headers only (no download): a file, a "
+                    help="what a GGUF is and whether Momoe runs it, from its headers only (no download): a file, a "
                          "folder, a URL, ms:owner/repo (ModelScope) or hf:owner/repo, and optionally a variant name")
     ap.add_argument("--cuda", choices=["12", "13", "auto"], default=os.environ.get("STRATA_CUDA") or None,
                     help="NVIDIA: the CUDA toolkit of this model's engine. auto (default): CUDA 13, the ready-made "
@@ -5372,7 +5372,7 @@ def main() -> int:
                          "9 GB of VRAM free, says it is needed)")
     ap.add_argument("--backend", choices=["cuda", "hip", "sycl"],
                     help="cuda = NVIDIA (default), hip = AMD RX 7900 / 7800 / 7700 XT, RX 9060 XT / 9070 / AI PRO R9700 on "
-                         "Linux or Windows (chosen by itself when the PC has no NVIDIA card Strata can use), "
+                         "Linux or Windows (chosen by itself when the PC has no NVIDIA card Momoe can use), "
                          "sycl = Intel Arc, EXPERIMENTAL: Linux, built from source (docs/INTEL_ARC.md)")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
@@ -5395,7 +5395,7 @@ def main() -> int:
             a.gpu = int(a.gpu)
         else:
             ap.error(f"--gpu takes a GPU number as nvidia-smi numbers them, e.g. --gpu 1 (or --gpus 0,2), not {a.gpu!r}")
-    say("Strata - Qwen3.8-Flash-Next on a normal PC (a GPU + system RAM + CPU)")
+    say("Momoe - Qwen3.8-Flash-Next on a normal PC (a GPU + system RAM + CPU)")
     for d in (engine_dir(13), engine_dir(12)):          # Momoe: an engine installed under Strata's names
         momoe_names(d)
     data, elsewhere = data_folder(a.data_dir)          # the model files: in the data folder, found from any copy
@@ -5506,7 +5506,7 @@ def main() -> int:
     if a.backend is None and nv_ok and amd_ok:
         # both kinds of card: asked (a first run on such a PC used to take NVIDIA without mentioning the Radeon)
         say()
-        say("  This PC has NVIDIA and AMD cards Strata can use:")
+        say("  This PC has NVIDIA and AMD cards Momoe can use:")
         say("  1) NVIDIA: " + ", ".join(f"{g['name']} ({g['vram_gb']:.0f} GB)" for g in found if gpu_problem(g) is None)
             + "   (recommended)")
         say("  2) AMD: " + ", ".join(f"{g['name']} ({g['vram_gb']:.0f} GB{', unified memory' if g.get('uma') else ''})"
@@ -5536,7 +5536,7 @@ def main() -> int:
                         "empty: ROCm cannot use it yet (docs/STRIX_HALO.md: the amdgpu driver and /dev/kfd access, "
                         "your user in the render and video groups)")
         if not usable:
-            fail("no AMD GPU Strata can use", f"the AMD backend runs on {AMD_CARDS}")
+            fail("no AMD GPU Momoe can use", f"the AMD backend runs on {AMD_CARDS}")
         if a.gpus:                                     # a layer split across these cards, the first one the main
             chosen = amd_parse_gpus(a.gpus, amd)
             gpu = chosen[0]
@@ -5597,7 +5597,7 @@ def main() -> int:
                                            f"{CUDA12_MIN_DRIVER} or newer, docs/OLDER_GPUS.md)"))
     if gpu["vram_gb"] < 11 and not small_family(a.family or ""):   # the 35B-A3B families: their note is in step 2
         warn("less than 12 GB of " + ("GPU memory (this APU's carve-out + shared memory)" if gpu.get("uma") else "VRAM")
-             + ": Strata will run, but most experts stay on the CPU and it will be slow"
+             + ": Momoe will run, but most experts stay on the CPU and it will be slow"
              + ("" if a.family else " (Qwen3.6-35B-A3B, --family qwen36, is made for 6-12 GB cards)"))
     ram = ram_gb()
     cpu, avx2, avx512 = cpu_info()
@@ -5618,11 +5618,11 @@ def main() -> int:
         # every model keeps ALL its experts in RAM (12+ GB); VRAM only holds a copy of the most-used ones, so a
         # bigger GPU does not lower this.  The owner's rule: a stop by default, a risk the user can take (--model
         # with --yes, or y)
-        confirm_risk(f"RAM: {ram:.0f} GB - the smallest model ({small_name}) needs about {need} GB: Strata keeps all "
+        confirm_risk(f"RAM: {ram:.0f} GB - the smallest model ({small_name}) needs about {need} GB: Momoe keeps all "
                      f"of the model's experts in RAM ({experts_gb}, whatever the GPU), so the OS will page them from "
                      "disk. Expect it to be very slow, and it may not start at all.", bool(a.model), a.yes,
                      f"RAM: {ram:.0f} GB - the smallest model ({small_name}) needs about {need} GB",
-                     f"Strata keeps all of the model's experts in RAM ({experts_gb}, whatever the GPU) and the GPU "
+                     f"Momoe keeps all of the model's experts in RAM ({experts_gb}, whatever the GPU) and the GPU "
                      f"holds a copy of the most-used ones: it needs {need} GB of RAM or more"
                      + (" (48 GB for the full model)" if smallest == "IQ1_M" else
                         f" ({small_name}; 32 GB for the Coder, 48 GB for the full model)")
@@ -5643,12 +5643,12 @@ def main() -> int:
             warn(problem)
     floor = cpu_floor(avx2)
     if floor == "unsupported":
-        fail("this CPU has neither AVX2 nor SSE4.2; Strata needs at least SSE4.2 (Intel Nehalem, 2008, or newer)")
+        fail("this CPU has neither AVX2 nor SSE4.2; Momoe needs at least SSE4.2 (Intel Nehalem, 2008, or newer)")
     if not avx2:
         # #394 #595 #623: the ready-made engine is AVX2; an older CPU gets one compiled here, whose CPU experts run on
         # ggml-cpu's kernels for this CPU.  Experimental: measured only on newer CPUs with the older path forced, and by
         # users on a few Xeons.  A warning, not a stop.
-        warn(f"this CPU has no AVX2: Strata support for it is EXPERIMENTAL and slow. Setup compiles the engine on this "
+        warn(f"this CPU has no AVX2: Momoe support for it is EXPERIMENTAL and slow. Setup compiles the engine on this "
              f"PC for {'AVX' if floor == 'avx' else 'SSE4.2'} (STRATA_ISA_FLOOR={floor}; 10-20 minutes, once), and the "
              "CPU's share of the experts runs on ggml-cpu's kernels, a few times slower than on an AVX2 CPU. "
              "See \"Older CPUs\" in docs/INSTALL.md")
@@ -5685,10 +5685,10 @@ def main() -> int:
         if not any_fits:
             # #977: every size says "does not fit", so the verdict says so too (and the exit code, for scripts). It only
             # reports: --model NAME --yes still installs one anyway.
-            say(f"\nThis PC cannot run Strata yet: no model size fits {ram:.0f} GB of RAM (the smallest needs about "
+            say(f"\nThis PC cannot run Momoe yet: no model size fits {ram:.0f} GB of RAM (the smallest needs about "
                 f"{need} GB). --model NAME --yes installs one anyway, slowly.")
             return 1
-        say("\nThis PC can run Strata. Run it again without --check to install.")
+        say("\nThis PC can run Momoe. Run it again without --check to install.")
         return 0
 
     # ---- 2. the questions
@@ -6050,15 +6050,15 @@ def main() -> int:
     need_engine = MODELS[model].get("engine", UNSLOTH_ENGINE)
     if budget is not None and engine_ver < need_engine:   # checked before the 15-111 GB download
         fail(f"{model} needs engine {'.'.join(map(str, need_engine))} or newer; this one is {meta.get('version')}",
-             "update Strata (or compile the engine with --build) and run setup again")
+             "update Momoe (or compile the engine with --build) and run setup again")
     if own_mtp and not engine_runs_small(eng):          # e.g. --build of an older checkout; checked before the download
-        fail(f"{fam['title']} {size_of(model)} needs an engine with the qwen35moe support (Strata "
+        fail(f"{fam['title']} {size_of(model)} needs an engine with the qwen35moe support (Momoe "
              f"{'.'.join(map(str, QWEN36_ENGINE))} source or newer); this one ({meta.get('version')}) has none",
-             "update Strata and run setup again with --build")
+             "update Momoe and run setup again with --build")
     if own_mtp and not engine_runs_model(eng, model):
         fail(f"{fam['title']} {size_of(model)} needs an engine with the expert formats added for it "
              f"(docs/QWEN35MOE_GGUFS.md); this one ({meta.get('version')}) has none",
-             "use a Strata checkout of the qwen35moe-more-models branch and run setup again with --build")
+             "use a Momoe checkout of the qwen35moe-more-models branch and run setup again with --build")
     ok(f"engine: {eng / EXE}")
 
     # ---- 5. the model files
@@ -6110,7 +6110,7 @@ def main() -> int:
                 "cosine 0.999 vs BF16); see 'A Q8_0 encoder' in docs/DETAILS.md")
 
     # ---- 6. the pack and the MTP draft layer
-    step(6, "preparing the model for Strata")
+    step(6, "preparing the model for Momoe")
     pack = find_in(roots, f"packs/{tag.lower()}") or data / "packs" / tag.lower()
     env = dict(os.environ, STRATA_GGUF_PY=str(llama / "gguf-py"))
     if model == "Q2_0" and avx512 and family == "qwen":
@@ -6430,7 +6430,7 @@ def main() -> int:
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
     # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
     if cal is None and not hip and not a.no_start and not a.yes and ask(
-            "Tune Strata for this PC now? It measures a few engine settings (about 15-30 minutes, longer on a slow card; the PC is busy "
+            "Tune Momoe for this PC now? It measures a few engine settings (about 15-30 minutes, longer on a slow card; the PC is busy "
             "meanwhile; later: START-HERE --calibrate)", ["y", "n"], "y", a.yes) == "y":
         tuned = calibrate_config(cfg_path)
     else:

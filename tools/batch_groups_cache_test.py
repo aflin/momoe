@@ -75,7 +75,7 @@ except Exception:
 json.dump(rounds, open(sys.argv[2], "w"))
 
 text = open(log, errors="replace").read()
-reqs = [(int(a), int(b)) for a, b in re.findall(r"strata serve: prompt (\d+) tokens = (\d+) reused", text)]
+reqs = [(int(a), int(b)) for a, b in re.findall(r"momoe serve: prompt (\d+) tokens = (\d+) reused", text)]
 print("requests (prompt tokens, reused):", reqs)
 print("slot gave back lines:", len(re.findall(r"gave back", text)), " conversation cache restores:",
       len(re.findall(r"conversation cache: restored", text)))

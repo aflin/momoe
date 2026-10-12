@@ -45,7 +45,7 @@ def main() -> int:
     gray, reset = ("\033[90m", "\033[0m") if sys.stdout.isatty() else ("", "")
     messages, pending = [], []
     think = "none" if a.no_think else a.think
-    print(f"Strata chat ({url}).  /image <path> = attach a picture, /think none|low|medium|high (now: {think}), "
+    print(f"Momoe chat ({url}).  /image <path> = attach a picture, /think none|low|medium|high (now: {think}), "
           f"/reset = new conversation, /quit = leave.")
     while True:
         try:

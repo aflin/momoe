@@ -59,7 +59,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/v1/models":
             self.send_json({"object": "list", "data": [{"id": "fake", "meta": {"n_ctx": s.ctx}}]})
         elif self.path == "/props":
-            self.send_json({"total_slots": 4, "model_alias": "fake-model", "build_info": "Strata 9.9.9"})
+            self.send_json({"total_slots": 4, "model_alias": "fake-model", "build_info": "Momoe 9.9.9"})
         elif self.path == "/v1/status":
             self.send_json({"machine": {"gpu": {"name": "NVIDIA GeForce RTX 9999", "total_mib": 12288}, "ram": {"total_gib": 64.0}},
                             "engine": "9.9.9", "vram": {"free_mib": 1000}})
@@ -191,7 +191,7 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(out["n"], 3)
 
     def test_config_view_drops_secrets_and_cuts_paths(self):
-        cfg = {"exe": r"C:\Users\me\Strata\engine\strata.exe", "args": ["--native", "/home/me/models/m-IQ3_XXS.gguf", "--ctx", "65536"],
+        cfg = {"exe": r"C:\Users\me\Momoe\engine\strata.exe", "args": ["--native", "/home/me/models/m-IQ3_XXS.gguf", "--ctx", "65536"],
                "api_key": "hunter2", "model_name": "Fake Model", "log": "/tmp/x.log", "port": 8080,
                "env": {"STRATA_FOO": "/home/me/z", "PATH": "/usr/bin", "STRATA_TOKEN": "t"}}
         v = B.config_view(cfg)

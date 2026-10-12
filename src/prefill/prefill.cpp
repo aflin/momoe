@@ -1828,7 +1828,7 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
     cudaMemGetInfo(&fb, &tb);
     cudaSetDevice(prev);
     if (!ok) { err = "prefill peer: the peer's buffers do not fit (raise --peer-reserve-mib or lower --peer-prefill-rows)"; return false; }
-    std::fprintf(stderr, "strata prefill: peer GPU %d computes its experts' rows of each prompt chunk (up to %lld rows per "
+    std::fprintf(stderr, "momoe prefill: peer GPU %d computes its experts' rows of each prompt chunk (up to %lld rows per "
                          "layer%s%s); %zu MiB left free on it\n", pp->dev, (long long) pp->cap_rows,
                  pp->p2p ? "" : (pp->sums ? (pp->f16 ? ", no P2P: through mapped host memory in FP16, one weighted sum per token back"
                                                      : ", no P2P: through mapped host memory, one weighted sum per token back")
@@ -2170,7 +2170,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
 
     for (int64_t c0 = 0; c0 < n; c0 += m.T) {
         if (should_stop && should_stop()) { err = "cancelled"; return false; }
-        if (std::getenv("STRATA_TRACE")) { std::fprintf(stderr, "strata trace: prompt chunk %lld of %lld\n", (long long) c0, (long long) n); std::fflush(stderr); }
+        if (std::getenv("STRATA_TRACE")) { std::fprintf(stderr, "momoe trace: prompt chunk %lld of %lld\n", (long long) c0, (long long) n); std::fflush(stderr); }
         const int64_t T = std::min(m.T, n - c0), p0 = pos0 + c0;
         core::progress_at("reading the prompt (batched): preparing the chunk from token", p0);   // #251
         ++stats_.chunks;
@@ -2512,7 +2512,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             const cudaError_t a = cudaStreamSynchronize(m.cs), b = cudaStreamSynchronize(m.copy);
             const double ms = ms_since(ts);
             if (ms > 250.0 || a != cudaSuccess || b != cudaSuccess)
-                std::fprintf(stderr, "strata pf-step: chunk from token %lld, layer %lld: %s took %.0f ms (%s / %s)\n",
+                std::fprintf(stderr, "momoe pf-step: chunk from token %lld, layer %lld: %s took %.0f ms (%s / %s)\n",
                              (long long) p0, (long long) layer, what, ms, cudaGetErrorString(a), cudaGetErrorString(b));
         };
         for (int64_t l = LB; l < LE; ++l) {
@@ -2636,7 +2636,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 const double dd = (double) got[i] - ref[i];
                                 e2 += dd * dd; r2 += (double) ref[i] * ref[i]; emax = std::max(emax, std::fabs(dd));
                             }
-                            std::fprintf(stderr, "strata: STRATA_HC_UPMIX_CHECK layer %lld half %d T %lld: mixed rel RMS %.3e, "
+                            std::fprintf(stderr, "momoe: STRATA_HC_UPMIX_CHECK layer %lld half %d T %lld: mixed rel RMS %.3e, "
                                          "max |diff| %.3e (%s)\n", (long long) l, half, (long long) T,
                                          std::sqrt(e2 / std::max(r2, 1e-30)), emax, upmixed ? "upmix" : "upmix refused");
                         } else {
@@ -2825,7 +2825,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             std::sort(u.begin(), u.end());
                             sum_u += (double) (std::unique(u.begin(), u.end()) - u.begin());
                         }
-                        std::fprintf(stderr, "strata prefill: selection overlap at %lld: 16-query tiles read %.1f%% of the "
+                        std::fprintf(stderr, "momoe prefill: selection overlap at %lld: 16-query tiles read %.1f%% of the "
                                              "cells one query at a time does\n", (long long) p0, sum_w > 0 ? 100.0 * sum_u / sum_w : 0.0);
                     }
                     // STRATA_IDX_FP16_CHECK: would FP16 pooled indexer keys select the same cells? (the KV-streaming
@@ -2871,7 +2871,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             if (p0 + t + 1 > m.cap) { ++sel_queries; shared += (double) c; cells += (double) w; }
                         }
                         if (qsa_index + 1 == g.n_qsa_layers())
-                            std::fprintf(stderr, "strata prefill: FP16 indexer keys: %lld of %lld selections identical; "
+                            std::fprintf(stderr, "momoe prefill: FP16 indexer keys: %lld of %lld selections identical; "
                                                  "where the selection is sparse, %.4f%% of cells shared (%lld queries)\n",
                                          same, queries, cells > 0 ? 100.0 * shared / cells : 100.0, sel_queries);
                     }
@@ -3059,7 +3059,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     if (fused_l) {
                         if (static bool said = false; !said) {
                             said = true;
-                            std::fprintf(stderr, "strata: prompt experts on the fused int8 kernels (STRATA_PF_FUSED=1, "
+                            std::fprintf(stderr, "momoe: prompt experts on the fused int8 kernels (STRATA_PF_FUSED=1, "
                                                  "#136)\n");
                         }
                         pt.mark(kPfGather, cs);
@@ -3989,7 +3989,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         static int64_t reported = -1;
                         if ((bgu || bdm || bbo || bh > 0) && reported != stats_.chunks) {
                             reported = stats_.chunks;
-                            std::fprintf(stderr, "strata dbg: layer %lld (mmq %d, types %d/%d, %zu experts): non-finite GU %lld "
+                            std::fprintf(stderr, "momoe dbg: layer %lld (mmq %d, types %d/%d, %zu experts): non-finite GU %lld "
                                          "H %lld Dm %lld bo %lld of T %lld\n", (long long) l, (int) use_mmq, mmq_gt, mmq_dt,
                                          n_order, (long long) bgu, (long long) bh, (long long) bdm, (long long) bbo,
                                          (long long) T);
@@ -4045,7 +4045,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             cudaMemcpyAsync(xb.data(), xc, xb.size() * 2, cudaMemcpyDeviceToHost, m.cs);
                             cudaStreamSynchronize(m.cs);
                             cudaFree(Rc); cudaFree(rc); cudaFree(xc);
-                            std::fprintf(stderr, "strata: STRATA_CVEC_FUSE_CHECK layer %lld T %lld: R %s, rs %s, xn16 %s\n",
+                            std::fprintf(stderr, "momoe: STRATA_CVEC_FUSE_CHECK layer %lld T %lld: R %s, rs %s, xn16 %s\n",
                                          (long long) l, (long long) T,
                                          std::memcmp(a.data(), b.data(), a.size() * 4) ? "DIFFERS" : "identical",
                                          std::memcmp(ra.data(), rb.data(), ra.size() * 4) ? "DIFFERS" : "identical",
@@ -4172,7 +4172,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             std::fprintf(stderr, " %lld non-finite (max |x| %.3g)", (long long) c, mx);
         };
         const int64_t last = (n - 1) % m.T;
-        std::fprintf(stderr, "strata dbg: prompt end: last residual row");
+        std::fprintf(stderr, "momoe dbg: prompt end: last residual row");
         bad(m.R + last * D, D);
         if (ss.ple.ready()) { std::fprintf(stderr, "; PLE history"); bad(ss.ple.hist, (int64_t) strata::kernels::NG_HIST * strata::kernels::NG_HC_DIM); }
         std::fprintf(stderr, "; GDN state 0");
@@ -4241,7 +4241,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             std::snprintf(h, sizeof(h), "%04llx ", (unsigned long long) (x & 0xffff));
             line += h;
         }
-        std::fprintf(stderr, "strata prefill: GDN_HASH %s\n", line.c_str());
+        std::fprintf(stderr, "momoe prefill: GDN_HASH %s\n", line.c_str());
     }
     return true;
 }

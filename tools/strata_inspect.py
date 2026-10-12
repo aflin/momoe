@@ -93,7 +93,7 @@ def verdict(fp: dict, table: dict) -> tuple[str, str]:
     (naming the tensors whose quantization no file Strata runs has for them)."""
     known = {k: v for k, v in table.items() if not k.startswith("_")}
     if fp["arch"] != ARCH:
-        return "no", f"not Qwen3.8-Flash-Next (architecture {fp['arch']!r}): Strata runs only that model"
+        return "no", f"not Qwen3.8-Flash-Next (architecture {fp['arch']!r}): Momoe runs only that model"
     exact = [k for k, v in known.items() if v["expert_bytes"] == fp["expert_bytes"] and v["bytes"] == fp["bytes"]
              and v["tensors"] == fp["tensors"]]
     if exact:
@@ -107,17 +107,17 @@ def verdict(fp: dict, table: dict) -> tuple[str, str]:
     runs = set().union(*(v["expert_bytes"] for v in known.values()))
     other = sorted(set(fp["expert_bytes"]) - runs)
     if other:
-        return "no", ("its routed experts use " + ", ".join(other) + ", a quantization no file Strata runs uses "
-                      "(Strata's expert kernels cover " + ", ".join(sorted(runs)) + ")")
+        return "no", ("its routed experts use " + ", ".join(other) + ", a quantization no file Momoe runs uses "
+                      "(Momoe's expert kernels cover " + ", ".join(sorted(runs)) + ")")
     seen = table.get("_roles", {})
     new = [f"{r} {'/'.join(t for t in ts if t not in seen.get(r, []))}" for r, ts in fp.get("roles", {}).items()
            if any(t not in seen.get(r, []) for t in ts)]
-    head = ("its routed experts use only quantizations Strata runs (" + ", ".join(fp["expert_bytes"]) +
+    head = ("its routed experts use only quantizations Momoe runs (" + ", ".join(fp["expert_bytes"]) +
             "), but this file is not one setup installs: not tested (and setup still refuses the GGUF names "
             "it lists as unsupported, such as UD-Q2_K_XL: this is a header reading, not a promise that it runs)")
     if new:
-        return "untested", head + ". Stored differently from every file Strata runs: " + ", ".join(new)
-    return "untested", head + "; every tensor uses a quantization some file Strata runs has for it"
+        return "untested", head + ". Stored differently from every file Momoe runs: " + ", ".join(new)
+    return "untested", head + "; every tensor uses a quantization some file Momoe runs has for it"
 
 
 def make_fingerprints(out: Path) -> None:

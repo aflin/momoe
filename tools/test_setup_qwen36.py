@@ -438,7 +438,7 @@ class Suggestion(Base):
         code, out, cfg = self.main(["--check"], ram=RAM16)
         self.assertEqual(code, 0, out)
         self.assertIn("suggests Qwen3.6-35B-A3B UD-IQ3_S (--family qwen36)", out)
-        self.assertIn("This PC can run Strata", out)
+        self.assertIn("This PC can run Momoe", out)
         self.assertNotIn("[!]  RAM", out)
         code, out, cfg = self.main(["--check"], ram=RAM64)
         self.assertNotIn("--family qwen36", out)

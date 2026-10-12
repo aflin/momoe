@@ -169,12 +169,12 @@ class Calibrate(unittest.TestCase):
     def test_engine_error(self):
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "strata-x.log"
-            log.write_text("strata generate: an old error\n", encoding="utf-8")
+            log.write_text("momoe generate: an old error\n", encoding="utf-8")
             since = log.stat().st_size
             with open(log, "a", encoding="utf-8") as f:
-                f.write("loading ...\nstrata generate: --expert-cache-remote with a layer split needs a GPU that runs "
+                f.write("loading ...\nmomoe generate: --expert-cache-remote with a layer split needs a GPU that runs "
                         "no stage (2 visible, 2 used by the split)\n\n")
-            self.assertEqual(CAL.engine_error(str(log), since), "strata generate: --expert-cache-remote with a layer "
+            self.assertEqual(CAL.engine_error(str(log), since), "momoe generate: --expert-cache-remote with a layer "
                              "split needs a GPU that runs no stage (2 visible, 2 used by the split)")
             with open(log, "a", encoding="utf-8") as f:
                 f.write("Segmentation fault\n")
@@ -252,19 +252,19 @@ class SetupIntegration(unittest.TestCase):
         import contextlib
         import io
         log = Path(self.tmp.name) / "strata-q2_0.log"
-        log.write_text("strata generate: an error of an earlier start\n", encoding="utf-8")
+        log.write_text("momoe generate: an error of an earlier start\n", encoding="utf-8")
         cfg_path = Path(self.tmp.name) / "strata-q2_0.json"
         cfg_path.write_text(json.dumps({"exe": "x", "args": list(BASE), "model_name": "m", "log": str(log)}))
 
         def boom(*a, **k):
             with open(log, "a", encoding="utf-8") as f:
-                f.write("strata generate: --expert-cache-remote with a layer split needs a GPU that runs no stage\n")
+                f.write("momoe generate: --expert-cache-remote with a layer split needs a GPU that runs no stage\n")
             raise RuntimeError(f"the engine exited before it was ready (see {log})")
         CAL.run = boom
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertFalse(self.S.calibrate_config(cfg_path))
-        self.assertIn("the engine said: strata generate: --expert-cache-remote with a layer split", out.getvalue())
+        self.assertIn("the engine said: momoe generate: --expert-cache-remote with a layer split", out.getvalue())
         self.assertNotIn("an earlier start", out.getvalue())
         out = io.StringIO()
         with mock.patch.object(self.S, "ROOT", Path(self.tmp.name)), \

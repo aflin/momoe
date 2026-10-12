@@ -119,7 +119,7 @@ class GgufDirUnsupported(unittest.TestCase):
 
     def test_an_unsloth_ud_file_is_not_taken_for_a_gsq_rco_size(self):
         msg, hint = self.problem(self.UD)                   # IQ3_XXS: UD-IQ3_XXS has the size in its name
-        self.assertEqual(msg, "Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00003.gguf is UD-IQ3_XXS, a GGUF Strata "
+        self.assertEqual(msg, "Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00003.gguf is UD-IQ3_XXS, a GGUF Momoe "
                               "cannot run")
         self.assertIn("ISTA-DASLab's GSQ-RCO files", hint)
         self.assertIn("Unsloth's UD-Q4_K_XL and UD-IQ4_XS only", hint)
@@ -147,7 +147,7 @@ class GgufDirUnsupported(unittest.TestCase):
         self.assertIn("has no IQ3_XXS model file", out)
         self.assertIn("choose one of: UD-IQ4_XS, UD-Q4_K_XL (or IQ3_XXS: --family qwen --model IQ3_XXS, --family swift --model "
                       "IQ3_XXS, --family ornith --model IQ3_XXS, --family qwen36-bartowski --model IQ3_XXS)", out)
-        self.assertIn("Strata runs ISTA-DASLab's GSQ-RCO files", out)
+        self.assertIn("Momoe runs ISTA-DASLab's GSQ-RCO files", out)
 
 
 class ReadOnlyGgufDir(unittest.TestCase):
