@@ -2,7 +2,8 @@
 """Momoe: more MoEs, built on Strata (https://github.com/Niko1221/Strata).
 
     momoe setup [setup options]          install a model or change its settings (setup.py --setup), then start it
-    momoe start CONFIG [setup options]   start the server from a config, in the background
+    momoe start CONFIG [setup options]   start the server from a config, in the background; --host, --api-key,
+                                         --draft-vocab, --vram-reserve-mib apply to this start, --save keeps them
     momoe stop                           stop it
     momoe status                         is it running, which model, where
     momoe list                           the configs in config/
@@ -128,6 +129,15 @@ def api_key(cfg_path) -> str | None:
     return str(k).split(",")[0].strip() if k else None
 
 
+def server_key(s: dict) -> str | None:
+    """The running server's key: one given for this start only (momoe start --api-key without --save, kept in its
+    state), else its config's."""
+    k = s.get("api_key")
+    if isinstance(k, list):
+        k = k[0] if k else None
+    return str(k).split(",")[0].strip() if k else api_key(s.get("config"))
+
+
 def base_url(s: dict) -> str:
     host = s.get("host") or "127.0.0.1"
     host = "127.0.0.1" if host in ("0.0.0.0", "", "::", "localhost") else host
@@ -146,7 +156,7 @@ def http(method, url, key=None, body=None, timeout=5.0):
 
 def health(s: dict):
     try:
-        return http("GET", base_url(s) + "/health", api_key(s.get("config")), timeout=3)
+        return http("GET", base_url(s) + "/health", server_key(s), timeout=3)
     except (OSError, ValueError, urllib.error.URLError):
         return None
 
@@ -211,7 +221,7 @@ def cmd_stop(args) -> int:
     pid = s["pid"]
     say(f"Stopping {s.get('model') or 'the server'} (pid {pid}) ...")
     try:
-        http("POST", base_url(s) + "/shutdown", api_key(s.get("config")), {}, timeout=10)
+        http("POST", base_url(s) + "/shutdown", server_key(s), {}, timeout=10)
     except (OSError, ValueError, urllib.error.URLError) as e:
         say(f"  the server did not take the stop request ({e}): ending the process")
         terminate(pid)
@@ -404,7 +414,7 @@ def run_claude(s, h, args) -> int:
     model, ctx = h.get("model") or "momoe", int(h.get("max_context") or 0)
     env.update({
         "ANTHROPIC_BASE_URL": base_url(s),
-        "ANTHROPIC_AUTH_TOKEN": api_key(s["config"]) or "momoe",
+        "ANTHROPIC_AUTH_TOKEN": server_key(s) or "momoe",
         "ANTHROPIC_MODEL": model,
         "ANTHROPIC_DEFAULT_OPUS_MODEL": model, "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": model, "ANTHROPIC_SMALL_FAST_MODEL": model,
@@ -431,7 +441,7 @@ def run_codex(s, h, args) -> int:
             "show_raw_agent_reasoning=true"]                         # the model writes no reasoning summaries
     if ctx:
         over.append(f"model_context_window={ctx}")
-    key = api_key(s["config"])
+    key = server_key(s)
     if key:
         env["MOMOE_API_KEY"] = key
         over.append('model_providers.momoe.env_key="MOMOE_API_KEY"')
@@ -452,7 +462,7 @@ def run_opencode(s, h, args) -> int:
         entry["limit"] = {"context": ctx, "output": min(32768, ctx // 4)}
     cfg = {"$schema": "https://opencode.ai/config.json",
            "provider": {"momoe": {"npm": "@ai-sdk/openai-compatible", "name": "Momoe",
-                                  "options": {"baseURL": f"{base_url(s)}/v1", "apiKey": api_key(s["config"]) or "momoe"},
+                                  "options": {"baseURL": f"{base_url(s)}/v1", "apiKey": server_key(s) or "momoe"},
                                   "models": {model: entry}}},
            "model": f"momoe/{model}", "small_model": f"momoe/{model}"}
     env = dict(os.environ)
@@ -522,7 +532,7 @@ def run_unsloth(s, h, args) -> int:
         say(f"  Its provider \"Momoe\" points at {base_url(s)}/v1 ({h.get('model')}): pick it in the model menu.")
         if not started:
             say("  (reload the Studio page if it was open)")
-    if api_key(s["config"]):
+    if server_key(s):
         say("  This server needs an API key: enter it in the Momoe provider's settings in Studio.")
     return 0
 
@@ -627,7 +637,7 @@ def lmstudio_prepare(s, h, lms) -> bool:
     the plugin installed with `lms get` when it is not.  The settings come first: LM Studio reads them when it starts,
     and `lms get` starts it (as a service).  False when LM Studio must be restarted to read them."""
     was_running = lmstudio_running()
-    wrote = lmstudio_plugin_config(f"{base_url(s)}/v1", api_key(s["config"]))
+    wrote = lmstudio_plugin_config(f"{base_url(s)}/v1", server_key(s))
     wrote = lmstudio_model_list(h.get("model") or "") or wrote if h.get("model") else wrote
     if wrote:
         say(f"  LM Studio's {LMS_PLUGIN} plugin set to {base_url(s)}/v1 ({h.get('model')})")

@@ -429,11 +429,45 @@ class VramReserve(unittest.TestCase):
                     mock.patch.object(setup, "is_wsl", lambda: False), \
                     mock.patch.object(setup, "ensure_engine_for", lambda cards, path, cfg, yes: cfg), \
                     mock.patch.object(setup.subprocess, "call", call):
-                for n in ("2048", "1024"):
-                    _, out = quiet(setup.start, p, None, None, False, True, None, {"vram_reserve_mib": int(n)})
+                for n in ("2048", "1024"):                   # Momoe: --save writes it into the config
+                    _, out = quiet(setup.start, p, None, None, False, True, None, {"vram_reserve_mib": int(n)},
+                                   save=True)
                     self.assertEqual(json.loads(p.read_text())["args"], ["--kv", "int8", "--vram-reserve-mib", n])
+                self.assertNotIn("--config-override", call.call_args[0][0])
+                _, out2 = quiet(setup.start, p, None, None, False, True, None, {"vram_reserve_mib": 512})
+                self.assertEqual(json.loads(p.read_text())["args"], ["--kv", "int8", "--vram-reserve-mib", "1024"])
+                cmd = call.call_args[0][0]                   # without --save: this start only, the file unchanged
+                over = json.loads(cmd[cmd.index("--config-override") + 1])
+                self.assertEqual(over, {"args": ["--kv", "int8", "--vram-reserve-mib", "512"]})
         self.assertIn("1024 MiB of VRAM kept free", out)
+        self.assertIn("this start only (--save keeps it): vram reserve mib 512", out2)
         self.assertTrue(call.called)
+
+    def test_host_and_key_on_a_start(self):
+        """Momoe: momoe start --host/--api-key apply to that start only; --save keeps them in the config."""
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "strata.exe"
+            exe.write_bytes(b"")
+            p = Path(d) / "strata-q2_0.json"
+            p.write_text(json.dumps({"exe": str(exe), "args": ["--kv", "int8"], "gpu": 0, "gpus_asked": True}))
+            call = mock.Mock(return_value=0)
+            with mock.patch.object(setup, "gpus", lambda: self.found), \
+                    mock.patch.object(setup, "is_wsl", lambda: False), \
+                    mock.patch.object(setup, "ensure_engine_for", lambda cards, path, cfg, yes: cfg), \
+                    mock.patch.object(setup.subprocess, "call", call):
+                keep = {"host": "0.0.0.0", "api_key": "k1"}
+                quiet(setup.start, p, None, None, False, True, None, keep)
+                self.assertNotIn("host", json.loads(p.read_text()))
+                cmd = call.call_args[0][0]
+                self.assertEqual(json.loads(cmd[cmd.index("--config-override") + 1]), keep)
+                quiet(setup.start, p, None, None, False, True, None, keep, save=True)
+                self.assertEqual({k: json.loads(p.read_text())[k] for k in keep}, keep)
+                self.assertNotIn("--config-override", call.call_args[0][0])
+                quiet(setup.start, p, None, None, False, True, None, keep)   # already so: nothing to lay over
+                self.assertNotIn("--config-override", call.call_args[0][0])
+                _, out = quiet(setup.start, p, None, None, False, True, None, {"api_key": "", "host": ""}, save=True)
+                self.assertFalse({"api_key", "host"} & set(json.loads(p.read_text())))   # "" with --save: removed
+                self.assertIn("removed for this model: api key (no key now), host (127.0.0.1, this PC only)", out)
 
 
 class SmallCardTip(unittest.TestCase):

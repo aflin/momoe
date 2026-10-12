@@ -6168,8 +6168,15 @@ def main() -> int:
                     help="data-parallel replicas (opt-in): cut the \"gpu\" list into N equal groups and run one engine on "
                          "each, requests spread over them (also \"replicas\" in the config: a number, or "
                          "[{\"gpus\": [0, 1]}, {\"gpus\": [2, 3]}])")
+    ap.add_argument("--config-override", help="Momoe: a JSON object laid over the config for this start only (momoe "
+                                              "start --host/--api-key/... without --save); the file is not changed")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text(encoding="utf-8-sig")) if a.config else {}   # Notepad adds a BOM
+    if a.config_override:
+        over = json.loads(a.config_override)
+        if not isinstance(over, dict):
+            ap.error("--config-override takes a JSON object")
+        cfg.update(over)
     lift_reasoning_effort_arg(cfg)
     if a.replicas is not None:
         cfg["replicas"] = a.replicas

@@ -276,6 +276,12 @@ class Momoe(unittest.TestCase):
             self.assertTrue(momoe.lmstudio_prepare(s, {"model": "m1"}, "/x/lms"))   # running, nothing to write
             self.assertFalse(momoe.lmstudio_prepare({**s, "port": 8080}, {"model": "m1"}, "/x/lms"))  # restart
 
+    def test_server_key(self):
+        c = self.t / "c.json"
+        c.write_text(json.dumps({"api_key": "from-config"}))
+        self.assertEqual(momoe.server_key({"config": str(c)}), "from-config")
+        self.assertEqual(momoe.server_key({"config": str(c), "api_key": "once,two"}), "once")   # this start's own
+
     def test_base_url_and_key(self):
         self.assertEqual(momoe.base_url({"host": "0.0.0.0", "port": 8080}), "http://127.0.0.1:8080")
         self.assertEqual(momoe.base_url({"port": 8090}), "http://127.0.0.1:8090")

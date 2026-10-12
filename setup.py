@@ -4200,15 +4200,27 @@ def settings_summary(cfg: dict, port=None) -> str:
 
 
 def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_browser=True, yes=False,
-          layer_split=None, keep=None) -> int:
-    """keep: settings given on this start that the model keeps from now on (--host, --api-key, --draft-vocab,
-    --vram-reserve-mib)."""
+          layer_split=None, keep=None, save=False) -> int:
+    """keep: settings given on this start (--host, --api-key, --draft-vocab, --vram-reserve-mib).  Momoe: they apply
+    to this start only (the server gets them as --config-override; the config file is left as it is), unless `save`
+    (--save) writes them into the config as well."""
     cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
     missing = [p for p in [cfg["exe"], *[a for a in cfg["args"] if a.endswith(".gguf")]] if not Path(p).exists()]
     if missing:
         fail(f"{cfg_path.name} refers to missing files: {missing[0]}", "run it again with --setup to repair")
     keep = {k: v for k, v in (keep or {}).items() if v is not None}
     reserve = keep.pop("vram_reserve_mib", None)       # #493: an engine argument, kept in the config's args
+    if not save:                                       # Momoe: this start only, laid over the config at the launch
+        once = {k: v for k, v in keep.items() if cfg.get(k) != v}
+        if reserve is not None:
+            once["vram_reserve_mib"] = reserve
+        if once:
+            ok("this start only (--save keeps it): " + ", ".join(
+                "api key" if k == "api_key" else ("the browser opens" if v else "no browser") if k == "open_browser"
+                else f"{k.replace('_', ' ')} {v}" for k, v in once.items()))
+        keep, reserve = {}, None
+    else:
+        once = {}
     if reserve is not None:
         args = cfg["args"]
         if "--vram-reserve-mib" in args[:-1]:
@@ -4217,6 +4229,15 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
             args += ["--vram-reserve-mib", str(reserve)]
         write_config(cfg_path, cfg)
         ok(f"saved for this model: {reserve} MiB of VRAM kept free for other programs (--vram-reserve-mib)")
+    gone = [k for k, v in keep.items() if v == "" and k in cfg]   # Momoe: --api-key "" --save removes the key
+    keep = {k: v for k, v in keep.items() if v != ""}
+    if gone:
+        for k in gone:
+            del cfg[k]
+        write_config(cfg_path, cfg)
+        ok("removed for this model: " + ", ".join(
+            "api key (no key now)" if k == "api_key" else "host (127.0.0.1, this PC only)" if k == "host"
+            else k.replace("_", " ") for k in gone))
     if keep and any(cfg.get(k) != v for k, v in keep.items()):   # #179: a --host/--api-key on a start was ignored
         cfg.update(keep)
         write_config(cfg_path, cfg)
@@ -4225,7 +4246,8 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
             else f"{k.replace('_', ' ')} {v}" for k, v in keep.items()))
     cfg_path.touch()                                     # the most recently used model
     if "--mtp" in cfg["args"][:-1]:
-        refresh_draft_vocab(Path(cfg["args"][cfg["args"].index("--mtp") + 1]), cfg.get("draft_vocab", "cjk"))
+        refresh_draft_vocab(Path(cfg["args"][cfg["args"].index("--mtp") + 1]),
+                            once.get("draft_vocab") or cfg.get("draft_vocab", "cjk"))
     if point_draft_vocab(cfg):
         write_config(cfg_path, cfg)
     if isinstance(gpu, list) and one_gpu_family(cfg_path):
@@ -4327,11 +4349,25 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
         say("  restart). That is normal: please wait and don't close this window - the server says when it is ready.")
         say("  Later, closing this window stops the model.")
     say("  " + "-" * 100)
-    for n, line in enumerate(textwrap.wrap(f"Settings ({cfg_path.name}): {settings_summary(cfg, port)}", 100,
+    run_cfg = cfg
+    if once:                                           # Momoe: --host/--api-key/... for this start only
+        over = {k: v for k, v in once.items() if k != "vram_reserve_mib"}
+        args = list(cfg["args"])
+        if "vram_reserve_mib" in once:
+            if "--vram-reserve-mib" in args[:-1]:
+                args[args.index("--vram-reserve-mib") + 1] = str(once["vram_reserve_mib"])
+            else:
+                args += ["--vram-reserve-mib", str(once["vram_reserve_mib"])]
+        run_cfg = {**cfg, **over, "args": args}
+        point_draft_vocab(run_cfg)                     # a --draft-vocab of this start: the file it names
+        if run_cfg["args"] != cfg["args"]:
+            over["args"] = run_cfg["args"]
+        cmd += ["--config-override", json.dumps(over)]
+    for n, line in enumerate(textwrap.wrap(f"Settings ({cfg_path.name}): {settings_summary(run_cfg, port)}", 100,
                                            break_on_hyphens=False)):   # #564: what this start uses
         say(("  " if n == 0 else "    ") + line)
     if DETACH:
-        return start_detached(cmd, cfg_path, cfg, port or cfg.get("port", 8080))
+        return start_detached(cmd, cfg_path, run_cfg, port or cfg.get("port", 8080), once_key="api_key" in once)
     if not WIN and os.environ.get("STRATA_EXECV"):
         # Replace this process instead of spawning a child. The Docker image sets STRATA_EXECV=1,
         # so there the server is PID 1 and docker stop's SIGTERM reaches the process that can
@@ -4344,7 +4380,7 @@ DETACH = False                                         # momoe: --detach starts 
 MOMOE_DIR = ROOT / ".momoe"                            # momoe's state: server.json (the running server), its log
 
 
-def start_detached(cmd, cfg_path: Path, cfg: dict, port) -> int:
+def start_detached(cmd, cfg_path: Path, cfg: dict, port, once_key=False) -> int:
     """Momoe: the server in the background (its own session / process group, no window), its output in
     .momoe/server.log; .momoe/server.json says which one runs.  Returns when the server says it is ready (0), or
     when it ends first (1).  Ctrl+C while waiting leaves it starting."""
@@ -4360,6 +4396,8 @@ def start_detached(cmd, cfg_path: Path, cfg: dict, port) -> int:
                                 env={**os.environ, "PYTHONUNBUFFERED": "1"}, **kw)
     state = {"pid": proc.pid, "port": int(port), "config": str(cfg_path), "host": cfg.get("host") or "127.0.0.1",
              "model": cfg.get("model_name"), "log": str(log), "started": time.time()}
+    if once_key:                                       # a key for this start only: momoe run and stop need it
+        state["api_key"] = cfg.get("api_key")
     (MOMOE_DIR / "server.json").write_text(json.dumps(state, indent=1), encoding="utf-8")
     (MOMOE_DIR / "last.json").write_text(json.dumps({"config": str(cfg_path)}), encoding="utf-8")   # momoe run
     say(f"  started in the background (pid {proc.pid}); its output: {log}")
@@ -4839,6 +4877,9 @@ def main() -> int:
     ap.add_argument("--host", help="where the server listens: 127.0.0.1 = this PC only (default), 0.0.0.0 = also other "
                                    "devices on your network (issue #26; set --api-key too)")
     ap.add_argument("--api-key", help="require this key from clients (recommended with --host 0.0.0.0); several keys: key1,key2")
+    ap.add_argument("--save", action="store_true",
+                    help="momoe start: also write --host, --api-key, --draft-vocab and --vram-reserve-mib into the "
+                         "config (without it they apply to this start only)")
     ap.add_argument("--no-browser", dest="browser", action="store_false", default=None,
                     help="do not open the chat page in the browser when the model is ready (for a harness or an app "
                          "that uses the API; remembered for this model, also in run-<model>.bat/.sh)")
@@ -4985,7 +5026,7 @@ def main() -> int:
         if not model_config(cfg_file.resolve()):
             fail(f"{a.config} is not a model config (no \"exe\" or \"args\")")
         update_installed_engine()
-        return start(cfg_file.resolve(), a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
+        return start(cfg_file.resolve(), a.port, run_gpu, yes=a.yes, layer_split=a.layer_split, save=a.save,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib})
     if have and a.calibrate and not (a.setup or a.model or a.family or a.check):
@@ -5000,13 +5041,13 @@ def main() -> int:
             say()
             warn("this PC is NOT tuned: the tuning failed (the reason is above); the model "
                  + ("keeps" if a.no_start else "starts with") + " the default settings")
-        return 0 if a.no_start else start(pick_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
+        return 0 if a.no_start else start(pick_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split, save=a.save,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
     if have and not (a.setup or a.model or a.family or a.check or a.no_start):
         update_installed_engine()
         if len(have) == 1:
-            return start(have[0], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
+            return start(have[0], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split, save=a.save,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
         say()
@@ -5015,7 +5056,7 @@ def main() -> int:
         say(f"  {len(have) + 1}) install another model / change settings")
         pick = int(ask("Which one?", [str(i) for i in range(1, len(have) + 2)], "1", a.yes))
         if pick <= len(have):
-            return start(have[pick - 1], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
+            return start(have[pick - 1], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split, save=a.save,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
 

@@ -117,7 +117,8 @@ settings for that run only and installs nothing: a missing tool is named, with h
 
 Any OpenAI- or Anthropic-compatible client can use the server directly at `http://127.0.0.1:<port>/v1`; the port is
 in the config, and `momoe status` shows it. The server listens on 127.0.0.1 only. Reaching it from another device needs
-`--host` together with `--api-key`.
+`--host` together with `--api-key`, for example `momoe start ornith-8gb --host 0.0.0.0 --api-key KEY`. Given to
+`momoe start`, they apply to that start only; add `--save` to keep them in the config.
 
 ## Where things are
 
