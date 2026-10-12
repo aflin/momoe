@@ -6,9 +6,15 @@
     momoe stop                           stop it
     momoe status                         is it running, which model, where
     momoe list                           the configs in config/
-    momoe run claude|codex|opencode [their arguments]
+    momoe run claude|codex|opencode [--config CONFIG] [their arguments]
                                          start that agent, talking to this server (started first if needed)
-    momoe run unsloth|lmstudio           open that app, pointed at this server
+    momoe run unsloth|lmstudio [--config CONFIG]
+                                         open that app, pointed at this server
+
+`momoe run` with no server running starts --config CONFIG, else asks which config when there are several (Enter: the
+one started last; without a terminal it takes that one).  --config goes right after the tool's name (or before it):
+later arguments are the tool's own.  With a server running it is used; a --config naming another one is refused
+(momoe stop first).
 
 Nothing is installed by `momoe run`: a tool that is missing is named with how to install it.  The agents get their
 settings for that run only (environment variables and command-line overrides): your own configs stay as they are.
@@ -250,7 +256,9 @@ def terminate(pid, hard=False):
 def cmd_status(args) -> int:
     s = running()
     if s is None:
-        say("No momoe server is running." + (f" Last config: {configs()[0].name}" if configs() else ""))
+        last = state_last()
+        last = Path(last).name if last and Path(last).is_file() else (configs()[0].name if configs() else None)
+        say("No momoe server is running." + (f" Last config: {last}" if last else ""))
         return 3
     h = health(s)
     up = time.time() - float(s.get("started", time.time()))
@@ -279,14 +287,45 @@ def cmd_list(args) -> int:
 
 
 # ------------------------------------------------------------------------------------------------ run <tool>
-def ensure_server():
-    """The running server's state and /health; one is started first (the last config started) when none runs."""
+def pick_config() -> Path:
+    """The config `momoe run` starts when none was named: the only one, else asked (Enter: the one started last, or
+    the newest); without a terminal, that default."""
+    have = configs()
+    if not have:
+        die("no model is set up yet: momoe setup")
+    last = Path(state_last()) if state_last() else None
+    default = next((p for p in have if last is not None and p.resolve() == last.resolve()), have[0])
+    if len(have) == 1 or not sys.stdin.isatty():
+        return default
+    have = [default, *(p for p in have if p != default)]
+    say("No momoe server is running. Which config?")
+    for i, p in enumerate(have, 1):
+        c = read_json(p) or {}
+        say(f"  {i}) {p.name:36} {c.get('model_name', '')}" + ("   (started last)" if p == default and last else ""))
+    while True:
+        try:
+            typed = input(f"Config [1]: ").strip()
+        except EOFError:
+            return default
+        if not typed:
+            return default
+        if typed.isdigit() and 1 <= int(typed) <= len(have):
+            return have[int(typed) - 1]
+        hit = [p for p in have if typed in (p.name, p.stem, p.stem[len("strata-"):])]
+        if hit:
+            return hit[0]
+        say(f"  a number from 1 to {len(have)}, or a config's name")
+
+
+def ensure_server(cfg: Path | None = None):
+    """The running server's state and /health; one is started first when none runs: `cfg` (--config), else
+    pick_config.  A running server is used as is; a `cfg` that is not the one running is refused."""
     s = running()
+    if s is not None and cfg is not None and Path(s.get("config", "")).resolve() != cfg.resolve():
+        die(f"{s.get('model') or Path(s['config']).name} is running ({Path(s['config']).name}), not {cfg.name}: "
+            "momoe stop first, or leave out --config to use it")
     if s is None:
-        last = Path(state_last()) if state_last() else None
-        cfg = last if last is not None and last.is_file() else (configs() or [None])[0]
-        if cfg is None:
-            die("no model is set up yet: momoe setup")
+        cfg = cfg or pick_config()
         say(f"Starting {cfg.name} first ...")
         if start_config(cfg) != 0:
             die("the server did not start (the lines above)")
@@ -503,27 +542,146 @@ def lmstudio_paths():
         else:
             for d in (home / "Applications", home / "Downloads", home, Path("/opt")):
                 cands += sorted(d.glob("LM-Studio*.AppImage")) + sorted(d.glob("LM_Studio*.AppImage"))
-            cands += [Path("/opt/LM Studio/lm-studio"), Path("/usr/bin/lm-studio")]
+            cands += [Path("/opt/LM Studio/lm-studio"), Path("/opt/LM-Studio/lm-studio"), Path("/usr/bin/lm-studio")]
         app = next((str(p) for p in cands if p.exists()), None)
     return app, lms
+
+
+LMS_PLUGIN = "nm-z/openai-compat-endpoint"          # the community plugin LM Studio reaches another server through
+
+
+def lmstudio_home() -> Path:
+    return Path.home() / ".lmstudio"
+
+
+def lmstudio_running() -> bool:
+    """LM Studio (its window, or the service `lms` starts) runs now."""
+    try:
+        import psutil
+    except ImportError:
+        return False
+    names = {"lm-studio", "lm studio", "lm studio.exe", "lm studio helper"}
+    for p in psutil.process_iter(["name"]):
+        try:
+            if (p.info.get("name") or "").lower() in names:
+                return True
+        except (psutil.Error, OSError):
+            pass
+    return False
+
+
+def superjson_load(path: Path) -> dict:
+    """LM Studio's SuperJSON files: {"json": ..., "meta": {"values": {key: ["map"]}}}; the maps as [[key, value], ..]."""
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) and isinstance(d.get("json"), dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def lmstudio_plugin_config(base: str, key: str | None) -> bool:
+    """The plugin's global settings (LM Studio's .internal/global-plugin-configs.json: {plugins: Map(plugin ->
+    {fields: [{key, value}]})}) point at `base`, and carry the server's API key when it has one; other plugins'
+    settings are kept.  True when the file was written."""
+    path = lmstudio_home() / ".internal" / "global-plugin-configs.json"
+    d = superjson_load(path)
+    plugins = d.get("json", {}).get("plugins") if d else None
+    plugins = [x for x in plugins if isinstance(x, list) and len(x) == 2] if isinstance(plugins, list) else []
+    entry = next((x for x in plugins if x[0] == LMS_PLUGIN), None)
+    fields = list((entry[1] or {}).get("fields") or []) if entry and isinstance(entry[1], dict) else []
+    want = {"overrideBaseUrl": base, **({"openaiApiKey": key} if key else {})}
+    have = {f.get("key"): f.get("value") for f in fields if isinstance(f, dict)}
+    if all(have.get(k) == v for k, v in want.items()):
+        return False
+    fields = [f for f in fields if not (isinstance(f, dict) and f.get("key") in want)]
+    fields += [{"key": k, "value": v} for k, v in want.items()]
+    plugins = [x for x in plugins if x[0] != LMS_PLUGIN] + [[LMS_PLUGIN, {"fields": fields}]]
+    meta = (d.get("meta") or {}) if d else {}
+    values = dict(meta.get("values") or {})
+    values["plugins"] = ["map"]
+    out = {**(d or {}), "json": {**((d or {}).get("json") or {}), "plugins": plugins}, "meta": {**meta, "values": values}}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".momoe-tmp")
+    tmp.write_text(json.dumps(out), encoding="utf-8")
+    os.replace(tmp, path)
+    return True
+
+
+def lmstudio_model_list(model: str) -> bool:
+    """The plugin's model list (~/.lmstudio/openai-compat-endpoint/models-cache.json, read when it starts) has the
+    server's model, so it is in LM Studio's menu without first sending a message.  True when written."""
+    path = lmstudio_home() / "openai-compat-endpoint" / "models-cache.json"
+    d = read_json(path)
+    d = d if isinstance(d, dict) else {}
+    models = [m for m in (d.get("models") or []) if isinstance(m, str)]
+    if model in models:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"models": [model, *models], "lastSelected": d.get("lastSelected") or model}, indent=2),
+                    encoding="utf-8")
+    return True
+
+
+def lmstudio_prepare(s, h, lms) -> bool:
+    """LM Studio set up to reach this server: the plugin's settings and model list written when they are not, then
+    the plugin installed with `lms get` when it is not.  The settings come first: LM Studio reads them when it starts,
+    and `lms get` starts it (as a service).  False when LM Studio must be restarted to read them."""
+    was_running = lmstudio_running()
+    wrote = lmstudio_plugin_config(f"{base_url(s)}/v1", api_key(s["config"]))
+    wrote = lmstudio_model_list(h.get("model") or "") or wrote if h.get("model") else wrote
+    if wrote:
+        say(f"  LM Studio's {LMS_PLUGIN} plugin set to {base_url(s)}/v1 ({h.get('model')})")
+    if not (lmstudio_home() / "extensions" / "plugins" / LMS_PLUGIN / "manifest.json").is_file():
+        if lms is None:
+            say(f"  The {LMS_PLUGIN} plugin is not installed, and LM Studio's lms command is not found: install it "
+                f"from https://lmstudio.ai/{LMS_PLUGIN} (\"Run in LM Studio\")")
+        else:
+            say(f"  Installing LM Studio's {LMS_PLUGIN} plugin (lms get) ...")
+            r = subprocess.run([lms, "get", LMS_PLUGIN, "-y"], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+            if r.returncode != 0:
+                say(f"  lms get failed ({r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}")
+                say(f"  install it from https://lmstudio.ai/{LMS_PLUGIN} (\"Run in LM Studio\")")
+    if wrote and was_running:
+        say("  LM Studio is running and reads these settings when it starts: quit it (also from the tray icon) and run")
+        say("  momoe run lmstudio again.")
+        return False
+    return True
+
+
+def has_display() -> bool:
+    """A desktop app can open a window from here: Windows and macOS always; Linux with DISPLAY or WAYLAND_DISPLAY
+    (not set in an ssh terminal, or a tmux / screen started outside the desktop)."""
+    return WIN or sys.platform == "darwin" or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def run_lmstudio(s, h, args) -> int:
     app, lms = lmstudio_paths()
     if app is None:
         return missing("LM Studio", INSTALL["lmstudio"])
+    if not lmstudio_prepare(s, h, lms):
+        return 1
     log = STATE_DIR / "lmstudio.log"
+    STATE_DIR.mkdir(exist_ok=True)
+    seen = log.stat().st_size if log.exists() else 0
     if sys.platform == "darwin":
         detached(["open", "-a", app], log)
     else:
-        detached([app, *args], log)
-    say("LM Studio is starting. It runs its own models, so it reaches this server through a plugin:")
-    say("  1. In LM Studio, install the plugin openai-compat-endpoint:")
-    say("       https://lmstudio.ai/nm-z/openai-compat-endpoint   (\"Run in LM Studio\")")
-    say(f"  2. In the plugin's settings, set the base URL to {base_url(s)}/v1"
-        + (" and the API key to the server's key" if api_key(s["config"]) else ""))
-    say(f"  3. Pick {h.get('model')} in the model menu.")
-    say("  (The plugin is a community one, not LM Studio's own.)")
+        proc = detached([app, *args], log)
+        end = time.time() + 8                          # a start that fails ends within seconds (no display, ...)
+        while proc.poll() is None and time.time() < end:
+            time.sleep(0.5)
+        if proc.poll() is not None:
+            with open(log, "rb") as f:
+                f.seek(seen)
+                new = f.read().decode("utf-8", "replace")
+            if "Another instance" not in new:          # an LM Studio already open is brought forward instead
+                say(f"LM Studio did not start (exit code {proc.returncode}); the end of {log}:")
+                for line in new.strip().splitlines()[-8:]:
+                    say("  " + line)
+                return 1
+    say(f"LM Studio is starting. In a chat, open \"Pick a model\": under Your Generators, {LMS_PLUGIN}")
+    say(f"(start it if it says Not Running), then {h.get('model')} in its Model setting.  The plugin is a community")
+    say("one, not LM Studio's own.  momoe stop ends this server; closing LM Studio does not.")
     return 0
 
 
@@ -531,9 +689,30 @@ TOOLS = {"claude": run_claude, "codex": run_codex, "opencode": run_opencode, "un
          "lmstudio": run_lmstudio}
 
 
+def run_config(args: list) -> tuple:
+    """`momoe run`'s own --config CONFIG (or --config=CONFIG), before the tool's name or right after it: (the config
+    named or None, the arguments without it).  Only one is taken: a --config further on is the tool's own (Codex has
+    one)."""
+    out = list(args)
+    for i in (0, 1):
+        a = out[i] if i < len(out) else ""
+        if a != "--config" and not a.startswith("--config="):
+            continue
+        if "=" in a:
+            name, n = a.split("=", 1)[1], 1
+        elif i + 1 < len(out):
+            name, n = out[i + 1], 2
+        else:
+            die("--config takes a config's name: momoe run TOOL --config CONFIG (momoe list shows them)")
+        del out[i:i + n]
+        return find_config(name), out
+    return None, out
+
+
 def cmd_run(args) -> int:
+    cfg, args = run_config(args)
     if not args or args[0] not in TOOLS:
-        die("momoe run " + "|".join(TOOLS) + " [arguments]")
+        die("momoe run " + "|".join(TOOLS) + " [--config CONFIG] [arguments]")
     tool = args[0]
     # a missing tool is named before the model is started for it
     if tool == "lmstudio":
@@ -542,7 +721,11 @@ def cmd_run(args) -> int:
     elif which(tool) is None:
         return missing({"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode",
                         "unsloth": "Unsloth Studio"}[tool], INSTALL[tool])
-    s, h = ensure_server()
+    if tool == "lmstudio" and not has_display():       # checked before a server is started for it
+        die("LM Studio is a desktop app, and this terminal has no display (DISPLAY is not set: an ssh terminal, or a "
+            "tmux / screen started outside the desktop). Run it from a terminal on the desktop, or set DISPLAY first "
+            "(export DISPLAY=:0 for the first desktop)")
+    s, h = ensure_server(cfg)
     return TOOLS[tool](s, h, args[1:])
 
 

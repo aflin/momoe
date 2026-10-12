@@ -154,12 +154,62 @@ class Momoe(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.t = Path(self.tmp.name)
-        self.p = mock.patch.object(momoe, "ROOT", self.t)
-        self.p.start()
+        self.ps = [mock.patch.object(momoe, "ROOT", self.t), mock.patch.object(momoe, "STATE_DIR", self.t / ".momoe"),
+                   mock.patch.object(momoe, "STATE", self.t / ".momoe" / "server.json")]
+        for p in self.ps:
+            p.start()
 
     def tearDown(self):
-        self.p.stop()
+        for p in self.ps:
+            p.stop()
         self.tmp.cleanup()
+
+    def three(self):
+        cfg = {"exe": "x", "args": ["--max-context", "32768"]}
+        (self.t / "config").mkdir()
+        for n in ("a", "b", "c"):
+            (self.t / "config" / f"{n}.json").write_text(json.dumps({**cfg, "setup_tag": n, "model_name": n}))
+        (self.t / ".momoe").mkdir()
+        (self.t / ".momoe" / "last.json").write_text(json.dumps({"config": str(self.t / "config" / "b.json")}))
+
+    def test_run_config(self):
+        self.three()
+        b = (self.t / "config" / "b.json").resolve()
+        self.assertEqual(momoe.run_config(["claude", "--config", "b", "-p", "hi"]), (b, ["claude", "-p", "hi"]))
+        self.assertEqual(momoe.run_config(["--config=b.json", "unsloth"]), (b, ["unsloth"]))
+        self.assertEqual(momoe.run_config(["--config", "b", "codex", "--config", "k=v"]),
+                         (b, ["codex", "--config", "k=v"]))                  # the second one is Codex's own
+        self.assertEqual(momoe.run_config(["codex", "-m", "x", "--config", "k=v"]),
+                         (None, ["codex", "-m", "x", "--config", "k=v"]))
+        with self.assertRaises(SystemExit):
+            momoe.run_config(["claude", "--config", "missing"])
+
+    def test_pick_config(self):
+        self.three()
+        c = self.t / "config"
+        with mock.patch.object(momoe.sys.stdin, "isatty", lambda: False):
+            self.assertEqual(momoe.pick_config(), c / "b.json")              # no terminal: the one started last
+        with mock.patch.object(momoe.sys.stdin, "isatty", lambda: True), mock.patch.object(momoe, "say"), \
+                mock.patch("builtins.input", side_effect=["", "9", "2", "c"]):
+            self.assertEqual(momoe.pick_config(), c / "b.json")              # Enter: the one started last
+            self.assertIn(momoe.pick_config(), (c / "a.json", c / "c.json"))  # 9: asked again, then 2
+            self.assertEqual(momoe.pick_config(), c / "c.json")              # by name
+        for n in ("a", "c"):
+            (c / f"{n}.json").unlink()
+        with mock.patch.object(momoe.sys.stdin, "isatty", lambda: True), \
+                mock.patch("builtins.input", side_effect=AssertionError("asked")):
+            self.assertEqual(momoe.pick_config(), c / "b.json")              # only one: not asked
+
+    def test_a_running_server_is_not_switched(self):
+        self.three()
+        c = self.t / "config"
+        st = {"pid": 1, "config": str(c / "a.json"), "model": "a"}
+        with mock.patch.object(momoe, "running", lambda: st), mock.patch.object(momoe, "health", lambda s: {}), \
+                mock.patch.object(momoe, "start_config", mock.Mock(side_effect=AssertionError("started"))):
+            self.assertEqual(momoe.ensure_server(), (st, {}))               # no --config: the running one
+            self.assertEqual(momoe.ensure_server(c / "a.json"), (st, {}))
+            with self.assertRaises(SystemExit):
+                momoe.ensure_server(c / "b.json")
 
     def test_configs(self):
         cfg = {"exe": "strata", "args": ["--max-context", "32768"]}
@@ -175,6 +225,56 @@ class Momoe(unittest.TestCase):
         self.assertEqual(momoe.find_config("q2_0").name, "strata-q2_0.json")
         with self.assertRaises(SystemExit):
             momoe.find_config("missing")
+
+    def test_lmstudio_plugin_settings(self):
+        home = self.t / "lmstudio"
+        cfgf = home / ".internal" / "global-plugin-configs.json"
+        with mock.patch.object(momoe, "lmstudio_home", lambda: home):
+            self.assertTrue(momoe.lmstudio_plugin_config("http://127.0.0.1:8090/v1", None))
+            self.assertEqual(json.loads(cfgf.read_text()), {   # the layout LM Studio itself read (2026-10-12)
+                "json": {"plugins": [[momoe.LMS_PLUGIN, {"fields": [
+                    {"key": "overrideBaseUrl", "value": "http://127.0.0.1:8090/v1"}]}]]},
+                "meta": {"values": {"plugins": ["map"]}}})
+            self.assertFalse(momoe.lmstudio_plugin_config("http://127.0.0.1:8090/v1", None))   # already so
+            d = json.loads(cfgf.read_text())                 # another plugin's settings, and one of this plugin's own
+            d["json"]["plugins"].insert(0, ["x/other", {"fields": [{"key": "a", "value": 1}]}])
+            d["json"]["plugins"][1][1]["fields"].append({"key": "extra", "value": "kept"})
+            cfgf.write_text(json.dumps(d))
+            self.assertTrue(momoe.lmstudio_plugin_config("http://127.0.0.1:8080/v1", "k1"))  # another port, a key
+            got = dict(json.loads(cfgf.read_text())["json"]["plugins"])
+            self.assertEqual(got["x/other"], {"fields": [{"key": "a", "value": 1}]})
+            self.assertEqual({f["key"]: f["value"] for f in got[momoe.LMS_PLUGIN]["fields"]},
+                             {"overrideBaseUrl": "http://127.0.0.1:8080/v1", "openaiApiKey": "k1", "extra": "kept"})
+            self.assertTrue(momoe.lmstudio_model_list("m1"))
+            self.assertFalse(momoe.lmstudio_model_list("m1"))
+            self.assertTrue(momoe.lmstudio_model_list("m2"))
+            cache = json.loads((home / "openai-compat-endpoint" / "models-cache.json").read_text())
+            self.assertEqual(cache, {"models": ["m2", "m1"], "lastSelected": "m1"})
+
+    def test_lmstudio_prepare_order(self):
+        home = self.t / "lmstudio"
+        cfgf = home / ".internal" / "global-plugin-configs.json"
+        seen = []
+
+        def fake_run(cmd, **kw):                             # lms get starts LM Studio: the settings must be there
+            seen.append((cmd[1:], cfgf.is_file()))
+            m = home / "extensions" / "plugins" / momoe.LMS_PLUGIN / "manifest.json"
+            m.parent.mkdir(parents=True)
+            m.write_text("{}")
+            return mock.Mock(returncode=0)
+        s = {"port": 8090, "config": str(self.t / "c.json")}
+        (self.t / "c.json").write_text("{}")
+        with mock.patch.object(momoe, "lmstudio_home", lambda: home), mock.patch.object(momoe, "say"), \
+                mock.patch.object(momoe, "lmstudio_running", lambda: False), \
+                mock.patch.object(momoe.subprocess, "run", fake_run):
+            self.assertTrue(momoe.lmstudio_prepare(s, {"model": "m1"}, "/x/lms"))
+            self.assertEqual(seen, [(["get", momoe.LMS_PLUGIN, "-y"], True)])
+            self.assertTrue(momoe.lmstudio_prepare(s, {"model": "m1"}, "/x/lms"))   # all there: nothing again
+            self.assertEqual(len(seen), 1)
+        with mock.patch.object(momoe, "lmstudio_home", lambda: home), mock.patch.object(momoe, "say"), \
+                mock.patch.object(momoe, "lmstudio_running", lambda: True):
+            self.assertTrue(momoe.lmstudio_prepare(s, {"model": "m1"}, "/x/lms"))   # running, nothing to write
+            self.assertFalse(momoe.lmstudio_prepare({**s, "port": 8080}, {"model": "m1"}, "/x/lms"))  # restart
 
     def test_base_url_and_key(self):
         self.assertEqual(momoe.base_url({"host": "0.0.0.0", "port": 8080}), "http://127.0.0.1:8080")
