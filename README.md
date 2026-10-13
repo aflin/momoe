@@ -1,7 +1,7 @@
 <h1 align="center">momoe</h1>
 
 <p align="center"><b>More MoEs: large mixture-of-experts models on one graphics card plus system RAM</b><br>
-a fork of <a href="https://github.com/Niko1221/Strata">Strata</a> · tested on Linux with NVIDIA · free and open source (MIT)</p>
+a fork of <a href="https://github.com/Niko1221/Strata">Strata</a> · tested on Linux with NVIDIA and on Apple Silicon Macs · free and open source (MIT)</p>
 
 ## Built on Strata
 
@@ -32,7 +32,7 @@ default behaviour unchanged. Momoe is the place for those changes:
 - **Agents first.** `momoe run claude` (or Codex, OpenCode, Unsloth Studio, LM Studio) starts the model and the tool,
   already connected to each other. There is no web page: the server is for your apps and agents.
 - **More platforms.** The aims are Windows and Apple Silicon Macs, including Flash-Next on a 32 GB MacBook by reading
-  its experts from the SSD as they are needed. Neither works yet.
+  its experts from the SSD as they are needed. Macs have a first version (below); Windows does not work yet.
 - **Built from source.** Momoe compiles its engine on your PC; there are no ready-made downloads.
 
 ## How it is written
@@ -51,11 +51,15 @@ Early, and maintained by one person.
   - Flash-Next, its Coder, Qwen3.6, Ornith and KAT-Coder have been set up and have answered on that PC.
   - `momoe run` has been used there with Claude Code, Codex, OpenCode, Unsloth Studio and LM Studio.
 - **Not tested in Momoe:**
-  - Windows, macOS, and AMD or Intel cards;
+  - Windows, and AMD or Intel cards;
   - several GPUs with the Qwen3.6 family (it runs on one GPU);
   - Swift 1.5 and Unsloth's Flash-Next files.
 
   Strata's code for these is still here, but Momoe has changed things around it.
+- **Macs (early):** Momoe's own Metal engine ([src/metal](src/metal/README.md)), tested on a MacBook Air M4 (32 GB)
+  and a Mac Studio M1 Ultra (64 GB). `momoe setup` sets up Ornith-1.5 IQ4_XS; on a Mac with less than ~28 GB the
+  experts that do not fit are read from the SSD as needed. Flash-Next runs too, set up by hand
+  ([design/mac-port.md](design/mac-port.md)).
 
 Measured on the PC above:
 
@@ -89,6 +93,9 @@ You need:
 - enough RAM for the model;
 - Python 3;
 - a C++ compiler and the CUDA toolkit. Setup checks your PC and offers to install them if they are missing.
+
+On an Apple Silicon Mac (16 GB or more) you need Xcode's command line tools (`xcode-select --install`) and Python
+3.10 or newer (`brew install python`); setup builds the Metal engine and downloads Ornith-1.5 (19.3 GB).
 
 ```sh
 git clone https://github.com/aflin/momoe.git

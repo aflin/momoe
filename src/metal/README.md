@@ -6,43 +6,19 @@ the Mac's free memory can run.
 
 ## Try it (Ornith-1.5 on an Apple Silicon Mac)
 
-Not wired into `momoe setup` yet: these are the steps by hand. Needs Xcode's command line tools
-(`xcode-select --install`), Python 3.10 or newer (macOS's own python3 is 3.9: python.org or `brew install python`), and
-19.3 GB for the model. From the repository's root:
+Needs Xcode's command line tools (`xcode-select --install`), Python 3.10 or newer (macOS's own python3 is 3.9:
+`brew install python`), 16 GB of memory or more and ~25 GB of disk. From the repository's root:
 
 ```sh
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt     # cmake and the server's packages
-src/metal/build.sh                                                      # -> build-metal/momoe-metal (a few minutes)
-
-mkdir -p models/ornith15-IQ4_XS && curl -L -o models/ornith15-IQ4_XS/Ornith-1.5-35B-A3B-IQ4_XS.gguf \
-  https://huggingface.co/bartowski/Ornith-1.5-35B-A3B-GGUF/resolve/64b0493d34a5ca4c1b4ad67bb99b41d74b4f07d6/Ornith-1.5-35B-A3B-IQ4_XS.gguf
-shasum -a 256 models/ornith15-IQ4_XS/Ornith-1.5-35B-A3B-IQ4_XS.gguf
-#   d6aef57fa948e9bba3ca4959b3c237ed898c605471f48c73a32cedbd24aabe70
-.venv/bin/python tools/strata_tokenizer.py --gguf models/ornith15-IQ4_XS/Ornith-1.5-35B-A3B-IQ4_XS.gguf \
-  --out packs/ornith15-iq4_xs                                          # the tokenizer, for the server
-
-# a first test: 64 tokens of a short prompt (prints the speed and the token ids)
-build-metal/momoe-metal -m models/ornith15-IQ4_XS/Ornith-1.5-35B-A3B-IQ4_XS.gguf --tokens 760,6511,314,9338,369 -n 64
-```
-
-On a Mac with less than ~32 GB add `--pool-gib 7` (the experts that do not fit are read from the SSD as needed).
-Then as a server (OpenAI and Anthropic API on port 8090) for Claude Code, Codex, opencode or LM Studio:
-
-```sh
-cat > config/ornith-mac.json <<JSON
-{"exe": "$PWD/build-metal/momoe-metal", "cwd": "$PWD", "port": 8090,
- "args": ["-m", "$PWD/models/ornith15-IQ4_XS/Ornith-1.5-35B-A3B-IQ4_XS.gguf", "--ctx", "65536",
-          "--mtp", "4", "--draft-vocab", "$PWD/data/draft_vocab_en.bin"],
- "tokenizer": "$PWD/packs/ornith15-iq4_xs/tokenizer", "model_name": "ornith-1.5-35b-a3b-iq4_xs",
- "log": "$PWD/ornith-mac.log", "setup_tag": "ornith15-IQ4_XS", "fit_max_tokens": true}
-JSON
-./momoe start ornith-mac
-./momoe run claude          # or codex, opencode, lmstudio (it says how to install a tool that is missing)
+./momoe setup              # builds momoe-metal, downloads Ornith-1.5 IQ4_XS (19.3 GB), writes config/ornith-mac.json, starts it
+./momoe run claude         # or codex, opencode, lmstudio
 ./momoe stop
 ```
 
-Add `"--pool-gib", "7"` to `args` on a smaller Mac. Speeds measured so far: design/mac-port.md (its last chart).
-Flash-Next also runs (a 75 GB download, and its MTP layer packed from the checkpoint): design/mac-port.md.
+Setup picks the expert pool from the Mac's memory: every expert in memory from ~28 GB, else the memory less 11 GiB
+(16 GB: a 5 GiB pool and a 32K context; measured on the M4 with those settings: 11.2 tok/s, the server 8.6 GB). It
+prints a speed test command at the end. Flash-Next is set up by hand (a 75 GB download, and its MTP layer packed from
+the checkpoint): design/mac-port.md.
 
 ## Build and run
 

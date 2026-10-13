@@ -1,5 +1,5 @@
 #!/bin/sh
-# Strata for Linux: the first run installs everything and starts the model; later runs just start it.
+# Momoe for Linux and macOS (Apple Silicon): the first run installs everything and starts the model; later runs just start it.
 # Needs only an NVIDIA driver (or, for an AMD Radeon card, the kernel's amdgpu driver: see docs/AMD_HIP.md).
 # Python (with venv) is installed through apt/dnf if it is missing (asks for sudo).
 # NixOS (or STRATA_UV=1) with uv installed: uv makes the project venv; every other Linux uses the standard venv.
@@ -23,11 +23,17 @@ if [ ! -x .venv/bin/python ]; then
     # Prefer uv's own interpreter: unlike Nix's Python, it works naturally with pip wheels using dlopen.
     PY=3.12
   else
-    for c in python3 python; do
+    # macOS's own python3 is 3.9: Homebrew's or python.org's first
+    for c in python3.14 python3.13 python3.12 python3.11 python3.10 /opt/homebrew/bin/python3 python3 python; do
       if command -v $c >/dev/null 2>&1 && ok_py $c; then
         PY=$c; break
       fi
     done
+  fi
+  if [ -z "$PY" ] && [ "$(uname)" = "Darwin" ]; then
+    echo "Python 3.10 or newer is needed (macOS's own python3 is too old). Install it with Homebrew"
+    echo "(brew install python) or from https://www.python.org/downloads/macos/, then run this again."
+    exit 1
   fi
   if [ -z "$PY" ]; then
     echo "Python 3.10+ with venv is needed; installing it (sudo will ask for your password) ..."

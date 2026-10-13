@@ -4334,21 +4334,29 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     say("  " + "-" * 100)
     size = f'about {gb:.0f} GB' if gb >= 1 else '34-55 GB'
     a_ = cfg["args"]
-    if "--mmap-experts" in a_ and "--resident-budget-gib" not in a_ and "--resident-experts" not in a_:
+    if Path(cfg["exe"]).name == "momoe-metal":          # a Mac: the dense weights, then the experts as they are used
+        say(f"  Starting {cfg.get('model_name', 'the model')} on the Mac's GPU: reading its weights takes up to a "
+            "minute (longer")
+        say("  the first time after a restart)." + (" It runs in the background; this returns when it is ready, "
+                                                    "momoe stop ends it." if DETACH else
+                                                    " Closing this window stops the model."))
+        say("  " + "-" * 100)
+    elif "--mmap-experts" in a_ and "--resident-budget-gib" not in a_ and "--resident-experts" not in a_:
         # #505: the mapped low-RAM mode loads nothing into RAM up front (the server's narrator says the same)
         say(f"  Starting {cfg.get('model_name', 'the model')}: it maps {size} of experts from the model files (the OS "
             "file cache reads them).")
     else:
         say(f"  Starting {cfg.get('model_name', 'the model')}: it loads {size} into RAM and locks part of it for the "
             "GPU.")
-    say("  While it does, YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES (longer the first time after a")
-    if DETACH:
-        say("  restart). That is normal: please wait - it runs in the background, and this returns when it is ready.")
-        say("  momoe stop ends it.")
-    else:
-        say("  restart). That is normal: please wait and don't close this window - the server says when it is ready.")
-        say("  Later, closing this window stops the model.")
-    say("  " + "-" * 100)
+    if Path(cfg["exe"]).name != "momoe-metal":
+        say("  While it does, YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES (longer the first time after a")
+        if DETACH:
+            say("  restart). That is normal: please wait - it runs in the background, and this returns when it is ready.")
+            say("  momoe stop ends it.")
+        else:
+            say("  restart). That is normal: please wait and don't close this window - the server says when it is ready.")
+            say("  Later, closing this window stops the model.")
+        say("  " + "-" * 100)
     run_cfg = cfg
     if once:                                           # Momoe: --host/--api-key/... for this start only
         over = {k: v for k, v in once.items() if k != "vram_reserve_mib"}
@@ -4837,6 +4845,108 @@ def sycl_setup(argv) -> int:
     return subprocess.call([sys.executable, str(script), *rest])
 
 
+# ------------------------------------------------------------------------------------------------ macOS
+# An Apple Silicon Mac runs momoe-metal (src/metal): Ornith-1.5 IQ4_XS, with the routed experts that do not fit in a
+# pool read from the SSD as needed. Measured on a MacBook Air M4 (32 GB): with a 5 GiB pool and a 32K context the
+# server's footprint is 8.6 GB (about 3 GiB more than the pool); every expert in memory needs ~28 GB of RAM.
+MAC_MODEL = "Ornith-1.5-IQ4_XS"
+MAC_EXPERTS_GIB = 16.4                                 # Ornith IQ4_XS's routed experts
+MAC_KEEP_GIB = 11                                      # RAM left beside the pool: the engine's ~3 GiB, macOS and apps
+
+
+def mac_memory_gib() -> float:
+    if os.environ.get("MOMOE_MAC_MEMORY_GIB"):          # tests: the rule for a Mac with this much memory
+        return float(os.environ["MOMOE_MAC_MEMORY_GIB"])
+    try:
+        return int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout) / 2**30
+    except (OSError, ValueError):
+        return 0.0
+
+
+def mac_pool_gib(mem_gib: float) -> int | None:
+    """The expert pool for a Mac with this much RAM: None when every expert fits (no pool), else whole GiB."""
+    pool = int(mem_gib - MAC_KEEP_GIB)
+    return None if pool >= MAC_EXPERTS_GIB else max(pool, 3)
+
+
+def mac_setup(a, data: Path, port: int) -> int:
+    step(1, "checking your Mac")
+    chip = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
+    mem = mac_memory_gib()
+    say(f"  {chip or 'unknown chip'}, {mem:.0f} GB of memory")
+    if platform.machine() != "arm64":
+        fail("Momoe on a Mac needs Apple Silicon (M1 or later)")
+    if mem < 15.5:
+        fail(f"{mem:.0f} GB of memory: Momoe on a Mac needs at least 16 GB")
+    if subprocess.run(["xcode-select", "-p"], capture_output=True).returncode != 0:
+        fail("Xcode's command line tools are not installed (the engine is compiled here)",
+             "install them with:  xcode-select --install   then run momoe setup again")
+    if (a.family and a.family != "ornith") or (a.model and model_key("ornith", a.model) != MAC_MODEL):
+        fail("on a Mac Momoe sets up Ornith-1.5 IQ4_XS for now (the one tested with the Mac engine)",
+             "run momoe setup without --family / --model")
+    for opt in ("gpu", "gpus", "backend", "vision", "kv"):
+        if getattr(a, opt, None):
+            warn(f"--{opt.replace('_', '-')}: not used on a Mac")
+    pool = mac_pool_gib(mem)
+    ctx = a.context or (65536 if pool is None else 32768)
+    ok("every expert fits in memory" if pool is None else
+       f"a {pool} GiB expert pool (the rest of the experts are read from the SSD as needed), {ctx // 1024}K context")
+
+    step(2, "building the engine (momoe-metal)")
+    pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES, "Python packages (cmake, the server's)")
+    exe = ROOT / "build-metal" / "momoe-metal"
+    run(["sh", str(ROOT / "src" / "metal" / "build.sh")])
+    if not exe.exists():
+        fail("the engine did not build", f"see {ROOT / 'build-metal' / 'cmake.build.log'}")
+    ok(str(exe))
+
+    fam = FAMILIES["ornith"]
+    tag = fam["tag"] + size_of(MAC_MODEL)
+    gguf = Path(a.models_dir) / tag / model_file(fam, MAC_MODEL, 1)
+    step(3, f"downloading {fam['title']} {size_of(MAC_MODEL)} ({fam['sha256'][gguf.name][0] / 1e9:.1f} GB)")
+    if not (gguf.exists() and done(gguf)):
+        say(f"  The model goes in {gguf.parent}")
+        download(fam["hf"] + gguf.name, gguf)
+    verify_sha256(gguf, *fam["sha256"][gguf.name])
+    ok("model file present")
+
+    step(4, "the tokenizer")
+    pack = data / "packs" / tag.lower()
+    if not (pack / "tokenizer" / "vocab.json").exists():
+        run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(gguf), "--out", str(pack)],
+            quiet=True)
+    ok(str(pack / "tokenizer"))
+
+    step(5, "the config")
+    args = ["-m", str(gguf), "--ctx", str(ctx)]
+    if pool is not None:
+        args += ["--pool-gib", str(pool), "--nocache"]
+    draft = a.draft_vocab or "en"
+    args += ["--mtp", "4", "--draft-vocab", str(ROOT / "data" / DRAFT_VOCABS[draft])]
+    cfg_path = name_config(config_path_for(a.config_name, tag + "-mac") if a.config_name else
+                           config_dir() / "ornith-mac.json", a)
+    cfg = {"exe": str(exe), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
+           "model_name": f"{fam['name']}-{size_of(MAC_MODEL).lower()}", "log": str(ROOT / (cfg_path.stem + ".log")),
+           "port": port, "setup_tag": tag, "fit_max_tokens": True}
+    if a.host:
+        cfg["host"] = a.host
+    if a.api_key:
+        cfg["api_key"] = a.api_key
+    write_config(cfg_path, cfg)
+    ok(f"config: {cfg_path.name}")
+
+    say()
+    say("All set.")
+    say(f"  API (OpenAI):     http://127.0.0.1:{port}/v1")
+    say(f"  API (Anthropic):  http://127.0.0.1:{port}/v1/messages")
+    say(f"  Next time:        momoe start {cfg_path.stem}   (momoe stop ends it; momoe run claude|codex|opencode)")
+    say(f"  A speed test:     build-metal/momoe-metal -m {gguf} --tokens 760,6511,314,9338,369 -n 256"
+        + ("" if pool is None else f" --pool-gib {pool} --nocache"))
+    if a.no_start:
+        return 0
+    return start(cfg_path, port)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--family", choices=list(FAMILIES), help="qwen = Qwen3.8-Flash-Next, swift = Swift 1.5, coder = its "
@@ -5060,6 +5170,8 @@ def main() -> int:
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
 
+    if sys.platform == "darwin":                     # an Apple Silicon Mac: the Metal engine
+        return mac_setup(a, data, port)
     # ---- 1. the PC
     step(1, "checking your PC")
     found = gpus()
