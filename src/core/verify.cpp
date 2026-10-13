@@ -1723,7 +1723,15 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 if (cvec().covers(l)) cvec_apply(Rt(tb), l, n, HC * N, nullptr, 0, nullptr, 0, false, cs);
             }
         } else if (cvec().covers(l)) {
-            cvec_apply(Rt(tb), l, n, HC * N, bo_ + tb * N, N, inj2_ + tb * HC, HC, true, cs);
+            if (!g.has_hc()) {
+                // one stream (qwen35moe): the write is a plain add (the next read skips it: `pending` is false after a
+                // steered layer), then the vector - as the prompt path does; the hyper-connection gate would read
+                // inj2_, which this model never writes
+                add_inplace(Rt(tb), bo_ + tb * N, (int64_t) n * N, cs);
+                cvec_apply(Rt(tb), l, n, HC * N, nullptr, 0, nullptr, 0, false, cs);
+            } else {
+                cvec_apply(Rt(tb), l, n, HC * N, bo_ + tb * N, N, inj2_ + tb * HC, HC, true, cs);
+            }
         }
         return true;
     };

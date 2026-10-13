@@ -1523,7 +1523,10 @@ bool load_control_vectors(const Options& o, const strata::core::ModelGeometry& g
         }
     }
     const int first = o.cvec_first <= 0 ? 1 : o.cvec_first;
-    const int last = (o.cvec_last <= 0 || o.cvec_last >= L) ? (int) L - 1 : o.cvec_last;
+    // one stream (qwen35moe): the last layer's output is added by the head's read in the decode path, after the point
+    // the vector would act on, so the steered range stops one layer earlier there (the prompt path agrees)
+    const int64_t top = g.has_hc() ? L - 1 : L - 2;
+    const int last = (o.cvec_last <= 0 || o.cvec_last > top) ? (int) top : o.cvec_last;
     const int single = o.cvec_mode == 0 ? o.cvec_single : -1;
     if (single >= 0 && (single >= L || !have[(size_t) single])) {
         err = "--cvec-dir single:" + std::to_string(single) + ": the vector has no direction for that layer";
