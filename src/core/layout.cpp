@@ -231,7 +231,9 @@ bool geometry_from_gguf(const GgufFile& f, ModelGeometry& g, std::string& err) {
         return bad("embedding_length", q.n_embd, "a multiple of 256, at most 2560");
     if (q.n_head > cap.n_head) return bad("attention.head_count", q.n_head, "at most 24");
     if (q.n_head_kv != cap.n_head_kv) return bad("attention.head_count_kv", q.n_head_kv, "2");
-    if (q.ssm_k_heads > cap.ssm_k_heads) return bad("ssm.group_count", q.ssm_k_heads, "at most 16");
+    // the DeltaNet kernels (gdn_keyhead_ok<32, 8192>, the gdn_l2 / gdn_rec_kh grids) are built for exactly 16 key heads:
+    // a model with fewer would pass "at most" and run them with the wrong head count
+    if (q.ssm_k_heads != cap.ssm_k_heads) return bad("ssm.group_count", q.ssm_k_heads, "16");
     if (q.ssm_v_heads > cap.ssm_v_heads) return bad("ssm.time_step_rank", q.ssm_v_heads, "at most 48");
     if (q.n_expert <= 0 || q.n_expert > cap.n_expert) return bad("expert_count", q.n_expert, "at most 512");
     if (q.n_expert_used <= 0 || q.n_expert_used > cap.n_expert_used)

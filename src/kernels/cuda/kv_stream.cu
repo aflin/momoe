@@ -87,7 +87,8 @@ __device__ int block_scan(int v, int* warp_sums, int& total) {
 }
 
 __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_t* __restrict__ ids,
-                                                     const int32_t* __restrict__ steps, int n_q, int cap, int page_size) {
+                                                     const int32_t* __restrict__ steps, int n_q, int cap, int page_size,
+                                                     int dense) {
     __shared__ int s_nmiss, s_lookups, s_cut;
     __shared__ int warp_sums[32];
     const int epoch = m.ctl[0] + 1;
@@ -98,9 +99,12 @@ __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_
     for (int q = 0; q < n_q; ++q) {
         const int width = steps[q * kStepCount + kStepWidth];
         const int32_t* qi = ids + (long long) q * cap;
-        for (int i = threadIdx.x; i < width; i += RT) {
-            const int b = qi[i] / page_size;
-            if (i > 0 && qi[i - 1] / page_size == b) continue;   // ids are ascending: one lookup per block
+        // dense selection (qwen35moe: ids are 0..width-1): its blocks are 0..ceil(width / page_size)-1, so the threads
+        // walk the blocks, not every cell - the same lookups, width / page_size loads instead of width
+        const int span = dense ? (width + page_size - 1) / page_size : width;
+        for (int i = threadIdx.x; i < span; i += RT) {
+            const int b = dense ? i : qi[i] / page_size;
+            if (!dense && i > 0 && qi[i - 1] / page_size == b) continue;   // ids are ascending: one lookup per block
             ++lookups;
             const int sl = m.page_table[b];
             if (sl >= 0) {
@@ -217,7 +221,7 @@ void kv_stream_reset(const KvStreamMap& m, void* stream) {
 
 void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const KvHostPools& host, int fmt,
                        const int32_t* ids, const int32_t* steps, int64_t n_q, int64_t cap, const QsaShapes& s,
-                       void* stream) {
+                       void* stream, bool dense) {
     if (n_q <= 0) return;
     if (s.n_head_kv * s.page_size * (s.head_dim / KV_Q8_GROUP) * 2 % 16 != 0) {
         std::fprintf(stderr, "kv_stream: a block's scale run must be a multiple of 16 bytes\n");
@@ -231,7 +235,8 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
                              "slot twice\n", (long long) m.n_slots, RT);
         std::exit(1);
     }
-    resolve_kernel<<<1, RT, 0, (cudaStream_t) stream>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
+    resolve_kernel<<<1, RT, 0, (cudaStream_t) stream>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size,
+                                                        dense ? 1 : 0);
     check("resolve");
     copy_kernel<<<96, 128, 0, (cudaStream_t) stream>>>(m, runs_of(slots, host, fmt, s));
     check("copy");

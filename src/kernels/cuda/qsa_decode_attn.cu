@@ -528,7 +528,13 @@ template <int G = G_FLASH>
 __global__ void __launch_bounds__(HD) attn_merge_kernel(const float* __restrict__ part_acc,
                                                         const float* __restrict__ part_m,
                                                         const float* __restrict__ part_l, int n_chunks,
-                                                        float* __restrict__ attn, long long scratch_stride = 0) {
+                                                        float* __restrict__ attn, long long scratch_stride = 0,
+                                                        const int32_t* __restrict__ step = nullptr) {
+    // Only the chunks that hold selected cells: the grid covers the capacity (max context), but every chunk past
+    // step[kStepWidth] wrote m = -FLT_MAX and would be skipped below anyway - the result is the same bits, the loop
+    // no longer walks max_context / CHUNK partials on every token of a short conversation.
+    const int n_used = step == nullptr ? n_chunks
+        : min(n_chunks, (__ldg(step + (size_t) blockIdx.y * kStepCount + kStepWidth) + CHUNK - 1) / CHUNK);
     part_acc += (size_t) blockIdx.y * (size_t) scratch_stride;
     part_m += (size_t) blockIdx.y * (size_t) scratch_stride;
     part_l += (size_t) blockIdx.y * (size_t) scratch_stride;
@@ -537,9 +543,9 @@ __global__ void __launch_bounds__(HD) attn_merge_kernel(const float* __restrict_
     const int kvh = h / G, hl = h % G;
     const int d = threadIdx.x;
     float M = -FLT_MAX;
-    for (int c = 0; c < n_chunks; ++c) M = fmaxf(M, part_m[(kvh * n_chunks + c) * G + hl]);
+    for (int c = 0; c < n_used; ++c) M = fmaxf(M, part_m[(kvh * n_chunks + c) * G + hl]);
     float L = 0.0f, acc = 0.0f;
-    for (int c = 0; c < n_chunks; ++c) {
+    for (int c = 0; c < n_used; ++c) {
         const int slot = kvh * n_chunks + c;
         const float m = part_m[slot * G + hl];
         if (m == -FLT_MAX) continue;
@@ -705,7 +711,7 @@ void decode_attn_batch_g(const float* q, const QsaAttnPools& pools, const int32_
         STRATA_ATTN_CHUNK(0)<<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size,
                                                         scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride);
     attn_merge_kernel<GG><<<dim3((unsigned) s.n_head, (unsigned) n_q), HD, 0, st>>>(part_acc, part_m, part_l, n_chunks,
-                                                                                  attn, stride);
+                                                                                  attn, stride, steps);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         std::fprintf(stderr, "qsa_decode_attn_batch: %s\n", cudaGetErrorString(e));
@@ -777,7 +783,7 @@ void decode_attn_step_g(const float* q, const QsaAttnPools& pools, const int32_t
     else
         STRATA_ATTN_CHUNK(0)<<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
                                                         scale, part_acc, part_m, part_l, n_chunks, 0, 0);
-    attn_merge_kernel<GG><<<(unsigned) s.n_head, HD, 0, st>>>(part_acc, part_m, part_l, n_chunks, attn);
+    attn_merge_kernel<GG><<<(unsigned) s.n_head, HD, 0, st>>>(part_acc, part_m, part_l, n_chunks, attn, 0, step);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         std::fprintf(stderr, "qsa_decode_attn: %s\n", cudaGetErrorString(e));

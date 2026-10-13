@@ -911,7 +911,7 @@ void qsa_kv_resolve(const QsaState& st, const ModelGeometry& g, const int32_t* i
                     int64_t cap, void* stream) {
     if (st.kv_mode != 1) return;
     strata::kernels::kv_stream_resolve(st.map, qsa_attn_pools(st), st.host, qsa_kv_format(st), ids, steps, n_q, cap,
-                                       qsa_shapes(g), stream);
+                                       qsa_shapes(g), stream, !g.has_indexer);   // no indexer: dense ids 0..width-1
 }
 
 uint64_t qsa_buffers_bytes(const ModelGeometry& g, int64_t max_cells) {    const QsaShapes s = qsa_shapes(g);    const int64_t cap = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, s);    uint64_t n = 0;    n += (uint64_t) q8k_bytes(g.n_embd);    n += (uint64_t) (g.n_embd / 32) * 34;

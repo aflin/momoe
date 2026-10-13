@@ -947,6 +947,12 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             else gdn_idx[(size_t) l] = gi++;
         }
     }
+    // dense attention (no indexer): every attention layer selects the same cells 0..width-1 (the width is the row's,
+    // not the layer's), so the identity ids are written once per window, at this stage's first attention layer, and
+    // the later ones read them (nothing else writes sel_ on this path)
+    int64_t first_qsa = -1;
+    for (int64_t l = lb_; l < le_ && first_qsa < 0; ++l)
+        if (qsa_idx[(size_t) l] >= 0) first_qsa = l;
 
     // ---------------------------------------------------------------- pre(l, group): up to the ring
     auto pre = [&](int64_t l, int grp) -> bool {
@@ -1404,8 +1410,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 if (batch_rec_) {   // each row selects and attends over its own slot's K/V
                     for (int t = tb; t < te; ++t) {
                         const QsaState& sx = slot_ss(t).qsa_states[qi];
-                        if (!idx) qsa_select_all(step_ + t * kStepCount, 1, cap_, sel_ + (size_t) t * cap_, cs);
-                        else {
+                        if (!idx) {
+                            if (l == first_qsa) qsa_select_all(step_ + t * kStepCount, 1, cap_, sel_ + (size_t) t * cap_, cs);
+                        } else {
                         qsa_block_scores(sx.idx_pooled, sx.idx_dead, qidx_ + t * IQ * ID, step_ + t * kStepCount, 1,
                                          max_blocks_, s, scores_ + (size_t) t * max_blocks_, cs);
                         qsa_block_topk(scores_ + (size_t) t * max_blocks_, step_ + t * kStepCount, 1, max_blocks_, cap_, s,
@@ -1418,8 +1425,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                               attn_ + t * NH * HD, 1, cs);
                     }
                 } else {
-                if (!idx) qsa_select_all(step_ + tb * kStepCount, n, cap_, sel_ + (size_t) tb * cap_, cs);
-                else {
+                if (!idx) {
+                    if (l == first_qsa) qsa_select_all(step_ + tb * kStepCount, n, cap_, sel_ + (size_t) tb * cap_, cs);
+                } else {
                 qsa_block_scores(st.idx_pooled, st.idx_dead, qidx_ + tb * IQ * ID, step_ + tb * kStepCount, n, max_blocks_,
                                  s, scores_ + (size_t) tb * max_blocks_, cs);
                 qsa_block_topk(scores_ + (size_t) tb * max_blocks_, step_ + tb * kStepCount, n, max_blocks_, cap_, s,
@@ -1489,15 +1497,14 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                           NE, n, cs);
                 native_router_top10_multi(logits_ + tb * NE, ids_ + tb * K, w_ + tb * K, n, cs);
             } catch (const std::exception& e) { err = "verify router: " + std::string(e.what()); return false; }
-#if defined(STRATA_HIP_GFX906)
         } else if (dec_batch) {
-            // gfx906: the Coder's 256-expert router (the native router is 512 x 10 only) for the whole window in one
-            // multi-column BF16 projection and one top-k, bitwise the per-token calls (route_window_parity); ~3 ms
-            // of a ~55 ms verify window on 2x MI50.  STRATA_ROUTE_PER_TOKEN=1: the per-token calls.
+            // every other router (qwen35moe's 256 x 8, the Coder's 256 x 10, gfx906) for the whole window in one
+            // multi-column BF16 projection and one top-k launch, bitwise the per-token calls (route_window_parity):
+            // 2 launches per layer instead of 2 per row (~3 ms of a ~55 ms window measured on 2x MI50, where it began).
+            // STRATA_ROUTE_PER_TOKEN=1: the per-token calls.
             if (!moe_route_window(wt, g, l, K, ss.moe, mixed_ + tb * N, logits_ + tb * NE, ids_ + tb * K, w_ + tb * K, n,
                                   cs, err))
                 return false;
-#endif
         } else
         for (int t = tb; t < te; ++t) {
             MoEBuffers mb = ss.moe;

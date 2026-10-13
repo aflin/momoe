@@ -88,7 +88,7 @@ void kv_stream_reset(const KvStreamMap& m, void* stream);
 /// them from the host copy in place (QsaAttnPools::host_*); the call sets ctl[3] (see `kv_stream_counters`).
 void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const KvHostPools& host, int fmt,
                        const int32_t* ids, const int32_t* steps, int64_t n_q, int64_t cap, const QsaShapes& s,
-                       void* stream);
+                       void* stream, bool dense = false);   ///< dense: ids are 0..width-1 (no indexer), walk the blocks
 
 /// The static ring table `block -> block % n_slots`.
 void kv_ring_table(int32_t* page_table, int64_t n_blocks, int64_t n_slots, void* stream);

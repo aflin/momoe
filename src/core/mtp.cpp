@@ -1076,6 +1076,12 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         if (T > 1 && native_router_enabled() && g.n_expert == 512 && K == 10) {
             bf16_gemv_fp32_mmvf_multi(mixed_, N, bf16("mlp.gate.weight"), logits_, g.n_expert, (int) N, (int) g.n_expert, T, cs);
             native_router_top10_multi(logits_, ids_, w_, T, cs);
+        } else if (T > 1 && !(native_router_enabled() && g.n_expert == 512 && K == 10) &&
+                   !std::getenv("STRATA_ROUTE_PER_TOKEN")) {
+            // any other router (qwen35moe's 256 x 8): one multi-column projection and one top-k for the window's rows,
+            // each row bitwise the per-token calls below (the same kernel per column; router_top10 is per row)
+            bf16_gemv_fp32_mmvf_cols(mixed_, bf16("mlp.gate.weight"), logits_, N, g.n_expert, (int) T, cs);
+            router_top10(logits_, (int) T, (int) g.n_expert, (int) K, ids_, w_, cs);
         } else {
         for (int t = 0; t < T; ++t) {
             bf16_gemv_fp32_mmvf(mixed_ + t * N, bf16("mlp.gate.weight"), logits_ + t * g.n_expert, (int) N, (int) g.n_expert, cs);

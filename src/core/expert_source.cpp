@@ -3904,7 +3904,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 return;
             }
             if (kind[i] == -2) {            // STRATA_ROUTE_TAIL_SKIP: a skipped tail expert contributes zero
-                std::memset(row, 0, (size_t) H * sizeof(float));
+                std::memset(row, 0, (size_t) HN * sizeof(float));
                 ++d.tail_skipped;
                 continue;
             }
