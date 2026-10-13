@@ -1,0 +1,2 @@
+ggml from llama.cpp b11429 (https://github.com/ggml-org/llama.cpp, MIT, LICENSE beside this file), with the
+pause points that src/metal/patch_ggml_pause.py adds (build.sh applies it; it does nothing to a copy already patched).
