@@ -2,7 +2,9 @@
 // kernel, BITWISE: ids and weights of 65,536 rows of 512 logits - normal rows, rows with many exact ties, near-ties,
 // a wide spread (tiny probabilities), all-equal rows and rows with a NaN - plus the fast kernel forced onto its
 // serial-sum path, and a 256-expert / k=8 geometry. Then the time per single-token call of each.
+#if !defined(STRATA_ROUTER_FAST_ON_CUDA)   // tests/cuda/router_fast.cpp maps the calls onto CUDA
 #include <hip/hip_runtime.h>
+#endif
 #include "strata/kernels/router_top10.hpp"
 
 #include <cmath>
