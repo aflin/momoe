@@ -421,7 +421,7 @@ class Suggestion(Base):
     def test_64_gb_default_unchanged(self):
         code, out, cfg = self.main([], ram=RAM64)
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.cfg_path.name, "strata-iq3_xxs.json")      # setup's pick from 60 GB, as before
+        self.assertEqual(self.cfg_path.name, "strata-iq3_s.json")        # upstream 0.1.44: IQ3_S where it fits (was IQ3_XXS)
         code, out, cfg = self.main(["--family", "qwen36"], ram=RAM64)
         self.assertEqual(code, 0, out)
         self.assertEqual(self.cfg_path.name, "strata-qwen36-ud-iq4_xs.json")

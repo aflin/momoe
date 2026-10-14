@@ -1,19 +1,17 @@
-# Unsloth UD-Q6_K_XL (experimental)
+# Unsloth UD-Q6_K_XL
 
-**Experimental; manual workflow only — setup does not offer this model yet.** This is Unsloth's 6-bit file of the
-same model the other packs use:
+**In setup since MODEL-UPDATE Phase 2** (`START-HERE.bat --setup --family unsloth --model UD-Q6_K_XL`, engine 0.1.44 or
+newer: every expert in RAM from ~118 GB, else it asks and keeps a RAM budget; quality, speed and images in
+[QUANTS.md](QUANTS.md); UD-Q5_K_XL and Q8_0 likewise). The manual workflow below still works. This is Unsloth's 6-bit
+file of the same model the other packs use:
 [unsloth/Qwen3.8-Flash-Next-GGUF, `UD-Q6_K_XL`, revision `38bb39e`](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/38bb39ee97821de2c9009abb7e93950eec396e66/UD-Q6_K_XL).
 Build it for engine 0.1.38 or newer (earlier engines read `per_layer_token_embd.weight` in IQ4_NL, Q5_0 or FP8 only,
 below). UD-Q4_K_XL's manual workflow asks nothing of setup, and neither does this one.
 
-> **Status.** The Q6_K gate/up kernels are built by default (`-DSTRATA_Q6K_EXPERTS=OFF` drops them): they add 8.8 KB
-> of GPU code (sm_89 build: 35,495,840 -> 35,504,608 bytes), and the automatic expert cache of the Coder and of
-> Qwen3.6 UD-IQ4_XS on an RTX 4070 Ti 12 GB was the same within its run-to-run spread (~30 slots); the Coder's and
-> Qwen3.6's tokens were identical with and without them. `native_expert_parity --synthetic q6_K/q8_0` (and
-> `--shape=2048x512 q6_K/q6_K`) pass on that card. The MMQ prompt kernels for Q6_K stay opt-in
-> (`-DSTRATA_MMQ_KQUANTS=ON`): those are the instances that cost other models expert slots. The
-> Q8_0 PLE table reader is not in this release (it comes with the PLE format series, PR #651); until then this file does
-> not load. The parity programs below have not been run on a GPU yet.
+> **Status (MODEL-UPDATE Phase 1).** The Q6_K gate/up kernels are part of every build now (they were the opt-in
+> `-DSTRATA_Q6K_EXPERTS=ON`): measured to leave other models' expert-cache slots unchanged ([QUANTS.md](QUANTS.md)). The
+> MMQ prompt kernels for Q6_K come with the K-quant library and `STRATA_MMQ_KQ=1`; without it the prompt takes the FP16
+> path. The file runs on the standard engine (AMD R9700: the quality yardstick in [QUANTS.md](QUANTS.md)).
 
 ## What is in the file
 
@@ -112,7 +110,7 @@ it (the PLE Q8_0 reader is the other half):
 - **Decode windows:** the grouped expert kernels (`native_expert_grouped`) take gate/up Q6_K — a pinned copy of
   llama.cpp's `vec_dot_q6_K_q8_1` behind `Fmt<14>`, and the dequantizer (`dequantize_q6_K` folded onto the kernel's
   32 threads). Per-token MMVQ (`native_mmvq`) already had Q6_K.
-- **The prompt path:** llama.cpp's MMQ prompt kernels now instantiate Q6_K (`STRATA_MMQ_KQUANTS=ON` builds
+- **The prompt path:** llama.cpp's MMQ prompt kernels instantiate Q6_K (the K-quant library, `STRATA_MMQ_KQ=1`; it builds
   `template-instances/mmq-instance-q6_k.cu` alongside q4_k/q5_k/q5_1; `moe_mmq` accepts and dispatches it).
 - **The gates:** `native_expert_supported` took Q6_K/Q8_0 pairs (gate/up Q8_0 as in layer 2 was already in the
   lists) — the engine previously refused the whole pack with "no GPU kernels for".

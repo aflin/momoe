@@ -1620,13 +1620,18 @@ __global__ void gather_rows16_kernel(const uint16_t* __restrict__ x, const int32
 template <int N = 2560, int KS = 10>   // n_embd and experts per token
 __global__ void moe_combine_kernel(const float* __restrict__ Dm, const int32_t* __restrict__ slot,
                                    const float* __restrict__ w, const float* __restrict__ shared,
-                                   const float* __restrict__ sg, float* __restrict__ bo, int64_t T) {
+                                   const float* __restrict__ sg, float* __restrict__ bo, int64_t T,
+                                   const float* __restrict__ row_sd) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= T * N) return;
     const int64_t t = i / N, d = i % N;
     float s = 0.0f;
 #pragma unroll
-    for (int k = 0; k < KS; ++k) s = fmaf(w[t * KS + k], Dm[(int64_t) slot[t * KS + k] * N + d], s);
+    for (int k = 0; k < KS; ++k) {
+        const int64_t r = slot[t * KS + k];
+        const float v = row_sd ? Dm[r * N + d] * row_sd[r] : Dm[r * N + d];   // the product scale_down_rows stored
+        s = fmaf(w[t * KS + k], v, s);
+    }
     bo[i] = s + shared[i] * sigm(sg[t]);
 }
 
@@ -1635,7 +1640,8 @@ __global__ void moe_combine_kernel(const float* __restrict__ Dm, const int32_t* 
 template <int N = 2560, int KS = 10>
 __global__ void moe_combine4_kernel(const float* __restrict__ Dm, const int32_t* __restrict__ slot,
                                     const float* __restrict__ w, const float4* __restrict__ shared,
-                                    const float* __restrict__ sg, float4* __restrict__ bo, int64_t T) {
+                                    const float* __restrict__ sg, float4* __restrict__ bo, int64_t T,
+                                    const float* __restrict__ row_sd) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;   // float4 index
     if (i >= T * (N / 4)) return;
     const int64_t t = i / (N / 4), d = (i % (N / 4)) * 4;
@@ -1645,7 +1651,12 @@ __global__ void moe_combine4_kernel(const float* __restrict__ Dm, const int32_t*
 #pragma unroll
     for (int k = 0; k < KS; ++k) {
         ww[k] = w[t * KS + k];
-        v[k] = *reinterpret_cast<const float4*>(Dm + (int64_t) slot[t * KS + k] * N + d);
+        const int64_t r = slot[t * KS + k];
+        v[k] = *reinterpret_cast<const float4*>(Dm + r * N + d);
+        if (row_sd) {   // NVFP4 in MMQ: the row's s_down, as moe_combine_kernel applies it
+            const float sd = row_sd[r];
+            v[k] = make_float4(v[k].x * sd, v[k].y * sd, v[k].z * sd, v[k].w * sd);
+        }
     }
 #pragma unroll
     for (int k = 0; k < KS; ++k) {
@@ -1779,7 +1790,7 @@ __global__ void to_bf16_kernel(const float* __restrict__ x, uint16_t* __restrict
 typedef __bf16 um_b16 __attribute__((ext_vector_type(16)));
 typedef float um_f8 __attribute__((ext_vector_type(8)));
 __device__ __forceinline__ um_f8 um_wmma(um_b16 a, um_b16 b, um_f8 c) {
-#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1150__) || defined(__gfx1151__)
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1103__) || defined(__gfx1150__) || defined(__gfx1151__)
     return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a, b, c);
 #else
     (void) a; (void) b; return c;   // not a gfx11 device pass: never launched (runtime gate)
@@ -2216,23 +2227,23 @@ __global__ void f16_to_f32_wide_kernel(float4* __restrict__ dst, const uint4* __
 }
 template <int NN, int KS>
 void moe_combine_t(const float* Dm, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo,
-                   int64_t T, void* stream) {
+                   int64_t T, void* stream, const float* row_sd) {
 #ifndef STRATA_W_NO_COMB
     if (((reinterpret_cast<uintptr_t>(Dm) | reinterpret_cast<uintptr_t>(shared) | reinterpret_cast<uintptr_t>(bo)) & 15) == 0) {
         moe_combine4_kernel<NN, KS><<<blocks_for(T * (NN / 4)), 256, 0, (cudaStream_t) stream>>>(
-            Dm, slot, w, reinterpret_cast<const float4*>(shared), sg, reinterpret_cast<float4*>(bo), T);
+            Dm, slot, w, reinterpret_cast<const float4*>(shared), sg, reinterpret_cast<float4*>(bo), T, row_sd);
         check("moe_combine");
         return;
     }
 #endif
-    moe_combine_kernel<NN, KS><<<blocks_for(T * NN), 256, 0, (cudaStream_t) stream>>>(Dm, slot, w, shared, sg, bo, T);
+    moe_combine_kernel<NN, KS><<<blocks_for(T * NN), 256, 0, (cudaStream_t) stream>>>(Dm, slot, w, shared, sg, bo, T, row_sd);
     check("moe_combine");
 }
 }  // namespace
 void moe_combine(const float* Dm, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo,
-                 int64_t T, void* stream, int64_t n_embd, int64_t k) {
-    if (n_embd == 2560 && k == 10) moe_combine_t<2560, 10>(Dm, slot, w, shared, sg, bo, T, stream);
-    else if (n_embd == 2048 && k == 8) moe_combine_t<2048, 8>(Dm, slot, w, shared, sg, bo, T, stream);
+                 int64_t T, void* stream, const float* row_sd, int64_t n_embd, int64_t k) {
+    if (n_embd == 2560 && k == 10) moe_combine_t<2560, 10>(Dm, slot, w, shared, sg, bo, T, stream, row_sd);
+    else if (n_embd == 2048 && k == 8) moe_combine_t<2048, 8>(Dm, slot, w, shared, sg, bo, T, stream, row_sd);
     else { std::fprintf(stderr, "moe_combine: no kernel for n_embd %lld, %lld experts\n", (long long) n_embd, (long long) k); std::exit(1); }
 }
 void moe_combine_peer16(const float* Dm, const int32_t* slot, const float* w, const float* shared, const float* sg,

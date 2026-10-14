@@ -1,5 +1,6 @@
 // src/kernels/cuda/qsa_decode_attn.cu - see include/strata/kernels/qsa_decode_attn.hpp.
 #include "strata/kernels/qsa_decode_attn.hpp"
+#include "strata/core/geometry.hpp"
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #if defined(STRATA_HIP_GFX906)
@@ -20,6 +21,7 @@ namespace {
 constexpr int HD = 256;          // head_dim
 constexpr int G_FLASH = 12;      // query heads per KV head: Flash-Next 24 / 2 (the kernels' G; Qwen3.6's 16 / 2 = 8 is
                                  // their other instance)
+static_assert(HD == strata::core::kCompiledGeometry.head_dim && G_FLASH == strata::core::kCompiledGeometry.n_head / strata::core::kCompiledGeometry.n_head_kv, "qsa_decode_attn is compiled for core/geometry.hpp");
 constexpr int CHUNK = 64;        // cells per block
 constexpr int THREADS = 256;
 constexpr int WARPS = THREADS / 32;

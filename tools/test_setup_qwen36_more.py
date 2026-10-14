@@ -31,7 +31,8 @@ class Tables(unittest.TestCase):
         self.assertNotIn("UD-Q8_K_XL", [setup.size_of(m) for m in MORE])             # does not load (BF16 attention)
 
     def test_families(self):
-        self.assertEqual(list(setup.FAMILIES)[4:], ["qwen36", "ornith", "qwen36-bartowski", "kat-coder"])
+        self.assertEqual([f for f in list(setup.FAMILIES)[4:] if not setup.FAMILIES[f].get("ready")],
+                         ["qwen36", "ornith", "qwen36-bartowski", "kat-coder"])   # (upstream's NVFP4 packs: not offered)
         tags = [d["tag"] for d in setup.FAMILIES.values() if d["tag"]]
         for t in tags:                                                                # config_family reads the prefix
             self.assertEqual([u for u in tags if u.startswith(t)], [t], t)
