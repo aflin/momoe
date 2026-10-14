@@ -36,6 +36,22 @@ Why it is worth it on the Mac:
    removed it with the ready-made downloads (commit 59deafa3, "setup: Momoe always compiles its engine") and it can
    come back for the Mac binary only.
 
+## Measured: a binary built on another Mac (2026-10-13)
+
+The momoe-metal built on en (M1 Ultra, macOS 15.6.1, SDK 15.5, minimum macOS 15.0, `-mcpu=native` for the M1) ran on
+zephyr (M4, macOS 27.0) next to zephyr's own build of the same source (SDK 15.2, `-mcpu=native` for the M4).
+Alternating runs with 60 s cool-downs, Ornith-1.5 IQ4_XS, 256 tokens:
+
+| | en's binary | zephyr's own |
+|---|---:|---:|
+| every expert in memory | 28.2 / 28.2 tok/s | 28.2 / 28.0 tok/s |
+| `--pool-gib 7 --nocache` (the rest from the SSD) | 13.0 / 13.4 tok/s | 13.5 / 13.4 tok/s |
+
+The same 256 tokens in all 8 runs. The shaders are compiled for the local GPU at the start either way, and the CPU
+code's share of the time is small, so an M1-targeted build loses nothing measurable on an M4. Not tested the other
+way: zephyr's M4-native build may use instructions an M1 lacks, which is why the release builds with
+`GGML_NATIVE=OFF` (point 1 above) on the oldest macOS it supports.
+
 ## Where it is downloaded from
 
 GitHub Releases of `aflin/momoe`:
