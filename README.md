@@ -1,11 +1,11 @@
-<h1 align="center">momoe</h1>
+<h1 align="center">MoMoE</h1>
 
 <p align="center"><b>More MoEs: large mixture-of-experts models on one graphics card plus system RAM</b><br>
 a fork of <a href="https://github.com/Niko1221/Strata">Strata</a> · tested on Linux with NVIDIA and on Apple Silicon Macs · free and open source (MIT)</p>
 
 ## Built on Strata
 
-Momoe is a fork of **[Strata](https://github.com/Niko1221/Strata)** by Niko1221 and the Strata contributors. Almost
+MoMoE is a fork of **[Strata](https://github.com/Niko1221/Strata)** by Niko1221 and the Strata contributors. Almost
 everything that makes it work is theirs:
 - the engine that runs a mixture-of-experts model with its experts spread over VRAM, RAM and the SSD;
 - the expert cache and the predictions that fill it;
@@ -22,22 +22,22 @@ in [Strata's issues](https://github.com/Niko1221/Strata/issues), not here.
 
 ## Why a fork
 
-Momoe started as a pull request to Strata ([#1402](https://github.com/Niko1221/Strata/pull/1402)) that added a second
+MoMoE started as a pull request to Strata ([#1402](https://github.com/Niko1221/Strata/pull/1402)) that added a second
 model family. Some of what followed doesn't fit Strata, which takes one change per pull request and keeps its
-default behaviour unchanged. Momoe is the place for those changes:
+default behaviour unchanged. MoMoE is the place for those changes:
 
-- **More MoE models.** Strata runs Qwen3.8-Flash-Next and its variants. Momoe also runs Qwen3.6-35B-A3B and its
+- **More MoE models.** Strata runs Qwen3.8-Flash-Next and its variants. MoMoE also runs Qwen3.6-35B-A3B and its
   fine-tunes (Ornith 1.5, KAT-Coder), which fit 8-12 GB cards and 16-32 GB of RAM. The goal is more families: GLM and
   other large MoE models.
 - **Agents first.** `momoe run claude` (or Codex, OpenCode, Unsloth Studio, LM Studio) starts the model and the tool,
   already connected to each other. There is no web page: the server is for your apps and agents.
 - **More platforms.** The aims are Windows and Apple Silicon Macs, including Flash-Next on a 32 GB MacBook by reading
   its experts from the SSD as they are needed. Macs have a first version (below); Windows does not work yet.
-- **Built from source.** Momoe compiles its engine on your PC; there are no ready-made downloads.
+- **Built from source.** MoMoE compiles its engine on your PC; there are no ready-made downloads.
 
 ## How it is written
 
-Unlike my other projects, Momoe's changes, since the fork and in the pull request it grew from
+Unlike my other projects, MoMoE's changes, since the fork and in the pull request it grew from
 ([#1402](https://github.com/Niko1221/Strata/pull/1402)), are written entirely with
 [Claude Code](https://claude.com/claude-code). Strata's own code, which is most of what is here, is not covered by
 this note.
@@ -50,13 +50,13 @@ Early, and maintained by one person.
 - **Tested:** Linux (Debian 12), NVIDIA RTX 4070 Ti (12 GB), Ryzen 9 5950X, 63 GB RAM.
   - Flash-Next, its Coder, Qwen3.6, Ornith and KAT-Coder have been set up and have answered on that PC.
   - `momoe run` has been used there with Claude Code, Codex, OpenCode, Unsloth Studio and LM Studio.
-- **Not tested in Momoe:**
+- **Not tested in MoMoE:**
   - Windows, and AMD or Intel cards;
   - several GPUs with the Qwen3.6 family (it runs on one GPU);
   - Swift 1.5 and Unsloth's Flash-Next files.
 
-  Strata's code for these is still here, but Momoe has changed things around it.
-- **Macs (early):** Momoe's own Metal engine ([src/metal](src/metal/README.md)), tested on a MacBook Air M4 (32 GB)
+  Strata's code for these is still here, but MoMoE has changed things around it.
+- **Macs (early):** MoMoE's own Metal engine ([src/metal](src/metal/README.md)), tested on a MacBook Air M4 (32 GB)
   and a Mac Studio M1 Ultra (64 GB). `momoe setup` sets up Ornith-1.5 IQ4_XS; on a Mac with less than ~28 GB the
   experts that do not fit are read from the SSD as needed. Flash-Next runs too, set up by hand
   ([design/mac-port.md](design/mac-port.md)).
@@ -84,7 +84,7 @@ Flash-Next: medians of three runs of `tools/strata_bench.py`; more in the [desig
 
 `./setup.sh --check` lists what fits your PC. The Qwen3.6-family files are described in
 [docs/QWEN36.md](docs/QWEN36.md) and [docs/QWEN35MOE_GGUFS.md](docs/QWEN35MOE_GGUFS.md). The authors and quantizers
-above made these models; Momoe only runs them.
+above made these models; MoMoE only runs them.
 
 ## Install
 
@@ -113,7 +113,7 @@ momoe list                            # the configs in config/
 momoe start ornith-8gb                # start one (.json can be left off)
 momoe status                          # what is running, and where
 momoe run claude                      # Claude Code, connected to it (also: codex, opencode)
-momoe run unsloth                     # Unsloth Studio with a "Momoe" provider
+momoe run unsloth                     # Unsloth Studio with a "MoMoE" provider
 momoe run lmstudio                    # LM Studio, with the plugin it needs installed and set up
 momoe run claude --config ornith-8gb  # start that config first if nothing is running
 momoe stop
@@ -135,13 +135,18 @@ in the config, and `momoe status` shows it. The server listens on 127.0.0.1 only
 | `models/`, `packs/`, `mtp/` | the downloaded models and what setup prepares from them (not in git) |
 | `engine/` | the compiled engine (`momoe`, `momoe-vision`) |
 | `.momoe/` | the server's state and log |
-| `design/` | Momoe's design notes: what was measured, chosen or rejected |
-| `docs/` | Strata's documentation. Most of it applies; it says "Strata" where Momoe has its own name |
+| `design/` | MoMoE's design notes: what was measured, chosen or rejected |
+| `docs/` | Strata's documentation. Most of it applies; it says "Strata" where MoMoE has its own name |
 
 ## Credits
 
 - **[Strata](https://github.com/Niko1221/Strata)**, by Niko1221 and the Strata contributors: the engine, the server,
-  the installer, the documentation and the paper. Momoe is their work with changes on top.
+  the installer, the documentation and the paper. MoMoE is their work with changes on top.
+- Changes taken from other Strata forks and open pull requests, credited to their authors:
+  - [Asofwar/Strata](https://github.com/Asofwar/Strata) by Asofwar: the Qwen3.6 decode-path speedups, the fast
+    256 x 8 router on CUDA and the control-vector fix (three commits, under their own name).
+  - [#2674](https://github.com/Niko1221/Strata/pull/2674) by Scott Page ([page1](https://github.com/page1)): the
+    server logs a reply that ended after its thinking with no text and no tool call.
 - **[llama.cpp / ggml](https://github.com/ggml-org/llama.cpp)**: the GGUF format, the quantization kernels and the
   image encoder, which Strata builds on.
 - The models' authors and quantizers listed above: the Qwen team, ISTA-DASLab, ukisai, Unsloth, bartowski, Ornith AI
@@ -149,5 +154,5 @@ in the config, and `momoe status` shows it. The server listens on 127.0.0.1 only
 
 ## License
 
-MIT, like Strata: see [LICENSE](LICENSE). Strata's copyright notice stays with its code, and Momoe's changes are under
+MIT, like Strata: see [LICENSE](LICENSE). Strata's copyright notice stays with its code, and MoMoE's changes are under
 the same license.

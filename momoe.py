@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Momoe: more MoEs, built on Strata (https://github.com/Niko1221/Strata).
+"""MoMoE: more MoEs, built on Strata (https://github.com/Niko1221/Strata).
 
     momoe setup [setup options]          install a model or change its settings (setup.py --setup), then start it
     momoe start CONFIG [setup options]   start the server from a config, in the background; --host, --api-key,
@@ -435,7 +435,7 @@ def run_codex(s, h, args) -> int:
         return missing("Codex", INSTALL["codex"])
     model, ctx = h.get("model") or "momoe", int(h.get("max_context") or 0)
     env = dict(os.environ)
-    over = ['model_provider="momoe"', 'model_providers.momoe.name="Momoe"',
+    over = ['model_provider="momoe"', 'model_providers.momoe.name="MoMoE"',
             f'model_providers.momoe.base_url="{base_url(s)}/v1"', 'model_providers.momoe.wire_api="responses"',
             "model_providers.momoe.stream_idle_timeout_ms=600000",   # a first, long prompt can take minutes
             "show_raw_agent_reasoning=true"]                         # the model writes no reasoning summaries
@@ -461,7 +461,7 @@ def run_opencode(s, h, args) -> int:
     if ctx:
         entry["limit"] = {"context": ctx, "output": min(32768, ctx // 4)}
     cfg = {"$schema": "https://opencode.ai/config.json",
-           "provider": {"momoe": {"npm": "@ai-sdk/openai-compatible", "name": "Momoe",
+           "provider": {"momoe": {"npm": "@ai-sdk/openai-compatible", "name": "MoMoE",
                                   "options": {"baseURL": f"{base_url(s)}/v1", "apiKey": server_key(s) or "momoe"},
                                   "models": {model: entry}}},
            "model": f"momoe/{model}", "small_model": f"momoe/{model}"}
@@ -473,7 +473,7 @@ def run_opencode(s, h, args) -> int:
 
 UNSLOTH_DB = Path.home() / ".unsloth" / "studio" / "studio.db"
 UNSLOTH_URL = "http://127.0.0.1:8888"
-UNSLOTH_ID = "6d6f6d6f65000000"                      # the Momoe provider's row (16 hex digits, as Studio's own)
+UNSLOTH_ID = "6d6f6d6f65000000"                      # the MoMoE provider's row (16 hex digits, as Studio's own)
 
 
 def unsloth_up() -> bool:
@@ -484,7 +484,7 @@ def unsloth_up() -> bool:
 
 
 def unsloth_provider(s, h) -> None:
-    """Studio's provider list (its own SQLite table, as its Settings page writes it): one "Momoe" entry that
+    """Studio's provider list (its own SQLite table, as its Settings page writes it): one "MoMoE" entry that
     points at this server, added or brought up to date.  The other entries stay as they are."""
     model, url = h.get("model") or "momoe", f"{base_url(s)}/v1"
     now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
@@ -496,11 +496,11 @@ def unsloth_provider(s, h) -> None:
         row = con.execute("SELECT id FROM llm_providers WHERE id = ?", (UNSLOTH_ID,)).fetchone()
         models = json.dumps([model])
         if row:
-            con.execute("UPDATE llm_providers SET base_url = ?, models_json = ?, available_models_json = ?, "
+            con.execute("UPDATE llm_providers SET display_name = 'MoMoE', base_url = ?, models_json = ?, available_models_json = ?, "
                         "is_enabled = 1, updated_at = ? WHERE id = ?", (url, models, models, now, UNSLOTH_ID))
         else:
             con.execute("INSERT INTO llm_providers (id, provider_type, display_name, base_url, models_json, "
-                        "available_models_json, created_at, updated_at) VALUES (?, 'llama_cpp', 'Momoe', ?, ?, ?, "
+                        "available_models_json, created_at, updated_at) VALUES (?, 'llama_cpp', 'MoMoE', ?, ?, ?, "
                         "?, ?)", (UNSLOTH_ID, url, models, models, now, now))
         con.commit()
     finally:
@@ -525,15 +525,15 @@ def run_unsloth(s, h, args) -> int:
     try:
         unsloth_provider(s, h)
     except sqlite3.Error as e:
-        say(f"Could not add the Momoe provider to Unsloth Studio ({e}). Add it in Studio's settings: provider "
+        say(f"Could not add the MoMoE provider to Unsloth Studio ({e}). Add it in Studio's settings: provider "
             f"llama.cpp, base URL {base_url(s)}/v1")
     else:
         say(f"Unsloth Studio {'started' if started else 'is running'}: {UNSLOTH_URL}")
-        say(f"  Its provider \"Momoe\" points at {base_url(s)}/v1 ({h.get('model')}): pick it in the model menu.")
+        say(f"  Its provider \"MoMoE\" points at {base_url(s)}/v1 ({h.get('model')}): pick it in the model menu.")
         if not started:
             say("  (reload the Studio page if it was open)")
     if server_key(s):
-        say("  This server needs an API key: enter it in the Momoe provider's settings in Studio.")
+        say("  This server needs an API key: enter it in the MoMoE provider's settings in Studio.")
     return 0
 
 
