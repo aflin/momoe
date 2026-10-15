@@ -64,7 +64,13 @@ class CarryOver(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertNotIn("kept from", out)
         self.assertNotIn(".bak", out)
-        self.assertFalse(set(cfg) - setup.SETUP_KEYS)                     # setup writes only its own keys
+        self.assertEqual(set(cfg) - setup.SETUP_KEYS, {"sampling"})       # setup writes only its own keys, and
+        self.assertEqual(cfg["sampling"], setup.recommended_sampling(cfg["model_name"]))   # the card's sampling
+
+    def test_every_model_has_its_cards_sampling(self):
+        for fam in setup.FAMILIES.values():
+            want = setup.SAMPLING_FLASH_NEXT if fam["name"].startswith(("qwen3.8-", "swift-")) else setup.SAMPLING_QWEN36
+            self.assertEqual(setup.recommended_sampling(fam["name"] + "-iq4_xs"), want, fam["name"])
 
     def test_setup_keys_are_rewritten(self):
         code, out, first, _ = self.run_setup()

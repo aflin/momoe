@@ -4382,6 +4382,24 @@ def args_dropped(old: dict, cfg: dict) -> list[str]:
     return list(dict.fromkeys(f for f in flags(old) if f not in new))
 
 
+# Momoe: the model cards' thinking-mode sampling, written into a config that has no "sampling" block (a block of the
+# user's own is kept).  Claude Code and other agents send no temperature, and without a block that meant greedy
+# decoding, which the cards advise against for thinking models.  Measured: no slower than greedy (Ornith IQ4_XS,
+# 400-token answers, MTP drafts: RTX 4070 Ti 122.9 vs 118.8 tok/s, 80% of drafts kept either way).
+SAMPLING_QWEN36 = {"temperature": 0.6, "top_p": 0.95, "top_k": 20}       # Qwen3.6: thinking, precise coding;
+                                                                          # Ornith-1.5: general tasks
+SAMPLING_FLASH_NEXT = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}   # Qwen3.8-Flash-Next: thinking mode
+
+
+def recommended_sampling(model_name) -> dict | None:
+    name = str(model_name or "")
+    if name.startswith(("qwen3.6-", "ornith-", "kat-coder-")):
+        return dict(SAMPLING_QWEN36)
+    if name.startswith(("qwen3.8-flash-next", "swift-")):
+        return dict(SAMPLING_FLASH_NEXT)
+    return None
+
+
 def write_setup_config(cfg_path: Path, cfg: dict, source: Path | None = None) -> None:
     """#629: setup's run config, written over an earlier one for the same model without losing what the user added
     to it: the keys setup does not write are carried over (carry_over), and the earlier file is kept as
@@ -4397,6 +4415,12 @@ def write_setup_config(cfg_path: Path, cfg: dict, source: Path | None = None) ->
         if not isinstance(old, dict):
             old = None
     kept = carry_over(old, cfg) if old is not None else []
+    if "sampling" in kept and cfg["sampling"] == recommended_sampling(cfg.get("model_name")):
+        kept.remove("sampling")                        # the block an earlier setup wrote: not the user's
+    if "sampling" not in cfg and (sampling := recommended_sampling(cfg.get("model_name"))):
+        cfg["sampling"] = sampling
+        ok("sampling: " + ", ".join(f"{k} {v}" for k, v in sampling.items()) + " (the model card's; a request's own "
+           "settings win)")
     if "images" in cfg and cfg["images"] is None:      # --images no (or not downloaded): no image section
         cfg.pop("images")
     bak = None
@@ -5605,7 +5629,7 @@ def mac_setup(a, data: Path, port: int) -> int:
         cfg["host"] = a.host
     if a.api_key:
         cfg["api_key"] = a.api_key
-    write_config(cfg_path, cfg)
+    write_setup_config(cfg_path, cfg)                  # what the user added to an earlier one is kept
     ok(f"config: {cfg_path.name}")
 
     say()

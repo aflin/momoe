@@ -1290,7 +1290,10 @@ there (`finish_reason` "stop"; `stop_reason` "stop_sequence" with `stop_sequence
 is not reproducible run to run - for seed-reproducible output add `--adapt-every 100000` (static residency) to the
 engine arguments. The run config's optional `sampling` block sets the defaults for requests that leave the fields out
 (`"sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20}`); a request's own fields always win, and with no
-block at all a request without sampling keys decodes greedy. The penalties (`presence_penalty`, `frequency_penalty`,
+block at all a request without sampling keys decodes greedy. Momoe's setup writes the model card's thinking-mode
+block into a config that has none (Qwen3.6, Ornith-1.5 and KAT-Coder: temperature 0.6, top_p 0.95, top_k 20;
+Qwen3.8-Flash-Next and its variants: 1.0, 0.95, 20), since agents such as Claude Code send no sampling fields; a block
+of your own is kept. The penalties (`presence_penalty`, `frequency_penalty`,
 `repetition_penalty`, with `penalty_last_n` capping how many recent tokens they count over, default 64 when any
 penalty is set; llama.cpp's names `repeat_penalty` and `repeat_last_n` work too, in the config's `sampling` block and in a request, #1819) ride the same path; they count the tokens the request has consumed, so a repetition penalty
 suppresses what the model itself just said, not the prompt alone. Since engine 0.1.19 they apply to every token
