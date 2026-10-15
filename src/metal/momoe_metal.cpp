@@ -214,6 +214,7 @@ struct Engine {
     Readers readers;
     int n_ctx = 32768, max_batch = 512;
     bool load_mtp = false;                                   // --mtp K: draft K tokens with the MTP layer
+    bool preloaded = false;                                  // every expert in its own slot (preload)
     std::string draft_vocab;                                 // --draft-vocab: the draft head's token subset
     std::string mtp_gguf;                                    // --mtp-gguf: qwen4exp's MTP layer (not in its GGUFs)
     double t_mtp = 0;                                        // time in the MTP layer
@@ -1027,6 +1028,7 @@ static void preload(Engine & e) {
         for (int i = 0; i < G.n_slots; ++i)
             while (G.left[i].load(std::memory_order_acquire)) { }
     P.bytes_read = 0;
+    e.preloaded = true;
     fprintf(stderr, "momoe-metal: every expert loaded in %.1f s (no pauses)\n", now_s() - t0);
 }
 
@@ -1343,6 +1345,14 @@ static ggml_tensor * moe_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, i
     Group & G = e.pool.g[L.grp];
     const bool big = staged(m.n_used, G.n_slots, T);         // the staging copy, by expert number (see STAGE_MIN_TOKENS)
     ggml_tensor ** as = big ? G.stage : G.t;
+    ggml_tensor * layer_t[3];
+    if (big && e.preloaded) {                                // no pauses fill the staging copy: the layer's experts are
+        const int64_t s0 = ((const int32_t *) L.slot_map->data)[0];   // in a row in the pool (preload), a view of them
+        for (int k = 0; k < 3; ++k)
+            layer_t[k] = ggml_view_3d(c, G.t[k], G.t[k]->ne[0], G.t[k]->ne[1], m.n_expert, G.t[k]->nb[1], G.t[k]->nb[2],
+                                      (size_t) s0 * G.t[k]->nb[2]);
+        as = layer_t;
+    }
     if (big) slots = ids;
     ggml_tensor * up = ggml_mul_mat_id(c, as[1], x3, slots);                            // [n_ff, n_used, T]
     ggml_tensor * gt = ggml_mul_mat_id(c, as[0], x3, slots);
@@ -1841,6 +1851,54 @@ static void reset_state(Engine & e) {
     for (ggml_tensor * t : state_tensors(e)) memset(t->data, 0, ggml_nbytes(t));
 }
 
+// the caches kept per position: the attention keys and values (the MTP layer's too) and QSA's indexer keys, each
+// with the dimension that counts positions and how many positions one of its rows holds (QSA's pooled keys: a block)
+struct PosTensor { ggml_tensor * t; int dim, per_row; };
+
+static std::vector<PosTensor> position_tensors(Engine & e) {
+    std::vector<PosTensor> r;
+    auto add = [&](ggml_tensor * t, int dim, int per_row) { if (t) r.push_back({t, dim, per_row}); };
+    for (auto & L : e.m.layers) {
+        add(L.k_cache, 2, 1);
+        add(L.v_cache, 2, 1);
+        add(L.idx_raw, 1, 1);
+        add(L.idx_pool, 1, e.m.kpool);
+    }
+    add(e.m.mtp.k_cache, 2, 1);
+    add(e.m.mtp.v_cache, 2, 1);
+    return r;
+}
+
+// the bytes of positions [a, b) in one of them: (offset, size); a block of QSA's pooled keys counts when it touches them
+static std::pair<size_t, size_t> position_rows(const PosTensor & pt, int a, int b) {
+    const size_t rb = pt.t->nb[pt.dim];
+    const int64_t r0 = a / pt.per_row, r1 = std::min<int64_t>(pt.t->ne[pt.dim], (b + pt.per_row - 1) / pt.per_row);
+    return {(size_t) r0 * rb, r1 > r0 ? (size_t) (r1 - r0) * rb : 0};
+}
+
+// positions [a, b) of every per-position cache, copied aside (appended to `to`, one string per cache) or put back
+// (Apple Silicon: the Metal buffers are host memory; the GPU is idle between requests)
+static void save_positions(Engine & e, int a, int b, std::vector<std::string> & to) {
+    const auto ts = position_tensors(e);
+    to.resize(ts.size());
+    for (size_t i = 0; i < ts.size(); ++i) {
+        const auto [off, n] = position_rows(ts[i], a, b);
+        to[i].assign((const char *) ts[i].t->data + off, n);
+    }
+}
+
+static void restore_positions(Engine & e, int a, const std::vector<std::string> & from) {
+    const auto ts = position_tensors(e);
+    for (size_t i = 0; i < ts.size(); ++i)
+        memcpy((char *) ts[i].t->data + position_rows(ts[i], a, a + 1).first, from[i].data(), from[i].size());
+}
+
+static size_t position_bytes(Engine & e, int a, int b) {
+    size_t n = 0;
+    for (const auto & pt : position_tensors(e)) n += position_rows(pt, a, b).second;
+    return n;
+}
+
 static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
     Model & m = e.m;
     const int ne = m.h_dim();                               // the MTP layer's hidden input per position
@@ -1872,7 +1930,25 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
 
     std::vector<int32_t> live;                              // the tokens the state holds (positions 0..)
     std::vector<float> last_h;                              // the normalized hidden state of the last one
-    struct Ckpt { std::vector<int32_t> toks; Saved st; std::vector<float> h; } ck;   // at the end of the last prompt
+    std::vector<int32_t> kv;                                // the tokens whose positions the attention caches hold
+    // a restart point: the recurrent state after `toks` (their positions stay in the attention caches as long as kv
+    // starts with them).  One per prompt, in front of its last <|im_start|>: the reply's opening is written back
+    // differently in the next request (Claude Code: the thinking block), so a checkpoint at the prompt's very end was
+    // two tokens too far and every agent turn read its whole prompt again.
+    struct Ckpt { std::vector<int32_t> toks; Saved st; std::vector<float> h; };
+    std::vector<Ckpt> cks;                                  // oldest first
+    const size_t max_cks = 4;
+    const int32_t im_start = 248045;                        // <|im_start|> (Qwen3.5/3.6, Ornith, Flash-Next)
+    // a conversation set aside while another request overwrites its positions (Claude Code's short side requests,
+    // the session's title): its checkpoint and its caches' positions [from, toks.size()) copied aside; those before
+    // `from` are the other request's too and stay in place
+    struct Parked { Ckpt ck; int from = 0; std::vector<std::string> pos; } parked;
+    const size_t park_min = 1024;                           // tokens: shorter conversations are read again instead
+    const size_t park_max_bytes = (size_t) 4 << 30;
+    auto common = [](const std::vector<int32_t> & a, const std::vector<int32_t> & b) {
+        const size_t n = std::min(a.size(), b.size());
+        return (size_t) (std::mismatch(a.begin(), a.begin() + n, b.begin()).first - a.begin());
+    };
     std::mt19937 rng(1234);
     std::vector<float> hc, hc2;
     for (;;) {
@@ -1926,26 +2002,81 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
         bool bad = false;
         for (int32_t t : prompt) bad |= t < 0 || t >= m.n_vocab;
         if (bad) { sv.busy = false; out_line("ERR a token id is outside the vocabulary"); continue; }
-        // where to start: the state continues when the prompt extends it, or the checkpoint at the end of the last
-        // prompt is put back when the prompt starts with it (an agent's next turn); else from the start. At least
-        // the last prompt token is run again (its logits are not kept).
+        // where to start: the state continues when the prompt extends it; else the longest checkpoint the prompt
+        // starts with whose positions the caches still hold (an agent's next turn); else the parked conversation's,
+        // its positions put back; else from the start.  At least the last prompt token is run again (its logits are
+        // not kept).
         auto starts_with = [&](const std::vector<int32_t> & a) {
             return a.size() < prompt.size() && std::equal(a.begin(), a.end(), prompt.begin());
         };
+        auto in_caches = [&](const std::vector<int32_t> & a) { return common(a, kv) == a.size(); };
+        auto main_ck = [&]() -> Ckpt * {                    // the longest checkpoint of what the caches hold
+            Ckpt * b = nullptr;
+            for (auto & c : cks)
+                if (in_caches(c.toks) && (!b || c.toks.size() > b->toks.size())) b = &c;
+            return b;
+        };
+        auto park = [&](const Ckpt & c, size_t from) {      // c's positions from `from` on, copied aside
+            parked = Parked();
+            if (c.toks.size() < park_min || from >= c.toks.size()) return;
+            const size_t bytes = position_bytes(e, (int) from, (int) c.toks.size());
+            if (bytes > park_max_bytes) return;
+            const double tp = now_s();
+            save_positions(e, (int) from, (int) c.toks.size(), parked.pos);
+            parked.ck = c;
+            parked.from = (int) from;
+            fprintf(stderr, "momoe serve: conversation cache: set aside a conversation of %zu tokens (positions %zu.., "
+                    "%.0f MiB in %.0f ms)\n", c.toks.size(), from, bytes / 1048576.0, 1000 * (now_s() - tp));
+        };
         std::vector<float> h_before;                        // the hidden state of the position before the new tokens
-        if (!live.empty() && starts_with(live)) {
+        Ckpt * best = nullptr;
+        for (auto & c : cks)
+            if (starts_with(c.toks) && in_caches(c.toks) && (!best || c.toks.size() > best->toks.size())) best = &c;
+        if (!live.empty() && starts_with(live) && (!best || live.size() >= best->toks.size())) {
             h_before = last_h;
-        } else if (!ck.toks.empty() && starts_with(ck.toks)) {
-            restore_state(e, ck.st);
-            live = ck.toks;
-            last_h = h_before = ck.h;
+        } else if (best) {
+            restore_state(e, best->st);
+            live = best->toks;
+            last_h = h_before = best->h;
+        } else if (!parked.ck.toks.empty() && starts_with(parked.ck.toks) &&
+                   common(kv, parked.ck.toks) >= (size_t) parked.from) {
+            Parked back = std::move(parked);
+            parked = Parked();
+            if (Ckpt * c = main_ck()) park(*c, common(c->toks, back.ck.toks));   // the two swap places
+            const double tp = now_s();
+            restore_positions(e, back.from, back.pos);
+            restore_state(e, back.ck.st);
+            live = kv = back.ck.toks;
+            last_h = h_before = back.ck.h;
+            fprintf(stderr, "momoe serve: conversation cache: put back a conversation of %zu tokens in %.0f ms\n",
+                    live.size(), 1000 * (now_s() - tp));
+            cks.push_back(std::move(back.ck));
         } else {
+            size_t best_ck = 0;
+            for (auto & c : cks) best_ck = std::max(best_ck, common(c.toks, prompt));
+            if (!live.empty() || !cks.empty())
+                fprintf(stderr, "momoe serve: no reuse: the prompt shares %zu of the last state's %zu tokens and %zu "
+                        "with a checkpoint\n", common(live, prompt), live.size(), best_ck);
+            if (Ckpt * c = main_ck()) park(*c, common(c->toks, prompt));
             reset_state(e);
             live.clear();
             last_h.clear();
-            ck.toks.clear();                                 // its positions are about to be written again
         }
         const int reused = (int) live.size();
+        // the parked conversation's positions this request writes (from `reused` on) are copied aside first
+        if (!parked.ck.toks.empty() && reused < parked.from) {
+            if (common(kv, parked.ck.toks) >= (size_t) parked.from) {
+                const auto ts = position_tensors(e);
+                for (size_t i = 0; i < ts.size(); ++i) {
+                    const size_t rb = ts[i].t->nb[ts[i].dim];
+                    const size_t r0 = reused / ts[i].per_row, r1 = parked.from / ts[i].per_row;
+                    parked.pos[i].insert(0, (const char *) ts[i].t->data + r0 * rb, (r1 - r0) * rb);
+                }
+                parked.from = reused;
+            } else {
+                parked = Parked();
+            }
+        }
         out_line("RESUME %d", reused);
         // the prompt
         const bool greedy = sp.temp <= 0;
@@ -1955,15 +2086,31 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
         std::vector<float> H;                                // the new positions' hidden states (the MTP layer)
         std::vector<float> lg;
         bool cancelled = false;
-        for (size_t i = reused; i < prompt.size(); i += e.max_batch) {
+        size_t ck_pos = prompt.size();                      // this prompt's checkpoint: in front of its last
+        for (size_t j = prompt.size(); j-- > (size_t) reused + 1;)   // <|im_start|>, else at its end
+            if (prompt[j] == im_start) { ck_pos = j; break; }
+        for (size_t i = reused; i < prompt.size();) {
             if (sv.stop) { cancelled = true; break; }
-            const int T = (int) std::min(prompt.size() - i, (size_t) e.max_batch);
+            size_t end = std::min(prompt.size(), i + (size_t) e.max_batch);
+            if (i < ck_pos && end > ck_pos) end = ck_pos;
+            const int T = (int) (end - i);
             Out o;
-            o.logits = !greedy && i + T == prompt.size();
+            o.logits = !greedy && end == prompt.size();
             next = forward(e, prompt.data() + i, T, p, &o);
             if (m.has_mtp) H.insert(H.end(), o.hidden.begin(), o.hidden.end());
             if (o.logits) lg = o.last_logits;
             p += T;
+            i = end;
+            if (end == ck_pos) {
+                Ckpt c;
+                c.toks.assign(prompt.begin(), prompt.begin() + ck_pos);
+                save_state(e, c.st);
+                if (m.has_mtp) c.h.assign(H.end() - ne, H.end());
+                cks.erase(std::remove_if(cks.begin(), cks.end(), [&](const Ckpt & o) { return o.toks == c.toks; }),
+                          cks.end());
+                cks.push_back(std::move(c));
+                if (cks.size() > max_cks) cks.erase(cks.begin());
+            }
             const double ms = 1000 * (now_s() - t0);
             out_line("PP %d %zu %.0f %.1f", p - reused, prompt.size() - reused, ms, (p - reused) / (ms / 1000));
         }
@@ -1973,9 +2120,6 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
         if (!cancelled) {
             live.assign(prompt.begin(), prompt.end());
             if (m.has_mtp) last_h.assign(H.end() - ne, H.end());
-            ck.toks = live;                                  // the checkpoint: the end of this prompt
-            save_state(e, ck.st);
-            ck.h = last_h;
             if (!greedy) next = sample(lg, sp, rng);
             finish = "length";
             const double td0 = now_s();
@@ -2069,14 +2213,17 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                     generated / (decode_ms / 1000 + 1e-9), accepted, offered);
             out_line("DONE %d %zu %.0f %.0f %s %d %d %d", generated, prompt.size(), prompt_ms, decode_ms, finish, accepted,
                      offered, reused);
+            kv = live;
         } else {
             live.clear();                                    // part of the prompt was read: the state is not a prefix
+            kv.assign(prompt.begin(), prompt.begin() + p);   // (its positions are: its checkpoint stays usable)
             out_line("DONE 0 %zu %.0f 0 cancel 0 0 %d", prompt.size(), prompt_ms, reused);
         }
+        cks.erase(std::remove_if(cks.begin(), cks.end(), [&](const Ckpt & c) { return !in_caches(c.toks); }),
+                  cks.end());
         sv.busy = false;
     }
-    fclose(stdin);
-    reader.detach();
+    reader.detach();                                         // (closing stdin here would wait on the reader's lock)
     return 0;
 }
 
@@ -2165,7 +2312,9 @@ int main(int argc, char ** argv) {
         for (auto b : e.bufs) ggml_backend_buffer_free(b);
         ggml_backend_free(e.metal);
         ggml_backend_free(e.cpu);
-        return r;
+        fflush(stdout);
+        fflush(stderr);
+        _exit(r);                                             // the stdin reader may still be blocked in a read
     }
     double t0 = now_s();
     int p = 0, next = 0;
