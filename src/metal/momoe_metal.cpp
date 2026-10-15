@@ -1384,6 +1384,7 @@ struct Out {
     std::vector<float> hidden;                               // [T, n_embd]: the normalized hidden state of each position
     bool logits = false;                                     // the last position's logits (sampling)
     std::vector<float> last_logits;
+    std::vector<float> all_logits;                           // logits and all: every position's [T, n_vocab]
 };
 
 static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = nullptr) {
@@ -1627,6 +1628,11 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
         if (hid) {
             out->hidden.resize((size_t) T * m.h_dim());
             ggml_backend_tensor_get(hid, out->hidden.data(), 0, out->hidden.size() * sizeof(float));
+        }
+        if (out->logits && out->all) {
+            const int64_t V = logits->ne[0];
+            out->all_logits.resize((size_t) V * logits->ne[1]);
+            ggml_backend_tensor_get(logits, out->all_logits.data(), 0, out->all_logits.size() * sizeof(float));
         }
         if (out->logits) {
             const int64_t V = logits->ne[0];
@@ -2080,7 +2086,7 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
         out_line("RESUME %d", reused);
         // the prompt
         const bool greedy = sp.temp <= 0;
-        const bool draft = mtp_k > 0 && greedy;
+        const bool draft = mtp_k > 0;                       // sampled: a draft is kept when it is the token sampled
         const double t0 = now_s();
         int p = reused, next = 0;
         std::vector<float> H;                                // the new positions' hidden states (the MTP layer)
@@ -2176,10 +2182,21 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                     offered += T - 1;
                     Out ov;
                     ov.all = true;
+                    ov.logits = !greedy;
                     if (T > 1) save_state(e, e.saved);
                     forward(e, W.data(), T, p, &ov);
-                    int n = 0;
-                    while (n < T - 1 && ov.next[n] == W[n + 1]) ++n;
+                    std::vector<int32_t> nx;                 // the next token after each kept position: the greedy
+                    int n = 0;                               // one, or sampled position by position
+                    for (int j = 0; j < T; ++j) {
+                        if (greedy) nx.push_back(ov.next[j]);
+                        else {
+                            const size_t V = ov.all_logits.size() / T;
+                            lg.assign(ov.all_logits.begin() + j * V, ov.all_logits.begin() + (j + 1) * V);
+                            nx.push_back(sample(lg, sp, rng));
+                        }
+                        if (j == T - 1 || nx[j] != W[j + 1]) break;
+                        ++n;
+                    }
                     accepted += n;
                     if (n + 1 < T) {
                         restore_state(e, e.saved);
@@ -2187,12 +2204,12 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                     }
                     live.insert(live.end(), W.begin(), W.begin() + n + 1);
                     last_h.assign(ov.hidden.begin() + (size_t) n * ne, ov.hidden.begin() + (size_t) (n + 1) * ne);
-                    for (int j = 0; j <= n && go; ++j) go = emit(ov.next[j]);
+                    for (int j = 0; j <= n && go; ++j) go = emit(nx[j]);
                     if (!go) break;
-                    const int dn = mtp_forward(e, ov.hidden.data(), ov.next.data(), n + 1, p + 1, hc, &pb);
+                    const int dn = mtp_forward(e, ov.hidden.data(), nx.data(), n + 1, p + 1, hc, &pb);
                     drafts = chain(dn, p + n + 1);
                     p += n + 1;
-                    t = ov.next[n];
+                    t = nx[n];
                 }
             } else {
                 int t = next;
