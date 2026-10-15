@@ -31,8 +31,9 @@ default behaviour unchanged. MoMoE is the place for those changes:
   other large MoE models.
 - **Agents first.** `momoe run claude` (or Codex, OpenCode, Unsloth Studio, LM Studio) starts the model and the tool,
   already connected to each other. There is no web page: the server is for your apps and agents.
-- **More platforms.** The aims are Windows and Apple Silicon Macs, including Flash-Next on a 32 GB MacBook by reading
-  its experts from the SSD as they are needed. Macs have a first version (below); Windows does not work yet.
+- **Two platforms.** The aims are Linux with NVIDIA cards (CUDA) and Apple Silicon Macs, including Flash-Next on a
+  32 GB MacBook by reading its experts from the SSD as they are needed. Macs have a first version (below). Other
+  platforms and hardware (Windows, AMD or Intel cards) may work, but they will need help from people who run them.
 - **Built from source.** MoMoE compiles its engine on your PC; there are no ready-made downloads.
 
 ## How it is written
