@@ -291,7 +291,9 @@ def cmd_list(args) -> int:
     for p in have:
         c = read_json(p) or {}
         on = s is not None and Path(s["config"]).resolve() == p.resolve()
-        ctx = c["args"][c["args"].index("--max-context") + 1] if "--max-context" in c.get("args", [])[:-1] else "?"
+        args = c.get("args", [])
+        flag = next((f for f in ("--max-context", "--ctx") if f in args[:-1]), None)   # (--ctx: Momoe's ggml engine)
+        ctx = args[args.index(flag) + 1] if flag else "?"
         say(f"{'*' if on else ' '} {p.name:36} {c.get('model_name', ''):40} context {ctx}{'  (running)' if on else ''}")
     return 0
 

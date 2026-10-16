@@ -72,6 +72,7 @@ HF_REVISIONS = {
     "bartowski/Ornith-1.5-35B-A3B-GGUF": "64b0493d34a5ca4c1b4ad67bb99b41d74b4f07d6",
     "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF": "5c2410d71524f4f72b023ce8daf7a80528226d5f",   # its mmproj (images)
     "Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF": "e4ae9970325413d582ba2c294122fc5567ec1dd7",
+    "unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF": "34841e360524d421c564cc3ed247aa04a865473b",   # 2026-10-16
 }
 
 
@@ -563,6 +564,30 @@ FAMILIES = {
               "mmproj_sha256": (907543008, "b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0")},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
+# Momoe: families on Momoe's ggml engine (src/metal; momoe-cuda on Linux with an NVIDIA card): architectures Strata's
+# engine does not run.  One GGUF, no pack (only its tokenizer), the routed experts in a VRAM pool the engine sizes
+# itself and the rest computed on the CPU from the mapped file (docs: src/metal/README.md).
+BOLT_FILES = {
+    "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-UD-IQ3_XXS.gguf":
+        (31561116672, "ab8be730b85721d32aca61a81252cc95e682efd93cb8363fee425e4a90bc5cf5"),
+    "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-UD-Q3_K_XL.gguf":
+        (39027158016, "51077d511c769efb299073cc7b33d31bb007eb4fdaed60938dc1133146b708e3"),
+}
+GGML_FAMILIES = {
+    "bolt": {"title": "Nemotron 3.5 Bolt 74B-A9B", "by": "NVIDIA; Unsloth's GGUFs",
+             "about": "Mamba-2 + attention + latent MoE, 9B active; a 32 GB download, ~56 GB of RAM",
+             "hf": hf("unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF"),
+             "file": "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-{q}.gguf", "tag": "bolt35-",
+             "name": "nemotron-3.5-bolt-74b-a9b",
+             # RAM: the file stays in the OS's file cache (the CPU reads the experts the GPU does not hold from it),
+             # beside the server, the desktop and its programs.  Measured: UD-IQ3_XXS on 63 GB of RAM (a desktop with a
+             # browser open); UD-Q4_K_XL (50 GB) did not fit there and is not offered
+             "models": {"UD-IQ3_XXS": {"about": "3-bit (Unsloth Dynamic), measured", "ram_gb": 56},
+                        "UD-Q3_K_XL": {"about": "3-bit, larger (not measured yet)", "ram_gb": 64}},
+             "sha256": BOLT_FILES,
+             "context": 65536, "min_vram_gb": 11,                        # measured on a 12 GB card
+             "license": "OpenMDW-1.1: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16"},
+}
 # Qwen3.6-35B-A3B (GGUF architecture qwen35moe), Unsloth's GGUFs with the MTP block: a family with an engine path of its
 # own (src/qwen35; `strata` switches to it from the file's architecture).  No pack, no expert profile, no separate MTP
 # draft layer: the engine reads the GGUF as it is, keeps every expert it can in VRAM and computes the rest on the CPU
@@ -1600,8 +1625,10 @@ def model_key(family: str, size: str | None) -> str | None:
 
 
 def model_choices() -> list:
-    """What --model accepts: every size name, and the keys of the sizes another family shares a name with."""
-    return list(dict.fromkeys([*(size_of(m) for m in MODELS), *MODELS]))
+    """What --model accepts: every size name, and the keys of the sizes another family shares a name with (and the
+    ggml families' sizes)."""
+    return list(dict.fromkeys([*(size_of(m) for m in MODELS), *MODELS,
+                               *(q for f in GGML_FAMILIES.values() for q in f["models"])]))
 
 
 def config_tag(cfg_path: Path) -> str:
@@ -4389,6 +4416,7 @@ def args_dropped(old: dict, cfg: dict) -> list[str]:
 SAMPLING_QWEN36 = {"temperature": 0.6, "top_p": 0.95, "top_k": 20}       # Qwen3.6: thinking, precise coding;
                                                                           # Ornith-1.5: general tasks
 SAMPLING_FLASH_NEXT = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}   # Qwen3.8-Flash-Next: thinking mode
+SAMPLING_NEMOTRON = {"temperature": 1.0, "top_p": 0.95}                  # Nemotron 3.5 (Bolt): the card's text sampling
 
 
 def recommended_sampling(model_name) -> dict | None:
@@ -4397,6 +4425,8 @@ def recommended_sampling(model_name) -> dict | None:
         return dict(SAMPLING_QWEN36)
     if name.startswith(("qwen3.8-flash-next", "swift-")):
         return dict(SAMPLING_FLASH_NEXT)
+    if name.startswith("nemotron-3.5-"):
+        return dict(SAMPLING_NEMOTRON)
     return None
 
 
@@ -4814,6 +4844,12 @@ def settings_summary(cfg: dict, port=None) -> str:
     return " ".join(out) + ("; " if out else "") + "server " + ", ".join(srv)
 
 
+def ggml_engine(cfg: dict) -> bool:
+    """Momoe's ggml engine (src/metal): momoe-metal on a Mac, momoe-cuda on Linux (Nemotron 3.5 Bolt). One GPU, its
+    own expert pool: none of the Strata engine's GPU offers, engine checks or layer splits apply to it."""
+    return Path(cfg.get("exe", "")).name in ("momoe-metal", "momoe-cuda")
+
+
 def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_browser=True, yes=False,
           layer_split=None, keep=None, save=False) -> int:
     """keep: settings given on this start (--host, --api-key, --draft-vocab, --vram-reserve-mib).  Momoe: they apply
@@ -4919,7 +4955,7 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
     elif gpu is not None:                              # --gpu N: this start only, on that card
         check_gpus([gpu], found)
         cmd += ["--gpu", str(gpu)]
-    else:
+    elif not ggml_engine(cfg):
         cfg = offer_together(cfg_path, cfg, yes)
     use = gpu if gpu is not None else cfg.get("gpu")
     # #364 #384: a resident low-RAM config on several GPUs; #498: a UD-Q4_K_XL config with its RAM budget (by hand)
@@ -4936,7 +4972,8 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
         g = next((x for x in found if x["index"] == use), None) if use is not None else max(
             found, key=lambda x: (round(x["vram_gb"]), -x["index"]))
         if g is not None:
-            cfg = ensure_engine_for([g], cfg_path, cfg, yes)
+            if not ggml_engine(cfg):
+                cfg = ensure_engine_for([g], cfg_path, cfg, yes)
             ok("GPU: " + gpu_name(g))
     browser = False                                    # Momoe has no web page
     gb = 0.0
@@ -5644,6 +5681,112 @@ def mac_setup(a, data: Path, port: int) -> int:
     return start(cfg_path, port)
 
 
+def ggml_size(fam: dict, size: str | None, ram: float) -> str:
+    """The size to install: --model's (any case), else the largest whose RAM need this PC has (the smallest when none)."""
+    if size:
+        for q in fam["models"]:
+            if q.upper() == size.upper():
+                return q
+        fail(f"{fam['title']} has no size {size}", "sizes: " + ", ".join(fam["models"]))
+    fits = [q for q, d in fam["models"].items() if ram >= d["ram_gb"]]
+    return max(fits, key=lambda q: fam["sha256"][fam["file"].format(q=q)][0]) if fits else next(iter(fam["models"]))
+
+
+def ggml_setup(a, data: Path, port: int, family: str) -> int:
+    """A family on Momoe's ggml engine (GGML_FAMILIES: Nemotron 3.5 Bolt), on Linux with an NVIDIA card: the card and
+    the RAM, the size, momoe-cuda compiled here (src/metal/build_cuda.sh), the GGUF (pinned revision, size, SHA-256), its
+    tokenizer, the config (the model card's sampling), then the start.  The engine sizes its expert pool to the VRAM
+    left after its compute buffers, so there is nothing about VRAM to choose."""
+    fam = GGML_FAMILIES[family]
+    step(1, "checking your PC")
+    if WIN or sys.platform == "darwin":
+        fail(f"{fam['title']} runs on Linux with an NVIDIA card for now (Momoe's ggml engine, momoe-cuda)",
+             "on a Mac: momoe setup (Ornith-1.5); on Windows: not yet")
+    found = [g for g in gpus() if gpu_problem(g) is None]
+    if not found:
+        fail(f"no NVIDIA card Momoe can use: {fam['title']} needs one (nvidia-smi lists none, or none is new enough)")
+    if a.gpu is not None:
+        gpu = next((g for g in found if g["index"] == a.gpu), None)
+        if gpu is None:
+            fail(f"--gpu {a.gpu}: no such NVIDIA card here", "cards: " + ", ".join(str(g["index"]) for g in found))
+    else:
+        gpu = max(found, key=lambda g: (round(g["vram_gb"]), -g["index"]))
+    if a.gpus:
+        warn(f"{fam['title']} runs on one card: using GPU {gpu['index']} ({gpu_name(gpu)})")
+    ram = ram_gb()
+    say(f"  {gpu_name(gpu)}; {ram:.0f} GB of RAM")
+    if gpu["vram_gb"] < fam["min_vram_gb"]:
+        warn(f"{fam['title']} was measured on a 12 GB card: on {gpu['vram_gb']:.0f} GB the dense weights (~5 GB), the "
+             "compute buffers and the prompt staging leave little room for experts on the GPU (slower)")
+    q = ggml_size(fam, a.model, ram)
+    need = fam["models"][q]["ram_gb"]
+    if ram < need:
+        warn(f"{q} wants about {need} GB of RAM and this PC has {ram:.0f} GB: the OS will read experts from the SSD "
+             "(much slower); close other programs")
+    for opt in ("backend", "vision", "kv", "draft_vocab"):
+        if getattr(a, opt, None):
+            warn(f"--{opt.replace('_', '-')}: not used for {fam['title']}")
+    nvcc, ver = find_nvcc()
+    if not nvcc:
+        fail("no CUDA toolkit (nvcc) was found: the engine is compiled here",
+             "install NVIDIA's CUDA toolkit (12.4 or newer), or set STRATA_NVCC=/path/to/nvcc, and run setup again")
+    ctx = a.context or fam["context"]
+    ok(f"model: {fam['title']} {q} on GPU {gpu['index']}, {ctx // 1024}K context")
+    if fam.get("license"):
+        say(f"  Its license: {fam['license']}")
+
+    step(2, "building the engine (momoe-cuda; the first build takes 10-20 minutes)")
+    pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES, "Python packages (cmake, the server's)")
+    exe = ROOT / "build-cuda" / "momoe-cuda"
+    archs = ";".join(sorted({g["arch"] for g in found}))
+    env = dict(os.environ, NVCC=nvcc, CUDA_ARCHS=archs, PATH=str(Path(nvcc).parent) + os.pathsep + os.environ.get("PATH", ""))
+    run(["sh", str(ROOT / "src" / "metal" / "build_cuda.sh")], env=env)
+    if not exe.exists():
+        fail("the engine did not build", f"see {ROOT / 'build-cuda' / 'cmake.build.log'}")
+    ok(f"{exe} (CUDA {ver[0]}.{ver[1]}, sm {archs.replace(';', ', ')})")
+
+    tag = fam["tag"] + q
+    name = fam["file"].format(q=q)
+    gguf = Path(a.models_dir) / tag / name
+    size, sha = fam["sha256"][name]
+    step(3, f"downloading {fam['title']} {q} ({size / 1e9:.1f} GB)")
+    if not (gguf.exists() and done(gguf)):
+        say(f"  The model goes in {gguf.parent}")
+        download(fam["hf"] + name, gguf)
+    verify_sha256(gguf, size, sha)
+    ok("model file present")
+
+    step(4, "the tokenizer")
+    pack = data / "packs" / tag.lower()
+    if not (pack / "tokenizer" / "vocab.json").exists():
+        run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(gguf), "--out", str(pack)],
+            quiet=True)
+    ok(str(pack / "tokenizer"))
+
+    step(5, "the config")
+    cfg_path = name_config(config_path_for(a.config_name, tag) if a.config_name else
+                           config_dir() / f"{tag.lower()}.json", a)
+    cfg = {"exe": str(exe), "args": ["-m", str(gguf), "--ctx", str(ctx), "--chunk", "1024"], "cwd": str(ROOT),
+           "tokenizer": str(pack / "tokenizer"), "model_name": f"{fam['name']}-{q.lower()}",
+           "log": str(ROOT / (cfg_path.stem + ".log")), "port": port, "gpu": gpu["index"], "setup_tag": tag,
+           "fit_max_tokens": True}                    # (the model card's sampling: write_setup_config)
+    if a.host:
+        cfg["host"] = a.host
+    if a.api_key:
+        cfg["api_key"] = a.api_key
+    write_setup_config(cfg_path, cfg)                  # what the user added to an earlier one is kept
+    ok(f"config: {cfg_path.name}")
+
+    say()
+    say("All set.")
+    say(f"  API (OpenAI):     http://127.0.0.1:{port}/v1")
+    say(f"  API (Anthropic):  http://127.0.0.1:{port}/v1/messages")
+    say(f"  Next time:        momoe start {cfg_path.stem}   (momoe stop ends it; momoe run claude|codex|opencode)")
+    if a.no_start:
+        return 0
+    return start(cfg_path, port, yes=a.yes)
+
+
 def engine_step(a, gpu, hip, amd, cuda_tk, vision):
     """Step 4 of upstream's own-path install: llama.cpp's sources and the engine, compiled here (Momoe has no
     ready-made engines).  Returns (llama, engine folder, its BUILD.json, its library folders, the GPU, the image-encoder
@@ -5857,7 +6000,7 @@ def main() -> int:
     # Momoe: a Mac is set up by mac_setup below (momoe-metal); upstream's metal/setup_mac.py (its Metal engine, Flash-Next)
     # is not called - upstream_mac_setup runs it
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--family", choices=[f for f in FAMILIES if not FAMILIES[f].get("ready")], help="qwen = Qwen3.8-Flash-Next, swift = Swift 1.5, coder = its "
+    ap.add_argument("--family", choices=[f for f in FAMILIES if not FAMILIES[f].get("ready")] + list(GGML_FAMILIES), help="qwen = Qwen3.8-Flash-Next, swift = Swift 1.5, coder = its "
                                                              "Coder, unsloth = Unsloth's 4-bit files, qwen36 = "
                                                              "Qwen3.6-35B-A3B (for 16-32 GB of RAM)")
     ap.add_argument("--model", choices=model_choices())
@@ -6093,6 +6236,8 @@ def main() -> int:
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
 
+    if a.family in GGML_FAMILIES:                    # Momoe's ggml engine (Nemotron 3.5 Bolt)
+        return ggml_setup(a, data, port, a.family)
     if sys.platform == "darwin":                     # an Apple Silicon Mac: the Metal engine
         return mac_setup(a, data, port)
     # ---- 1. the PC
@@ -6322,8 +6467,15 @@ def main() -> int:
                 + ((f"   (recommended for {ram:.0f} GB of RAM: {size_of(qwen36_size(ram))})" if f == "qwen36" else
                     f"   (recommended for Strix Halo: {STRIX_HALO_MODEL})") if f == rec_fam and rec_fam != fams[0]
                    else ""))
-        family = fams[int(ask("Which model?", [str(i) for i in range(1, len(fams) + 1)],
-                              str(fams.index(rec_fam) + 1), a.yes)) - 1]
+        extra = [] if hip else list(GGML_FAMILIES)       # Momoe's ggml engine: NVIDIA cards
+        for i, f in enumerate(extra, len(fams) + 1):
+            d = GGML_FAMILIES[f]
+            say(f"  {i}) {d['title']:20s} {d['by']} - {d['about']}   [Momoe's ggml engine]")
+        pick = int(ask("Which model?", [str(i) for i in range(1, len(fams) + len(extra) + 1)],
+                       str(fams.index(rec_fam) + 1), a.yes))
+        if pick > len(fams):
+            return ggml_setup(a, data, port, extra[pick - len(fams) - 1])
+        family = fams[pick - 1]
     fam = FAMILIES[family]
     if fam.get("ready") and hip:
         # not a risk the user could take: the HIP engine has no NVFP4 expert kernels at all, so it would not start
