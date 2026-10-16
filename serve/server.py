@@ -3104,8 +3104,10 @@ class Service:
         self.tool_call_recovery = False                   # opt-in: tool calls in forms next to the template's
         self.images = None                                # serve/images.py's ImageGen when the config has "images"
         self.restore_after_load = None                    # a session file an image job saved before it unloaded
-        self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
-                            tokenizer.encode("<|endoftext|>", parse_special=True))
+        # the end-of-turn tokens; a name the vocabulary has no single token for (Nemotron 3.5 Bolt has no
+        # <|endoftext|>) is skipped: encoded as text, its first piece ("<") would end every reply that wrote a "<"
+        self.stop_ids = {ids[0] for ids in (tokenizer.encode(s, parse_special=True) for s in (IM_END, "<|endoftext|>"))
+                         if len(ids) == 1}
 
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
@@ -6692,7 +6694,10 @@ def main() -> int:
             tokens[i] = t
         merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
         types = json.loads((tpath / "token_type.json").read_text())
-        tok = ST.Tokenizer(tokens, merges, types)
+        pre = "qwen35"                                  # the pre-tokenizer the pack was extracted with (Bolt: tekken)
+        with contextlib.suppress(OSError, ValueError, AttributeError):
+            pre = json.loads((tpath / "tokenizer.json").read_text(encoding="utf-8")).get("pre") or pre
+        tok = ST.Tokenizer(tokens, merges, types, pre=pre)
     hub = hub_from_config(cfg, a.mcp_config)            # before the minutes of loading: a bad entry stops here
     if a.engine == "strata":
         if not cfg:
