@@ -19,6 +19,7 @@
 #include "ggml-cpu.h"
 #if defined(MOMOE_CUDA)
 #include "ggml-cuda.h"
+#include "ggml-momoe-mailbox.h"
 #include <cuda_runtime.h>
 #else
 #include "ggml-metal.h"
@@ -317,6 +318,7 @@ struct CpuExperts {
     std::vector<float> h;                                    // [miss, use] x n_ff
     std::vector<char> hq;                                    // the same in down's vec_dot_type
     std::vector<float> out;                                  // [T][k][latent]: the GPU adds it to its own part
+    float * outp = nullptr;                                  // where run() writes: out.data(), or a mailbox
     std::vector<int> use_off;                                // first use of each miss in h
     int n_uses = 0;
     double busy_s = 0;
@@ -384,7 +386,7 @@ struct CpuExperts {
             const char * w = down + (size_t) M.x * down_bytes;
             const int base = use_off[u / db];
             for (size_t j = 0; j < M.uses.size(); ++j) {
-                float * o = out.data() + ((size_t) M.uses[j].first * k + M.uses[j].second) * n_in;
+                float * o = outp + ((size_t) M.uses[j].first * k + M.uses[j].second) * n_in;
                 const char * a = hq.data() + (size_t) (base + j) * h_row;
                 for (int r = r0; r < r1; ++r) td->vec_dot(n_ff, o + r, 0, w + (size_t) r * down_row, 0, a, 0, 1);
             }
@@ -415,6 +417,37 @@ struct CpuExperts {
 
 static const int HYB_MAX_T = 16;                             // --hybrid: graphs of up to this many tokens (decode)
 
+#if defined(MOMOE_CUDA)
+// momoe-cuda --hybrid with mailboxes (default; MOMOE_NO_MAILBOX=1: the stops of the scheduler's callback instead): a
+// token runs as one graph. Each MoE layer's SEND op posts its latent input and chosen experts to page-locked memory the
+// GPU maps; a worker thread follows the layers, computes the experts the pool lacks on the CPU and posts their outputs,
+// which the layer's WAIT op (spinning on the flag) adds to the GPU's. The slot table changes only between graphs: an
+// expert being read into the pool is published at the next token boundary (ggml-momoe-mailbox.h).
+struct MbLayer {
+    volatile uint32_t * sent = nullptr, * done = nullptr;    // host addresses
+    float * x = nullptr, * out = nullptr;                    // [T][latent], [T][k][latent]
+    int32_t * ids = nullptr;                                 // [T][k]
+    momoe_mailbox_op send{}, wait{};                         // the ops' userdata (device addresses)
+};
+struct Mailbox {
+    char * host = nullptr;
+    char * dev = nullptr;
+    volatile uint32_t * epoch = nullptr, * timeout = nullptr;
+    std::vector<MbLayer> layer;                              // by layer index (MoE layers only)
+    uint32_t cur = 0;                                        // this graph's epoch
+    // the worker
+    std::thread th;
+    std::mutex mu;
+    std::condition_variable cv;
+    uint64_t job = 0, done_job = 0;
+    bool quit = false;
+    int T = 0;
+    std::vector<int> moe;                                    // the MoE layers, in order
+    std::vector<int> graph;                                  // the ones this graph posts (mailbox layers), in order
+    std::vector<std::pair<int, int>> want;                   // (layer, expert): missed and admitted, to read in
+};
+#endif
+
 struct Engine {
     Model m;
     Pool pool;
@@ -430,6 +463,15 @@ struct Engine {
     CpuExperts cpu_x;
     std::vector<ggml_tensor *> xl;                           // this graph's latent MoE inputs, by layer (hybrid)
     std::vector<float> xl_host;
+#if defined(MOMOE_CUDA)
+    bool mailbox = false;                                    // --hybrid through mailboxes (default)
+    Mailbox mb;
+    bool mb_graph = false;                                   // this graph uses them
+    std::vector<ggml_tensor *> force_gpu;                    // ops the scheduler must place on the GPU
+    struct Pending { int il, x, slot; };
+    std::vector<Pending> mb_pending;                         // experts being read into the pool (published when read)
+    uint64_t mb_fills = 0;
+#endif
     uint64_t hyb_hits = 0, hyb_miss = 0;
     double t_cpu_wait = 0;
     bool load_mtp = false;                                   // --mtp K: draft K tokens with the MTP layer
@@ -1138,9 +1180,11 @@ static void make_resident(Engine & e, int il, const int32_t * ids, int n_tok) {
         int n = 0;
         for (size_t i = 0; i < (size_t) m.n_used * n_tok; ++i) {
             const int x = ids[i];
-            ++P.freq[il * m.n_expert + x];
             if (seen[x]) continue;
             seen[x] = 1;
+            ++P.freq[il * m.n_expert + x];                   // once a chunk: a long prompt's experts would otherwise
+                                                             // outrank the reply's for hundreds of tokens (measured:
+                                                             // 19% hits writing after 20K tokens of prompt, 55% without)
             for (int w = m.part0(); w < 3; ++w) {
                 const size_t off = L.exp_off[w] + (size_t) x * L.exp_bytes[w], t_off = (size_t) x * G.stage[w]->nb[2];
                 jobs.push_back({L.exp_fd, nullptr, L.exp_bytes[w], off, &left, L.exp_map + off, G.stage[w], t_off});
@@ -1157,6 +1201,13 @@ static void make_resident(Engine & e, int il, const int32_t * ids, int n_tok) {
         // there from the staging copy, inside the GPU (no PCIe)
 #if defined(MOMOE_CUDA)
         static const uint32_t admit = getenv("MOMOE_ADMIT") ? (uint32_t) atoi(getenv("MOMOE_ADMIT")) : 2;
+        if (e.mailbox) {                                     // the slot tables change only between graphs: the experts
+            for (int x = 0; x < m.n_expert; ++x) {           // to read in go to the next boundary
+                const int key = il * m.n_expert + x;
+                if (seen[x] && P.slot_of[key] < 0 && P.freq[key] > admit) e.mb.want.push_back({il, x});
+            }
+            return;
+        }
         const uint64_t stamp = ++P.clock;
         bool copied = false;
         for (int x = 0; x < m.n_expert; ++x) {
@@ -1415,6 +1466,7 @@ static void hybrid_resident(Engine & e, int il, const int32_t * ids, int T) {
     C.k = k;
     C.T = T;
     C.out.assign((size_t) T * k * m.latent, 0.0f);
+    C.outp = C.out.data();
     static const bool skip = getenv("MOMOE_TEST_SKIP_CPU") != nullptr;   // a timing test only: the output is wrong
     if (skip) C.miss.clear();
     if (C.miss.empty()) return;
@@ -1432,6 +1484,218 @@ static void hybrid_resident(Engine & e, int il, const int32_t * ids, int T) {
     ggml_backend_tensor_get(e.xl[il], e.xl_host.data(), 0, e.xl_host.size() * sizeof(float));
     C.launch(e.xl_host.data());
 }
+
+#if defined(MOMOE_CUDA)
+// the CPU's part of one MoE layer of a mailbox graph: the experts the slot table points at the zero slot, from the
+// layer's posted input, into its posted outputs (zeros for the GPU's experts); the pool's bookkeeping as hybrid_resident
+static void mb_layer(Engine & e, int il, int T) {
+    Model & m = e.m;
+    Pool & P = e.pool;
+    Layer & L = m.layers[il];
+    Group & G = P.g[L.grp];
+    MbLayer & B = e.mb.layer[il];
+    CpuExperts & C = e.cpu_x;
+    const int k = m.n_used;
+    const int32_t * map = L.slots_host();
+    static const uint32_t admit = getenv("MOMOE_ADMIT") ? (uint32_t) atoi(getenv("MOMOE_ADMIT")) : 2;
+    const uint64_t pin = ++P.clock;
+    if (++P.uses % ((uint64_t) 64 * m.n_layer) == 0)
+        for (auto & c : P.freq) c >>= 1;
+    static thread_local std::vector<int> miss_of;
+    miss_of.assign(m.n_expert, -1);
+    C.miss.clear();
+    for (int i = 0; i < k * T; ++i) {
+        const int x = B.ids[i];
+        const int key = il * m.n_expert + x;
+        ++P.freq[key];
+        const int slot = map[x];
+        if (slot != G.zero) {
+            ++P.hits; ++e.hyb_hits;
+            G.used[slot] = pin;
+            continue;
+        }
+        ++P.misses; ++e.hyb_miss;
+        if (miss_of[x] < 0) {
+            miss_of[x] = (int) C.miss.size();
+            C.miss.push_back({x, {}});
+            if (P.slot_of[key] < 0 && P.freq[key] > admit) e.mb.want.push_back({il, x});
+        }
+        C.miss[miss_of[x]].uses.push_back({i / k, i % k});
+    }
+    memset(B.out, 0, sizeof(float) * (size_t) T * k * m.latent);
+    static const bool skip = getenv("MOMOE_TEST_SKIP_CPU") != nullptr;   // a timing test only: the output is wrong
+    if (C.miss.empty() || skip) return;
+    C.k = k;
+    C.T = T;
+    C.n_in = m.latent;
+    C.n_ff = (int) L.exp_ne[1][1];
+    C.up_type = L.exp_type[1];
+    C.down_type = L.exp_type[2];
+    C.up = L.exp_map + L.exp_off[1];
+    C.down = L.exp_map + L.exp_off[2];
+    C.up_bytes = L.exp_bytes[1];
+    C.down_bytes = L.exp_bytes[2];
+    C.up_row = ggml_row_size(C.up_type, L.exp_ne[1][0]);
+    C.down_row = ggml_row_size(C.down_type, L.exp_ne[2][0]);
+    C.outp = B.out;
+    C.launch(B.x);
+    C.wait();
+}
+
+// the worker: per graph, the MoE layers in order, each when the GPU has posted it
+static void mb_worker(Engine & e) {
+    Mailbox & M = e.mb;
+    uint64_t seen = 0;
+    for (;;) {
+        int T;
+        uint32_t cur;
+        {
+            std::unique_lock<std::mutex> lk(M.mu);
+            M.cv.wait(lk, [&] { return M.quit || M.job != seen; });
+            if (M.quit) return;
+            seen = M.job;
+            T = M.T;
+            cur = M.cur;
+        }
+        const std::vector<int> layers = M.graph;            // (copied under the lock: the next graph's list)
+        for (int il : layers) {
+            MbLayer & B = M.layer[il];
+            const double ws = now_s();
+            bool told = false;
+            while (*B.sent != cur) {
+                if (M.quit || *M.timeout) {
+                    fprintf(stderr, "momoe-cuda: mailbox worker: layer %d never posted (its flag %u, epoch %u, graph %u)\n",
+                            il, *B.sent, *M.epoch, cur);
+                    return;
+                }
+                if (!told && now_s() - ws > 2) {
+                    told = true;
+                    fprintf(stderr, "momoe-cuda: mailbox worker: waiting 2 s for layer %d (its flag %u, epoch %u, graph %u)\n",
+                            il, *B.sent, *M.epoch, cur);
+                }
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            const double w0 = now_s();
+            mb_layer(e, il, T);
+            e.t_cpu_wait += now_s() - w0;
+            std::atomic_thread_fence(std::memory_order_release);
+            *B.done = cur;
+        }
+        {
+            std::lock_guard<std::mutex> lk(M.mu);
+            M.done_job = seen;
+        }
+        M.cv.notify_all();
+    }
+}
+
+static void mb_init(Engine & e) {
+    Model & m = e.m;
+    Mailbox & M = e.mb;
+    const size_t x_b = sizeof(float) * (size_t) m.latent * HYB_MAX_T, ids_b = sizeof(int32_t) * (size_t) m.n_used * HYB_MAX_T;
+    const size_t out_b = sizeof(float) * (size_t) m.latent * m.n_used * HYB_MAX_T;
+    const size_t per = 256 + (x_b + ids_b + out_b + 255) / 256 * 256;
+    size_t total = 256;
+    for (auto & L : m.layers) total += L.kind == 'e' ? per : 0;
+    cudaSetDevice(e.device);
+    void * h = nullptr, * d = nullptr;
+    if (cudaHostAlloc(&h, total, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
+        cudaHostGetDevicePointer(&d, h, 0) != cudaSuccess) die("cannot allocate the mailboxes (mapped host memory)");
+    memset(h, 0, total);
+    M.host = (char *) h;
+    M.dev = (char *) d;
+    auto dev = [&](const void * p) { return (void *) (M.dev + ((const char *) p - M.host)); };
+    M.epoch = (volatile uint32_t *) M.host;
+    M.timeout = (volatile uint32_t *) (M.host + 64);
+    M.layer.resize(m.n_layer);
+    size_t at = 256;
+    for (int il = 0; il < m.n_layer; ++il) {
+        Layer & L = m.layers[il];
+        if (L.kind != 'e') continue;
+        MbLayer & B = M.layer[il];
+        char * base = M.host + at;
+        B.sent = (volatile uint32_t *) base;
+        B.done = (volatile uint32_t *) (base + 64);
+        B.x = (float *) (base + 256);
+        B.ids = (int32_t *) (base + 256 + x_b);
+        B.out = (float *) (base + 256 + x_b + ids_b);
+        at += per;
+        B.send = {MOMOE_MAILBOX_MAGIC, MOMOE_MAILBOX_SEND, 0, 0, dev(B.x), dev(B.ids), (volatile uint32_t *) dev((const void *) B.sent),
+                  (const volatile uint32_t *) dev((const void *) M.epoch), (volatile uint32_t *) dev((const void *) M.timeout)};
+        B.wait = {MOMOE_MAILBOX_MAGIC, MOMOE_MAILBOX_WAIT, 0, 0, dev(B.out), nullptr, (volatile uint32_t *) dev((const void *) B.done),
+                  (const volatile uint32_t *) dev((const void *) M.epoch), (volatile uint32_t *) dev((const void *) M.timeout)};
+        M.moe.push_back(il);
+        // every expert starts outside the pool: the zero slot
+        Group & G = e.pool.g[L.grp];
+        std::fill(L.map_host.begin(), L.map_host.end(), G.zero);
+        L.sync_slots();
+    }
+    M.th = std::thread([&e] { mb_worker(e); });
+    e.mailbox = true;
+    fprintf(stderr, "momoe-cuda: mailboxes for %zu MoE layers (%.1f MiB of mapped memory)\n", M.moe.size(), total / 1048576.0);
+}
+
+static void mb_stop(Engine & e) {
+    if (!e.mailbox) return;
+    { std::lock_guard<std::mutex> lk(e.mb.mu); e.mb.quit = true; }
+    e.mb.cv.notify_all();
+    e.mb.th.join();
+}
+
+// between graphs: the experts read into the pool since are published in the slot tables, and new ones are read in
+// (MOMOE_FILLS a token at most, default 8): a slot taken from another expert first leaves that expert's table
+static void mb_boundary(Engine & e) {
+    Model & m = e.m;
+    Pool & P = e.pool;
+    std::vector<uint8_t> dirty(m.n_layer, 0);
+    for (size_t i = 0; i < e.mb_pending.size();) {
+        const auto pd = e.mb_pending[i];
+        Group & G = P.g[m.layers[pd.il].grp];
+        if (G.left[pd.slot].load(std::memory_order_acquire) == 0) {
+            m.layers[pd.il].slots_host()[pd.x] = pd.slot;
+            dirty[pd.il] = 1;
+            e.mb_pending[i] = e.mb_pending.back();
+            e.mb_pending.pop_back();
+        } else {
+            ++i;
+        }
+    }
+    // a free slot is filled at once; an expert put out of its slot counts against MOMOE_FILLS (default 8 a token: each
+    // read is RAM bandwidth the CPU's experts need)
+    static const int max_evict = getenv("MOMOE_FILLS") ? atoi(getenv("MOMOE_FILLS")) : 1 << 30;   // (measured: no limit)
+    std::vector<Readers::Job> jobs;
+    int n = 0, evicted = 0;
+    for (const auto & w : e.mb.want) {
+        const int key = w.first * m.n_expert + w.second;
+        if (P.slot_of[key] >= 0) continue;
+        Layer & L = m.layers[w.first];
+        Group & G = P.g[L.grp];
+        const int slot = take_slot(P, G, UINT64_MAX);
+        if (slot < 0) continue;
+        if (G.owner[slot] >= 0 && evicted >= max_evict) {    // (take_slot let it go: it is still read where it is)
+            P.slot_of[G.owner[slot]] = slot;
+            continue;
+        }
+        if (G.owner[slot] >= 0) {                            // its expert leaves its table first
+            ++evicted;
+            const int ok = G.owner[slot], oil = ok / m.n_expert, ox = ok % m.n_expert;
+            m.layers[oil].slots_host()[ox] = G.zero;
+            dirty[oil] = 1;
+            G.owner[slot] = -1;
+        }
+        fill_slot(e, w.first, w.second, slot, jobs);
+        G.by_prefetch[slot] = 0;
+        G.used[slot] = P.clock;
+        e.mb_pending.push_back({w.first, w.second, slot});
+        ++n;
+        ++e.mb_fills;
+    }
+    e.mb.want.clear();
+    for (int il = 0; il < m.n_layer; ++il)                   // the tables first: no slot being read is referenced
+        if (dirty[il]) m.layers[il].sync_slots();
+    (e.fillers.th.empty() ? e.readers : e.fillers).submit(jobs);
+}
+#endif
 
 static bool eval_cb(ggml_tensor * t, bool ask, void * user) {
     Engine & e = *(Engine *) user;
@@ -1938,15 +2202,21 @@ static ggml_tensor * mamba2_layer(Engine & e, ggml_context * c, ggml_cgraph * gf
 
 // attention without positions (NoPE), n_head queries over n_head_kv keys
 static ggml_tensor * nemo_attn_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, Layer & L, ggml_tensor * x,
-                                     const Inputs & in, int p0, int T, int n_kv) {
+                                     const Inputs & in, int p0, int T, int n_kv, ggml_tensor * kv_idx = nullptr) {
     Model & m = e.m;
     const int hd = m.head_dim;
     ggml_tensor * q = ggml_reshape_3d(c, ggml_mul_mat(c, L.wq, x), hd, m.n_head, T);
     ggml_tensor * k = ggml_reshape_3d(c, ggml_mul_mat(c, L.wk, x), hd, m.n_head_kv, T);
     ggml_tensor * v = ggml_reshape_3d(c, ggml_mul_mat(c, L.wv, x), hd, m.n_head_kv, T);
     const size_t row = ggml_row_size(GGML_TYPE_F16, (int64_t) hd * m.n_head_kv);
-    ggml_build_forward_expand(gf, ggml_cpy(c, k, ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, T, L.k_cache->nb[1], row, row * p0)));
-    ggml_build_forward_expand(gf, ggml_cpy(c, v, ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, T, L.v_cache->nb[1], row, row * p0)));
+    if (kv_idx) {                                            // the positions as an input (a graph reused token after token)
+        const int64_t w = (int64_t) hd * m.n_head_kv;
+        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.k_cache, w, e.n_ctx), ggml_reshape_2d(c, k, w, T), kv_idx));
+        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.v_cache, w, e.n_ctx), ggml_reshape_2d(c, v, w, T), kv_idx));
+    } else {
+        ggml_build_forward_expand(gf, ggml_cpy(c, k, ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, T, L.k_cache->nb[1], row, row * p0)));
+        ggml_build_forward_expand(gf, ggml_cpy(c, v, ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, T, L.v_cache->nb[1], row, row * p0)));
+    }
     ggml_tensor * kv_k = ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, n_kv, L.k_cache->nb[1], row, 0);
     ggml_tensor * kv_v = ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, n_kv, L.v_cache->nb[1], row, 0);
     ggml_tensor * o = ggml_flash_attn_ext(c, ggml_permute(c, q, 0, 2, 1, 3), ggml_permute(c, kv_k, 0, 2, 1, 3),
@@ -1979,10 +2249,34 @@ static ggml_tensor * nemo_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * 
         ggml_tensor * pl = ggml_add(c, ggml_sigmoid(c, ggml_mul_mat(c, N.gate_inp, pred_in)), N.exp_probs_b);
         both = ggml_concat(c, top, ggml_cont(c, ggml_argsort_top_k(c, pl, k)), 1);
     }
-    ggml_format_name(both, "topk-%d", il);                   // made resident here (the callback / a pause point)
+#if defined(MOMOE_CUDA)
+    const bool mbx = e.mailbox && hybrid_on(e, L, T);        // the mailboxes: no stop here
+    static const bool mbdbg = getenv("MOMOE_MB_DEBUG") != nullptr;
+    if (mbdbg && T == 1)
+        fprintf(stderr, "MB layer %d: mailbox %d (hybrid %d, cpu_dn %d, slots %d, staged %d)\n", il, mbx, e.hybrid,
+                L.cpu_dn != nullptr, e.pool.g[L.grp].n_slots, staged(m.n_used, e.pool.g[L.grp].n_slots, T));
+    ggml_tensor * send = nullptr;
+#else
+    const bool mbx = false;
+#endif
+    ggml_format_name(both, mbx ? "mbtopk-%d" : "topk-%d", il);   // topk-: made resident here (the callback / a pause point)
     e.topk[il] = both;
     ggml_build_forward_expand(gf, both);
     if (pred_in) top = ggml_view_2d(c, both, k, T, both->nb[1], 0);
+#if defined(MOMOE_CUDA)
+    if (mbx) {                                               // the layer's input and choice to the CPU, at once
+        MbLayer & B = e.mb.layer[il];
+        B.send.n_f32 = m.latent * T;
+        B.send.n_i32 = k * T;
+        ggml_tensor * args[2] = {xl2, top};
+        send = ggml_custom_4d(c, GGML_TYPE_I32, 1, 1, 1, 1, args, 2, momoe_mailbox_cpu_stub, 1, &B.send);
+        ggml_format_name(send, "mbsend-%d", il);
+        ggml_build_forward_expand(gf, send);
+        e.force_gpu.push_back(send);
+        e.mb_graph = true;
+        e.mb.graph.push_back(il);
+    }
+#endif
     ggml_tensor * w = ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, n_exp, T), top);     // [1, k, T]
     w = ggml_reshape_2d(c, w, k, T);
     w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
@@ -2003,6 +2297,17 @@ static ggml_tensor * nemo_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * 
     ggml_tensor * up = ggml_mul_mat_id(c, as[1], xl, slots);                              // [n_ff, k, T]
     ggml_tensor * h = ggml_sqr(c, ggml_relu(c, up));
     ggml_tensor * dn = ggml_mul_mat_id(c, as[2], h, slots);                               // [latent, k, T]
+#if defined(MOMOE_CUDA)
+    if (mbx) {                                               // the CPU's experts, waited for after the GPU's own
+        MbLayer & B = e.mb.layer[il];
+        B.wait.n_f32 = m.latent * k * T;
+        ggml_tensor * args[1] = {send};
+        ggml_tensor * cpu = ggml_custom_4d(c, GGML_TYPE_F32, m.latent, k, T, 1, args, 1, momoe_mailbox_cpu_stub, 1, &B.wait);
+        ggml_format_name(cpu, "mbwait-%d", il);
+        e.force_gpu.push_back(cpu);
+        dn = ggml_add(c, dn, cpu);
+    } else
+#endif
     if (hybrid_on(e, L, T)) {                                // the missing experts' outputs (zero slots here), from the CPU
         ggml_format_name(dn, "moedn-%d", il);
         dn = ggml_add(c, dn, ggml_view_3d(c, L.cpu_dn, m.latent, k, T, L.cpu_dn->nb[1], L.cpu_dn->nb[2], 0));
@@ -2030,8 +2335,144 @@ struct Out {
     std::vector<float> all_logits;                           // logits and all: every position's [T, n_vocab]
 };
 
+#if defined(MOMOE_CUDA)
+// momoe-cuda, Bolt's one-token decode through mailboxes: the graph is built once per attention window (256 positions)
+// and kept, its per-token values (the token, the mask, the KV cache's row) set as inputs, so every token computes the
+// same graph and ggml-cuda can replay it as a CUDA graph (a fresh graph a token launched ~1,500 kernels one by one)
+struct DecodeCache {
+    ggml_context * c = nullptr;
+    ggml_cgraph * gf = nullptr;
+    ggml_tensor *tokens = nullptr, *mask = nullptr, *kv_idx = nullptr, *seq0 = nullptr, *logits = nullptr, *best = nullptr;
+    ggml_tensor *on_cpu = nullptr, *on_gpu = nullptr;
+    std::vector<ggml_tensor *> force_gpu;
+    std::vector<int> mb_layers;
+    int n_kv = -1;
+    uint64_t sched_gen = 0;                                  // the scheduler's allocation it was made with
+};
+static DecodeCache g_dec;
+static uint64_t g_sched_gen = 1;                             // bumped by every other graph the scheduler allocates
+
+static bool decode_cache_ok(const Engine & e, int T, const Out * out) {
+    static const bool off = getenv("MOMOE_NO_GRAPH_REUSE") != nullptr;
+    if (off || !e.mailbox || !e.m.nemo || T != 1 || (out && (out->all || out->snap))) return false;
+    for (const auto & G : e.pool.g)
+        if (staged(e.m.n_used, G.n_slots, 1)) return false;  // every MoE layer through its mailbox
+    return true;
+}
+
+static int forward_decode(Engine & e, const int32_t * toks, int p0, Out * out) {
+    Model & m = e.m;
+    const double tb0 = now_s();
+    const int T = 1;
+    const int n_kv = std::min(e.n_ctx, ((p0 + T + 255) / 256) * 256);
+    DecodeCache & D = g_dec;
+    // reused as it is: allocated once (an allocation rewires the graph's inputs to the scheduler's copies, so a second
+    // one of the same graph breaks it); built and allocated again for a new attention window, or after another graph
+    const bool reuse = D.n_kv == n_kv && D.sched_gen == g_sched_gen;
+    if (!reuse) {
+        if (D.c) ggml_free(D.c);
+        ggml_init_params ip = {ggml_tensor_overhead() * 40000 + ggml_graph_overhead_custom(32768, false), nullptr, true};
+        D.c = ggml_init(ip);
+        ggml_context * c = D.c;
+        D.gf = ggml_new_graph_custom(c, 32768, false);
+        e.topk.assign(m.n_layer, nullptr);
+        e.xl.assign(m.n_layer, nullptr);
+        e.mb_graph = false;
+        e.force_gpu.clear();
+        e.mb.graph.clear();
+        Inputs in;
+        in.tokens = D.tokens = ggml_new_tensor_1d(c, GGML_TYPE_I32, T);
+        ggml_set_input(in.tokens);
+        in.mask = D.mask = ggml_new_tensor_2d(c, GGML_TYPE_F16, n_kv, T);
+        ggml_set_input(in.mask);
+        D.kv_idx = ggml_new_tensor_1d(c, GGML_TYPE_I64, T);
+        ggml_set_input(D.kv_idx);
+        D.seq0 = ggml_new_tensor_1d(c, GGML_TYPE_I32, 1);
+        ggml_set_input(D.seq0);
+        ggml_tensor * x = ggml_get_rows(c, m.tok_embd, in.tokens);
+        D.on_cpu = D.on_gpu = nullptr;
+        if (m.tok_embd->buffer && ggml_backend_buffer_is_host(m.tok_embd->buffer)) {
+            D.on_cpu = x;
+            x = D.on_gpu = ggml_scale(c, x, 1.0f);
+        }
+        for (int il = 0; il < m.n_layer; ++il) {
+            Layer & L = m.layers[il];
+            ggml_tensor * h = norm(c, x, L.attn_norm, m.rms_eps);
+            h = L.kind == 'm' ? mamba2_layer(e, c, D.gf, L, h, D.seq0, T)
+              : L.kind == 'a' ? nemo_attn_layer(e, c, D.gf, L, h, in, p0, T, n_kv, D.kv_idx)
+                              : nemo_moe_layer(e, c, D.gf, il, h, T, nullptr);
+            x = ggml_add(c, h, x);
+        }
+        x = norm(c, x, m.out_norm, m.rms_eps);
+        D.logits = ggml_mul_mat(c, m.output, x);
+        ggml_set_output(D.logits);
+        D.best = ggml_argmax(c, D.logits);
+        ggml_set_output(D.best);
+        ggml_build_forward_expand(D.gf, D.best);
+        D.force_gpu = e.force_gpu;
+        D.mb_layers = e.mb.graph;
+        D.n_kv = n_kv;
+        if (D.mb_layers.size() != e.mb.moe.size()) die("the decode graph has a MoE layer without its mailbox");
+        ggml_backend_sched_reset(e.sched);
+        if (D.on_gpu) {
+            ggml_backend_sched_set_tensor_backend(e.sched, D.on_cpu, e.cpu);
+            ggml_backend_sched_set_tensor_backend(e.sched, D.on_gpu, e.metal);
+        }
+        for (ggml_tensor * t : D.force_gpu) ggml_backend_sched_set_tensor_backend(e.sched, t, e.metal);
+        if (!ggml_backend_sched_alloc_graph(e.sched, D.gf)) die("cannot allocate the decode graph");
+        D.sched_gen = ++g_sched_gen;
+    }
+    ggml_backend_tensor_set(D.tokens, toks, 0, sizeof(int32_t));
+    std::vector<ggml_fp16_t> mask(n_kv);
+    const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(-INFINITY);
+    for (int j = 0; j < n_kv; ++j) mask[j] = j <= p0 ? zero : ninf;
+    ggml_backend_tensor_set(D.mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+    const int64_t pos = p0;
+    ggml_backend_tensor_set(D.kv_idx, &pos, 0, sizeof pos);
+    const int32_t zero_id = 0;
+    ggml_backend_tensor_set(D.seq0, &zero_id, 0, sizeof zero_id);
+    e.batch_tokens = T;
+    const double tc0 = now_s();
+    e.t_build += tc0 - tb0;
+    mb_boundary(e);
+    uint64_t mb_job;
+    {
+        std::lock_guard<std::mutex> lk(e.mb.mu);
+        e.mb.graph = D.mb_layers;
+        ++e.mb.cur;
+        *e.mb.epoch = e.mb.cur;
+        e.mb.T = T;
+        mb_job = ++e.mb.job;
+    }
+    e.mb.cv.notify_all();
+    ggml_backend_sched_set_eval_callback(e.sched, nullptr, nullptr);   // no stops: one graph (a CUDA graph once warm)
+    const ggml_status st = ggml_backend_sched_graph_compute(e.sched, D.gf);
+    ggml_backend_sched_set_eval_callback(e.sched, eval_cb, &e);
+    if (st != GGML_STATUS_SUCCESS) die("the decode graph failed");
+    if (*e.mb.timeout) die("the GPU waited for the CPU's experts and gave up (the mailbox worker stopped)");
+    {
+        std::unique_lock<std::mutex> lk(e.mb.mu);
+        e.mb.cv.wait(lk, [&] { return e.mb.done_job == mb_job; });
+    }
+    e.t_compute += now_s() - tc0;
+    int32_t best = 0;
+    ggml_backend_tensor_get(D.best, &best, 0, sizeof best);
+    if (out) {
+        out->next.assign(1, best);
+        if (out->logits) {
+            out->last_logits.resize(D.logits->ne[0]);
+            ggml_backend_tensor_get(D.logits, out->last_logits.data(), 0, out->last_logits.size() * sizeof(float));
+        }
+    }
+    return best;
+}
+#endif
+
 static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = nullptr) {
     Model & m = e.m;
+#if defined(MOMOE_CUDA)
+    if (decode_cache_ok(e, T, out)) return forward_decode(e, toks, p0, out);
+#endif
     const double tb0 = now_s();
     const int n_kv = std::min(e.n_ctx, ((p0 + T + 255) / 256) * 256);
     ggml_init_params ip = {ggml_tensor_overhead() * 40000 + ggml_graph_overhead_custom(32768, false), nullptr, true};
@@ -2040,6 +2481,11 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
     Inputs in;
     e.topk.assign(m.n_layer, nullptr);
     e.xl.assign(m.n_layer, nullptr);
+#if defined(MOMOE_CUDA)
+    e.mb_graph = false;
+    e.force_gpu.clear();
+    e.mb.graph.clear();
+#endif
     e.ns_graph = false;
     if (e.nostall && T <= 8) {                               // a few tokens: no layer's experts staged
         bool small = true;
@@ -2173,10 +2619,16 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
     ggml_build_forward_expand(gf, best);
 
     ggml_backend_sched_reset(e.sched);
+#if defined(MOMOE_CUDA)
+    ++g_sched_gen;                                           // the reused decode graph is no longer allocated
+#endif
     if (on_gpu) {
         ggml_backend_sched_set_tensor_backend(e.sched, on_cpu, e.cpu);
         ggml_backend_sched_set_tensor_backend(e.sched, on_gpu, e.metal);
     }
+#if defined(MOMOE_CUDA)
+    for (ggml_tensor * t : e.force_gpu) ggml_backend_sched_set_tensor_backend(e.sched, t, e.metal);
+#endif
     if (e.reserve_only) {                                    // fit_pool: the compute buffers of the largest graph
         if (!ggml_backend_sched_reserve(e.sched, gf)) die("cannot reserve the compute buffers: too little VRAM free");
         ggml_free(c);
@@ -2231,8 +2683,27 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
     e.batch_tokens = T;
     const double tc0 = now_s();
     e.t_build += tc0 - tb0;
+#if defined(MOMOE_CUDA)
+    uint64_t mb_job = 0;
+    if (e.mb_graph) {                                        // the worker follows this graph's MoE layers
+        mb_boundary(e);
+        std::lock_guard<std::mutex> lk(e.mb.mu);
+        ++e.mb.cur;
+        *e.mb.epoch = e.mb.cur;
+        e.mb.T = T;
+        mb_job = ++e.mb.job;
+        e.mb.cv.notify_all();
+    }
+#endif
     if (!e.pause || (e.ns_graph && e.ns_every == 0)) {
         if (ggml_backend_sched_graph_compute(e.sched, gf) != GGML_STATUS_SUCCESS) die("the graph failed");
+#if defined(MOMOE_CUDA)
+        if (mb_job) {
+            if (*e.mb.timeout) die("the GPU waited for the CPU's experts and gave up (the mailbox worker stopped)");
+            std::unique_lock<std::mutex> lk(e.mb.mu);
+            e.mb.cv.wait(lk, [&] { return e.mb.done_job == mb_job; });
+        }
+#endif
         if (e.ns_graph) ns_after(e, T);
     } else {
 #if defined(MOMOE_CUDA)
@@ -2480,6 +2951,9 @@ static int mtp_forward(Engine & e, const float * h, const int32_t * toks, int T,
     ggml_build_forward_expand(gf, bp);
     ggml_build_forward_expand(gf, hl);
     ggml_backend_sched_reset(e.sched);
+#if defined(MOMOE_CUDA)
+    ++g_sched_gen;
+#endif
     if (!ggml_backend_sched_alloc_graph(e.sched, gf)) die("cannot allocate the MTP graph");
     ggml_backend_tensor_set(in.tokens, toks, 0, (size_t) T * sizeof(int32_t));
     ggml_backend_tensor_set(hin, h, 0, (size_t) T * m.h_dim() * sizeof(float));
@@ -2963,6 +3437,9 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
 
 // ------------------------------------------------------------------------------------------------ main
 int main(int argc, char ** argv) {
+    ggml_log_set([](ggml_log_level level, const char * text, void *) {   // (ggml's debug lines: one per token with
+        if (level != GGML_LOG_LEVEL_DEBUG || getenv("MOMOE_GGML_DEBUG")) fputs(text, stderr);   // CUDA graphs)
+    }, nullptr);
     const char * model = nullptr;
     std::vector<int32_t> prompt;
     int n_gen = 32, slots = 0, mtp_k = 0;
@@ -2994,8 +3471,18 @@ int main(int argc, char ** argv) {
         else if (a == "--spec-min-p") spec_min_p = (float) atof(next());
         else if (a == "--profile") profile = next();
         else if (a == "--device") e.device = atoi(next());
-        else if (a == "--tokens") {
+        else if (a == "--tokens" || a == "--tokens-file") {   // (a file: a long prompt, past the 128 KB of an argument)
             std::string s = next();
+            if (a == "--tokens-file") {
+                FILE * f = fopen(s.c_str(), "rb");
+                if (!f) die("cannot open %s", s.c_str());
+                std::string all;
+                char buf[65536];
+                for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) all.append(buf, n);
+                fclose(f);
+                while (!all.empty() && (all.back() == '\n' || all.back() == ' ')) all.pop_back();
+                s = all;
+            }
             for (size_t p = 0; p < s.size();) {
                 size_t q = s.find(',', p);
                 prompt.push_back(atoi(s.substr(p, q - p).c_str()));
@@ -3012,6 +3499,11 @@ int main(int argc, char ** argv) {
     if (e.hybrid && e.m.nemo)                                // the CPU's experts: the physical cores less the readers'
         e.cpu_x.start(getenv("MOMOE_CPU_THREADS") ? atoi(getenv("MOMOE_CPU_THREADS"))
                                                   : std::max(2, (int) std::thread::hardware_concurrency() / 2));
+#if defined(MOMOE_CUDA)
+    if (e.hybrid && e.m.nemo && !getenv("MOMOE_NO_MAILBOX") && e.pool.n_slots < e.m.n_exp_all) mb_init(e);
+    else setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0);   // CUDA graphs for the mailbox's one-graph token only: with the
+                                                       // stops' many splits, instantiating them ran out of VRAM
+#endif
     if (mtp_k > 0 && !e.m.has_mtp) die("--mtp: this model file has no MTP layer");
     e.readers.device = e.device;
     e.fillers.device = e.device;
@@ -3281,6 +3773,9 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "momoe-cuda: hybrid: %llu of %llu chosen experts computed on the CPU (%d threads), %.2f s waited for "
                 "them\n", (unsigned long long) e.hyb_miss, (unsigned long long) (e.hyb_hits + e.hyb_miss),
                 e.cpu_x.n_threads, e.t_cpu_wait);
+#if defined(MOMOE_CUDA)
+    mb_stop(e);
+#endif
     if (e.cpu_x.n_threads) e.cpu_x.stop();
     if (!e.fillers.th.empty()) e.fillers.stop();
     e.readers.stop();

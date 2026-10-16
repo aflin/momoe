@@ -8,6 +8,7 @@
 #include "ggml-cuda/add-id.cuh"
 #include "ggml-cuda/arange.cuh"
 #include "ggml-cuda/argmax.cuh"
+#include "ggml-cuda/momoe-mailbox.cuh"                    // Momoe: the mailbox ops (ggml-momoe-mailbox.h)
 #include "ggml-cuda/argsort.cuh"
 #include "ggml-cuda/binbcast.cuh"
 #include "ggml-cuda/clamp.cuh"
@@ -2122,6 +2123,8 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
 static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst) {
     switch (dst->op) {
+        case GGML_OP_CUSTOM:                                 // Momoe: the mailbox ops, the only custom ops CUDA runs
+            return ggml_cuda_momoe_mailbox(ctx, dst);
         case GGML_OP_ARGMAX:
             ggml_cuda_argmax(ctx, dst);
             break;
@@ -5263,6 +5266,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
     }
 
     switch (op->op) {
+        case GGML_OP_CUSTOM:                                 // Momoe: the mailbox ops
+            return ggml_cuda_momoe_mailbox_supported(op);
         case GGML_OP_UNARY:
             switch (ggml_get_unary_op(op)) {
                 case GGML_UNARY_OP_ABS:

@@ -6188,6 +6188,13 @@ struct ggml_tensor * ggml_map_custom3_inplace(
     return ggml_map_custom3_impl(ctx, a, b, c, fun, n_tasks, userdata, true);
 }
 
+// Momoe: the mailbox ops' function (ggml-momoe-mailbox.h): the CUDA backend runs them, so reaching the CPU is a bug
+#include "ggml-momoe-mailbox.h"
+void momoe_mailbox_cpu_stub(struct ggml_tensor * dst, int ith, int nth, void * userdata) {
+    GGML_UNUSED(dst); GGML_UNUSED(ith); GGML_UNUSED(nth); GGML_UNUSED(userdata);
+    GGML_ABORT("a Momoe mailbox op was scheduled on a backend that cannot run it");
+}
+
 struct ggml_tensor * ggml_custom_4d(
         struct ggml_context * ctx,
         enum ggml_type        type,
