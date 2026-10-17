@@ -62,6 +62,10 @@ Early, and maintained by one person.
   experts that do not fit are read from the SSD as needed. Flash-Next runs too, set up by hand
   ([design/mac-port.md](design/mac-port.md)).
 
+- **NVIDIA DGX Spark (early):** MoMoE's ggml engine (`momoe-cuda`) on its GB10, which shares the 128 GB of memory
+  with the CPU: the experts that do not fit are read from the SSD directly, past the page cache, at 10-13 GB/s.
+  `momoe setup --family glm53` sets up GLM-5.3-Flash (320B, 157 GB at UD-IQ4_XS).
+
 Measured on the PC above:
 
 | Model | Writes answers | Reads a prompt |
@@ -70,6 +74,16 @@ Measured on the PC above:
 | Ornith-1.5-35B-A3B IQ4_XS | 96-109 tokens/s (short chats, 262K context) | about 4,130 tokens/s (a 24K-token prompt, 32K context) |
 
 Flash-Next: medians of three runs of `tools/strata_bench.py`; more in the [design notes](design/).
+
+On MoMoE's ggml engine (the server, 400-token chats, greedy / sampled):
+
+| Model, machine | MoMoE | llama.cpp, same machine |
+| --- | ---: | ---: |
+| Nemotron 3.5 Bolt UD-IQ3_XXS, the PC above (RTX 4070 Ti, 64 GB) | 30.0 / 30.6 tokens/s | 26.2 / 26.1 tokens/s |
+| GLM-5.3-Flash UD-IQ4_XS, DGX Spark (its MTP drafting on) | 11.7 / 10.4 tokens/s | 2.3 / 2.5 tokens/s |
+
+GLM-5.3-Flash on the Spark read a 3,620-token prompt at 69 tokens/s (llama.cpp: 4.1); llama.cpp there ran with the
+experts in its mapped file (`-cmoe --no-repack`; its default settings ran the machine out of memory).
 
 ## Models
 
@@ -82,6 +96,8 @@ Flash-Next: medians of three runs of `tools/strata_bench.py`; more in the [desig
 | [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) | [Unsloth](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF), [bartowski](https://huggingface.co/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF) | UD-IQ4_XS, UD-IQ3_S and 24 more | 8-12 GB cards, 16-32 GB of RAM |
 | [Ornith-1.5-35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B) | [bartowski](https://huggingface.co/bartowski/Ornith-1.5-35B-A3B-GGUF) | IQ4_XS, IQ3_XXS | a Qwen3.6 fine-tune |
 | KAT-Coder-V2.5-Dev | [Myric](https://huggingface.co/Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF) | i-quality-v2, i-quality | a coding fine-tune of Qwen3.6 |
+| [Nemotron 3.5 Bolt 74B-A9B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16) | [Unsloth](https://huggingface.co/unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF) | UD-IQ3_XXS, UD-Q3_K_XL | Linux, NVIDIA; about 56 GB of RAM (`--family bolt`) |
+| [GLM-5.3-Flash 320B-A18B](https://huggingface.co/zai-org/GLM-5.3-Flash) | [Unsloth](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF) | UD-IQ4_XS, UD-Q3_K_XL, UD-IQ3_XXS | the DGX Spark (`--family glm53`); text only |
 
 `./setup.sh --check` lists what fits your PC. The Qwen3.6-family files are described in
 [docs/QWEN36.md](docs/QWEN36.md) and [docs/QWEN35MOE_GGUFS.md](docs/QWEN35MOE_GGUFS.md). The authors and quantizers

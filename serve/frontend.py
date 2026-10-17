@@ -91,6 +91,8 @@ class ChatTemplate:
             replies = [f"strata_caps_result_{i}" for i in range(count)]
             messages += [{"role": "tool", "content": reply} for reply in replies] + [user]
             prompt = render(messages, tools)
+            if "<arg_key>" in self.source:              # GLM-5's form, read as the parser reads it
+                prompt = GlmCallRewriter().feed(prompt)
             # Instructions include example XML and literal tag names, which are not model output. Parse only
             # complete calls to our probe functions, using the same body parser as OutputParser.
             bodies = re.findall(r"<tool_call>\s*(<function=strata_caps_call_\d+>.*?</function>)\s*</tool_call>",
@@ -104,8 +106,9 @@ class ChatTemplate:
 
         history = [user, {"role": "assistant", "content": "strata_caps_answer",
                           "reasoning_content": "strata_caps_reasoning"}, user]
+        call_tag = "<arg_key>" if "<arg_key>" in self.source else "<function="     # (GLM-5's format, or this one)
         return {"supports_tools": all(s in tool_prompt for s in
-                                      ("strata_caps_call_0", "strata_caps_description", "<tool_call>", "<function=")),
+                                      ("strata_caps_call_0", "strata_caps_description", "<tool_call>", call_tag)),
                 "supports_tool_calls": calls_supported(1),
                 "supports_system_role": "strata_caps_system" in render(
                     [{"role": "system", "content": "strata_caps_system"}, user]),
@@ -874,6 +877,124 @@ def parse_tool_call(body: str, schema: dict | None = None) -> ToolCall:
     return ToolCall(name=name, arguments=args)
 
 
+class GlmCallRewriter:
+    """GLM-5's tool calls (`<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>...</tool_call>`, its chat
+    template's format) rewritten, as they stream in, into this parser's form (`<tool_call>\n<function=NAME>\n
+    <parameter=K>\nV\n</parameter>\n</function>\n</tool_call>`), so OutputParser's whole handling - streaming,
+    reasoning calls, recovery - applies unchanged.  A value is written as GLM writes it: a string as is, other types
+    as JSON, which parse_tool_call decodes by the tool's schema.  A tag split across deltas is held until whole."""
+
+    _NAME = re.compile(r"\s*[\w.:\-]{0,128}\s*")   # what may stand between <tool_call> and the call's first tag
+
+    def __init__(self):
+        self.state, self.buf = "text", ""
+
+    @staticmethod
+    def _held(text: str, tags) -> int:
+        """Length of the longest suffix of `text` that is a proper prefix of one of `tags`."""
+        best = 0
+        for tag in tags:
+            for n in range(1, len(tag)):
+                if text.endswith(tag[:n]):
+                    best = max(best, n)
+        return best
+
+    def feed(self, delta: str) -> str:
+        self.buf += delta
+        out = []
+        while True:
+            b = self.buf
+            if self.state == "text":
+                i = b.find("<tool_call>")
+                if i < 0:
+                    keep = self._held(b, ("<tool_call>",))
+                    out.append(b[:len(b) - keep])
+                    self.buf = b[len(b) - keep:]
+                    break
+                out.append(b[:i])
+                self.buf, self.state = b[i + len("<tool_call>"):], "name"
+            elif self.state == "name":                   # the name: up to the first <arg_key> or </tool_call>
+                ends = [j for j in (b.find("<arg_key>"), b.find("</tool_call>")) if j >= 0]
+                head = b[:min(ends)] if ends else b
+                held = 0 if ends else self._held(head, ("<arg_key>", "</tool_call>"))
+                if not self._NAME.fullmatch(head[:len(head) - held]) or (ends and not head.strip()):
+                    out.append("<tool_call>")            # prose that names the tag: text, as written
+                    self.state = "text"
+                    continue
+                if not ends:
+                    break
+                out.append("<tool_call>\n<function=" + head.strip() + ">\n")
+                self.buf, self.state = b[len(head):], "between"
+            elif self.state == "between":
+                s = b.lstrip()
+                if s.startswith("<arg_key>"):
+                    k = s.find("</arg_key>")
+                    if k < 0:
+                        break
+                    out.append("<parameter=" + s[len("<arg_key>"):k].strip() + ">\n")
+                    self.buf, self.state = s[k + len("</arg_key>"):], "want_value"
+                elif s.startswith("</tool_call>"):
+                    out.append("</function>\n</tool_call>")
+                    self.buf, self.state = s[len("</tool_call>"):], "text"
+                elif not s or "<arg_key>".startswith(s) or "</tool_call>".startswith(s):
+                    self.buf = s
+                    break
+                else:                                    # not GLM's call format: the rest is text again
+                    out.append("</function>\n</tool_call>")
+                    self.buf, self.state = s, "text"
+            elif self.state == "want_value":
+                s = b.lstrip()
+                if s.startswith("<arg_value>"):
+                    self.buf, self.state = s[len("<arg_value>"):], "value"
+                elif not s or "<arg_value>".startswith(s):
+                    self.buf = s
+                    break
+                else:                                    # a key without a value: an empty one
+                    out.append("\n</parameter>\n")
+                    self.buf, self.state = s, "between"
+            elif self.state == "value":
+                # the value ends at a </arg_value> followed (after whitespace) by the next <arg_key> or </tool_call>
+                # (param_end's rule: a value may contain the tag itself); one whose follower is still arriving waits
+                k, wait = b.find("</arg_value>"), -1
+                while k >= 0:
+                    after = b[k + len("</arg_value>"):].lstrip()
+                    if after.startswith(("<arg_key>", "</tool_call>")):
+                        break
+                    if not after or "<arg_key>".startswith(after) or "</tool_call>".startswith(after):
+                        wait = k
+                        break
+                    k = b.find("</arg_value>", k + 1)
+                if wait >= 0 or k < 0:
+                    safe = wait if wait >= 0 else len(b) - self._held(b, ("</arg_value>",))
+                    out.append(b[:safe])
+                    self.buf = b[safe:]
+                    break
+                out.append(b[:k] + "\n</parameter>\n")
+                self.buf, self.state = b[k + len("</arg_value>"):], "between"
+        return "".join(out)
+
+    def flush(self) -> str:
+        """The end of the output: whatever is held.  A value whose </arg_value> waited for a follower that never came
+        ends there, and so does its call (the output stopped right after it); an unfinished call stays unfinished."""
+        rest, self.buf = self.buf, ""
+        if self.state == "value" and rest.rstrip().endswith("</arg_value>"):
+            self.state = "text"
+            return rest.rstrip()[:-len("</arg_value>")] + "\n</parameter>\n</function>\n</tool_call>"
+        return rest
+
+
+def glm_forced(force: str | None) -> str | None:
+    """forced_call's opening in GLM's form (the model goes on from it)."""
+    if not force:
+        return force
+    head = CALL_START + "\n" + FUNC_START
+    if force == head:
+        return CALL_START
+    if force.startswith(head) and force.endswith(">\n"):
+        return CALL_START + force[len(head):-2]
+    return force
+
+
 RCALL_MAX = 32768        # the most of a `<tool_call>` inside the reasoning that is held while waiting for its end (#804)
 
 
@@ -882,7 +1003,8 @@ class OutputParser:
     until it is complete, so clients never see `<tool_` or `</thi`."""
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
-                 recover: bool = False):
+                 recover: bool = False, glm: bool = False):
+        self.glm = GlmCallRewriter() if glm else None   # GLM-5's call format, rewritten into this one as it arrives
         self.state = "reasoning" if thinking else "content"
         self.buf = ""
         self.lead = False
@@ -1166,6 +1288,11 @@ class OutputParser:
         return best
 
     def feed(self, delta: str) -> list[Event]:
+        if self.glm is not None:
+            delta = self.glm.feed(delta)
+        return self._feed(delta)
+
+    def _feed(self, delta: str) -> list[Event]:
         self.buf += delta
         out: list[Event] = []
         while True:
@@ -1393,6 +1520,10 @@ class OutputParser:
         how the turn ended: calls waiting from the reasoning become real calls only on a natural stop (None = stop);
         a turn cut by max tokens (or cancelled, or failed) keeps them as reasoning text (#1058)."""
         out = []
+        if self.glm is not None:
+            rest = self.glm.flush()
+            if rest:
+                out += self._feed(rest)
         if self.pending:
             out += self._release(reason in (None, "stop") and self.state == "reasoning" and not self.buf)
         if self.state == "call" and self.bare and function_end(self.buf) >= 0:

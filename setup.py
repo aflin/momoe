@@ -73,6 +73,7 @@ HF_REVISIONS = {
     "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF": "5c2410d71524f4f72b023ce8daf7a80528226d5f",   # its mmproj (images)
     "Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF": "e4ae9970325413d582ba2c294122fc5567ec1dd7",
     "unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF": "34841e360524d421c564cc3ed247aa04a865473b",   # 2026-10-16
+    "unsloth/GLM-5.3-Flash-GGUF": "a38483c8cd5df544f53d70fb281afe97369d5ab6",   # 2026-10-17
 }
 
 
@@ -573,6 +574,28 @@ BOLT_FILES = {
     "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-UD-Q3_K_XL.gguf":
         (39027158016, "51077d511c769efb299073cc7b33d31bb007eb4fdaed60938dc1133146b708e3"),
 }
+# GLM-5.3-Flash (zai-org, MIT; Unsloth's GGUFs): 320B, 18B active.  Split files in a folder per size: (path in the
+# repository, bytes, SHA-256).  Momoe's engine runs it on a GPU that shares the system's memory (the DGX Spark: the
+# experts it cannot hold read from the SSD directly, --direct-io) or, on a separate card, from the file cache (the whole
+# file in RAM)
+GLM53_FILES = {
+    "UD-IQ4_XS": [
+        ("UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00001-of-00005.gguf", 9429984, "c2f3b6ab98d3df844f322ea376059202d2eaeedcee1f0eff455345b86a137dbd"),
+        ("UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00002-of-00005.gguf", 49989334176, "7d64cf0395672c4322012841abec502ea7e20518299bb5e3069003f06f9e6de9"),
+        ("UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00003-of-00005.gguf", 49607025280, "7c2c63c9c30f8060428fdf2ac935dbf2ee9ad8f771d62b6ae47a7f7f2c1520e7"),
+        ("UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00004-of-00005.gguf", 49486530144, "06c90f191871317c92dd9d25a353b687aed44c50f3ac6c713e9fe410bc2d26dd"),
+        ("UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00005-of-00005.gguf", 7729791616, "66ebf9ec85e04d3f44af674ae4f694acbc89cc53db75e42f2f4d3646bf321c0d")],
+    "UD-Q3_K_XL": [
+        ("UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL-00001-of-00004.gguf", 9429984, "be89305a221c1449cf9a5a84b5c492520a7fb23a3af1b2178a20ecf0b6ecae76"),
+        ("UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL-00002-of-00004.gguf", 49609243584, "310b5bef056c5cc61d98e1845feac97e35d0a5aa412fca354b6cd597d66b486e"),
+        ("UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL-00003-of-00004.gguf", 49623486016, "eacaab11505a25f00e78b4dce64795cc38bc25839372ec586745af0261673a0c"),
+        ("UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL-00004-of-00004.gguf", 48293762496, "c650640c9f94f5f1662ac84b803405db3265ee9fc24ffe56670bb0eafd632d00")],
+    "UD-IQ3_XXS": [
+        ("UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf", 9429984, "632f4fabe03ea73d20c299c8ef00c4a16e47dd9ab3f1750a8585b92eb70dfa74"),
+        ("UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00002-of-00004.gguf", 49261511584, "a4dba331fe92ffbd71317839cc1452c57f0b5b3f971a9e96ee5107f9a615cdac"),
+        ("UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00003-of-00004.gguf", 49075832480, "5b728b5b263c662201ef4a4a2b12fb509fe230d012418d0ed37c220a8a5aa230"),
+        ("UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00004-of-00004.gguf", 22020797792, "4b6d16e0d1381e1b4b7eeb6c9799671bf98153a995be12e75e3da93cd97981d2")],
+}
 GGML_FAMILIES = {
     "bolt": {"title": "Nemotron 3.5 Bolt 74B-A9B", "by": "NVIDIA; Unsloth's GGUFs",
              "about": "Mamba-2 + attention + latent MoE, 9B active; a 32 GB download, ~56 GB of RAM",
@@ -587,7 +610,31 @@ GGML_FAMILIES = {
              "sha256": BOLT_FILES,
              "context": 65536, "min_vram_gb": 11,                        # measured on a 12 GB card
              "license": "OpenMDW-1.1: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16"},
+    "glm53": {"title": "GLM-5.3-Flash 320B-A18B", "by": "Z.ai; Unsloth's GGUFs",
+              "about": "KDA + sparse MLA + MoE, 18B active; for a DGX Spark (128 GB shared memory): 121-157 GB, "
+                       "the experts it cannot hold read from the SSD",
+              "hf": hf("unsloth/GLM-5.3-Flash-GGUF"), "tag": "glm53flash-", "name": "glm-5.3-flash",
+              "parts": GLM53_FILES,
+              # ram_gb: on a GPU that shares the system's memory (the store is the RAM, the rest read from the SSD:
+              # measured on the DGX Spark, 121 GB); uma False: a separate card, the whole file in the file cache
+              "models": {"UD-IQ4_XS": {"about": "4-bit (Unsloth Dynamic), measured on the DGX Spark", "ram_gb": 100},
+                         "UD-Q3_K_XL": {"about": "3-bit, larger (not measured yet)", "ram_gb": 100},
+                         "UD-IQ3_XXS": {"about": "3-bit, smaller (not measured yet)", "ram_gb": 100}},
+              "unified_only": True,
+              # its own MTP block drafts 3 tokens a window (measured on the Spark, UD-IQ4_XS, greedy: 9.1 -> 10.9 tok/s,
+              # 85% of the drafts accepted)
+              "engine_args": ["--mtp", "3"],
+              "context": 65536, "min_vram_gb": 11,
+              "license": "MIT: https://huggingface.co/zai-org/GLM-5.3-Flash"},
 }
+
+
+def ggml_parts(fam: dict, q: str) -> list:
+    """A size's files: [(path in the repository, local name, bytes, SHA-256)], the first one the model's."""
+    if "parts" in fam:
+        return [(p, p.rsplit("/", 1)[-1], n, h) for p, n, h in fam["parts"][q]]
+    name = fam["file"].format(q=q)
+    return [(name, name, *fam["sha256"][name])]
 # Qwen3.6-35B-A3B (GGUF architecture qwen35moe), Unsloth's GGUFs with the MTP block: a family with an engine path of its
 # own (src/qwen35; `strata` switches to it from the file's architecture).  No pack, no expert profile, no separate MTP
 # draft layer: the engine reads the GGUF as it is, keeps every expert it can in VRAM and computes the rest on the CPU
@@ -1243,8 +1290,11 @@ def gpus():
     for line in s.strip().splitlines():
         try:
             idx, name, mem, cc, drv = [x.strip() for x in line.split(",")]
-            found.append({"index": int(idx), "name": name, "vram_gb": float(mem) / 1024.0, "arch": cc.replace(".", ""),
-                          "driver": drv})
+            # a GPU that shares the system's memory (the DGX Spark's GB10) has no memory of its own: nvidia-smi says
+            # [N/A]; its "VRAM" is the RAM ("unified")
+            unified = mem.upper().strip("[]") == "N/A"
+            found.append({"index": int(idx), "name": name, "vram_gb": ram_gb() if unified else float(mem) / 1024.0,
+                          "arch": cc.replace(".", ""), "driver": drv, "unified": unified})
         except ValueError:
             continue
     return found
@@ -4417,6 +4467,7 @@ SAMPLING_QWEN36 = {"temperature": 0.6, "top_p": 0.95, "top_k": 20}       # Qwen3
                                                                           # Ornith-1.5: general tasks
 SAMPLING_FLASH_NEXT = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}   # Qwen3.8-Flash-Next: thinking mode
 SAMPLING_NEMOTRON = {"temperature": 1.0, "top_p": 0.95}                  # Nemotron 3.5 (Bolt): the card's text sampling
+SAMPLING_GLM53 = {"temperature": 1.0, "top_p": 0.95}                     # GLM-5.3-Flash: its card's evaluation settings
 
 
 def recommended_sampling(model_name) -> dict | None:
@@ -4427,6 +4478,8 @@ def recommended_sampling(model_name) -> dict | None:
         return dict(SAMPLING_FLASH_NEXT)
     if name.startswith("nemotron-3.5-"):
         return dict(SAMPLING_NEMOTRON)
+    if name.startswith("glm-5.3-flash"):
+        return dict(SAMPLING_GLM53)
     return None
 
 
@@ -5689,7 +5742,7 @@ def ggml_size(fam: dict, size: str | None, ram: float) -> str:
                 return q
         fail(f"{fam['title']} has no size {size}", "sizes: " + ", ".join(fam["models"]))
     fits = [q for q, d in fam["models"].items() if ram >= d["ram_gb"]]
-    return max(fits, key=lambda q: fam["sha256"][fam["file"].format(q=q)][0]) if fits else next(iter(fam["models"]))
+    return max(fits, key=lambda q: sum(p[2] for p in ggml_parts(fam, q))) if fits else next(iter(fam["models"]))
 
 
 def ggml_setup(a, data: Path, port: int, family: str) -> int:
@@ -5714,8 +5767,13 @@ def ggml_setup(a, data: Path, port: int, family: str) -> int:
     if a.gpus:
         warn(f"{fam['title']} runs on one card: using GPU {gpu['index']} ({gpu_name(gpu)})")
     ram = ram_gb()
-    say(f"  {gpu_name(gpu)}; {ram:.0f} GB of RAM")
-    if gpu["vram_gb"] < fam["min_vram_gb"]:
+    unified = gpu.get("unified", False)
+    say(f"  {gpu_name(gpu)}; {ram:.0f} GB of RAM" + (" shared with the GPU" if unified else ""))
+    if fam.get("unified_only") and not unified:
+        warn(f"{fam['title']} is set up for a GPU that shares the system's memory (the DGX Spark): with a separate "
+             "card the whole model has to stay in the file cache (its size in RAM, and more), or the OS reads experts "
+             "from the SSD a page at a time (measured: llama.cpp, 2.3 tok/s on the Spark that way)")
+    if not unified and gpu["vram_gb"] < fam["min_vram_gb"]:
         warn(f"{fam['title']} was measured on a 12 GB card: on {gpu['vram_gb']:.0f} GB the dense weights (~5 GB), the "
              "compute buffers and the prompt staging leave little room for experts on the GPU (slower)")
     q = ggml_size(fam, a.model, ram)
@@ -5746,15 +5804,17 @@ def ggml_setup(a, data: Path, port: int, family: str) -> int:
     ok(f"{exe} (CUDA {ver[0]}.{ver[1]}, sm {archs.replace(';', ', ')})")
 
     tag = fam["tag"] + q
-    name = fam["file"].format(q=q)
-    gguf = Path(a.models_dir) / tag / name
-    size, sha = fam["sha256"][name]
-    step(3, f"downloading {fam['title']} {q} ({size / 1e9:.1f} GB)")
-    if not (gguf.exists() and done(gguf)):
-        say(f"  The model goes in {gguf.parent}")
-        download(fam["hf"] + name, gguf)
-    verify_sha256(gguf, size, sha)
-    ok("model file present")
+    parts = ggml_parts(fam, q)
+    gguf = Path(a.models_dir) / tag / parts[0][1]
+    step(3, f"downloading {fam['title']} {q} ({sum(p[2] for p in parts) / 1e9:.1f} GB"
+            + (f", {len(parts)} files)" if len(parts) > 1 else ")"))
+    say(f"  The model goes in {gguf.parent}")
+    for path, name, size, sha in parts:                # (a split model: every file, each checked)
+        f = gguf.parent / name
+        if not (f.exists() and done(f)):
+            download(fam["hf"] + path, f)
+        verify_sha256(f, size, sha)
+    ok("model file present" if len(parts) == 1 else f"model files present ({len(parts)})")
 
     step(4, "the tokenizer")
     pack = data / "packs" / tag.lower()
@@ -5766,7 +5826,8 @@ def ggml_setup(a, data: Path, port: int, family: str) -> int:
     step(5, "the config")
     cfg_path = name_config(config_path_for(a.config_name, tag) if a.config_name else
                            config_dir() / f"{tag.lower()}.json", a)
-    cfg = {"exe": str(exe), "args": ["-m", str(gguf), "--ctx", str(ctx), "--chunk", "1024"], "cwd": str(ROOT),
+    cfg = {"exe": str(exe), "args": ["-m", str(gguf), "--ctx", str(ctx), "--chunk", "1024", *fam.get("engine_args", [])],
+           "cwd": str(ROOT),
            "tokenizer": str(pack / "tokenizer"), "model_name": f"{fam['name']}-{q.lower()}",
            "log": str(ROOT / (cfg_path.stem + ".log")), "port": port, "gpu": gpu["index"], "setup_tag": tag,
            "fit_max_tokens": True}                    # (the model card's sampling: write_setup_config)

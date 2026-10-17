@@ -76,7 +76,21 @@ TEKKEN_PATTERN = (
     r"|\s+"
 )
 
-PRE_PATTERNS = {"qwen35": QWEN35_PATTERN, "tekken": TEKKEN_PATTERN}
+# The `glm4` / `glm5` pre-tokenizer (GLM-5.3-Flash): llama-vocab.cpp's LLAMA_VOCAB_PRE_TYPE_CHATGLM4 - the qwen2-era
+# pattern with numbers in runs of up to three digits and no \p{M} classes.  These files also set llama.cpp's
+# `ignore_merges`: a piece that is one vocabulary entry is that token, BPE only runs on the others (IGNORE_MERGES).
+CHATGLM4_PATTERN = (
+    r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])"
+    r"|[^\r\n\p{L}\p{N}]?\p{L}+"
+    r"|\p{N}{1,3}"
+    r"| ?[^\s\p{L}\p{N}]+[\r\n]*"
+    r"|\s*[\r\n]+"
+    r"|\s+(?!\S)"
+    r"|\s+"
+)
+
+PRE_PATTERNS = {"qwen35": QWEN35_PATTERN, "tekken": TEKKEN_PATTERN, "glm4": CHATGLM4_PATTERN, "glm5": CHATGLM4_PATTERN}
+IGNORE_MERGES = {"glm4", "glm5"}
 
 
 class Tokenizer:
@@ -241,7 +255,8 @@ class Tokenizer:
             if got is None:
                 mapped = "".join(BYTE_TO_UNICODE[b] for b in piece.encode("utf-8"))
                 got = []
-                for tok in self._bpe(mapped):
+                whole = self.pre in IGNORE_MERGES and mapped in self.ids     # (llama.cpp's ignore_merges)
+                for tok in ([mapped] if whole else self._bpe(mapped)):
                     i = self.ids.get(tok)
                     if i is None:
                         raise KeyError("BPE produced a token outside the vocabulary: %r" % tok)

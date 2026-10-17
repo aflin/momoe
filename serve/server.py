@@ -59,8 +59,8 @@ SHUTDOWN = threading.Event()                      # set by POST /shutdown (momoe
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
-                            forced_call, images_of, literal_tags, mark_think_literals, openai_to_messages,
-                            tool_choice_of, unmark_think_literals)
+                            forced_call, glm_forced, images_of, literal_tags, mark_think_literals,
+                            openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
 from serve import logit_bias as bias_api  # noqa: E402
@@ -3106,8 +3106,12 @@ class Service:
         self.restore_after_load = None                    # a session file an image job saved before it unloaded
         # the end-of-turn tokens; a name the vocabulary has no single token for (Nemotron 3.5 Bolt has no
         # <|endoftext|>) is skipped: encoded as text, its first piece ("<") would end every reply that wrote a "<"
-        self.stop_ids = {ids[0] for ids in (tokenizer.encode(s, parse_special=True) for s in (IM_END, "<|endoftext|>"))
+        # (GLM-5: <|user|> and <|observation|> end a reply as well: its eos_token_id list)
+        self.stop_ids = {ids[0] for ids in (tokenizer.encode(s, parse_special=True)
+                                            for s in (IM_END, "<|endoftext|>", "<|user|>", "<|observation|>"))
                          if len(ids) == 1}
+        # GLM-5's tool-call format (<tool_call>NAME<arg_key>..): the parser rewrites it into its own (GlmCallRewriter)
+        self.glm = "<arg_key>" in getattr(template, "source", "")
 
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
@@ -3785,6 +3789,13 @@ class Service:
         thinking) is rendered as a default one up to the answer - the same prompt start, so the conversation cache
         keeps it - and its effort follows in a short system turn right before the answer (thinking off: the template's
         empty thinking block).  The engine (--tail-role-token) checkpoints in front of that turn."""
+        if self.glm and kwargs.get("reasoning_effort"):     # GLM-5's levels: low, high and max (its default)
+            kwargs = dict(kwargs)
+            g = {"low": "low", "medium": "high"}.get(kwargs["reasoning_effort"])
+            if g:
+                kwargs["reasoning_effort"] = g
+            else:
+                kwargs.pop("reasoning_effort")
         effort = kwargs.get("reasoning_effort")
         off = kwargs.get("enable_thinking") is False
         if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
@@ -4101,7 +4112,8 @@ class Service:
                 print(f"[momoe] thinking capped at {max_new - reserve} of max_tokens {max_new} to leave room for "
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
-        parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery)
+        parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
+                              glm=self.glm)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
@@ -5804,6 +5816,8 @@ def make_handler(svc: Service):
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # as the Responses route: no tools are offered
                 tools = None
             force = forced_call(req.get("tool_choice"), tools)      # a bad value is a 400 before anything is sent
+            if svc.glm:
+                force = glm_forced(force)
             messages, validator = prepare_format(req.get("response_format"), messages)
             if validator is not None and (tools or req.get("strata_mcp")):
                 raise ValueError("structured response_format with tools/MCP is not supported")
@@ -6047,6 +6061,8 @@ def make_handler(svc: Service):
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # Anthropic's {"type": "none"}: no tools offered
                 tools = None
             force = forced_call(req.get("tool_choice"), tools)        # "any" / {"type": "tool", "name": N}
+            if svc.glm:
+                force = glm_forced(force)
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
