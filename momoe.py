@@ -478,9 +478,24 @@ UNSLOTH_URL = "http://127.0.0.1:8888"
 UNSLOTH_ID = "6d6f6d6f65000000"                      # the MoMoE provider's row (16 hex digits, as Studio's own)
 
 
-def unsloth_up() -> bool:
+def unsloth_url(args) -> str:
+    """Where Studio answers with these options of `unsloth studio` (-H/--host, -p/--port); 0.0.0.0 is reached on
+    127.0.0.1."""
+    host, port = "127.0.0.1", "8888"
+    for i, a in enumerate(args):
+        k, eq, v = a.partition("=")
+        if not eq:
+            v = args[i + 1] if i + 1 < len(args) else ""
+        if k in ("-H", "--host") and v:
+            host = "127.0.0.1" if v in ("0.0.0.0", "::") else v
+        elif k in ("-p", "--port") and v:
+            port = v
+    return f"http://{'[' + host + ']' if ':' in host else host}:{port}"
+
+
+def unsloth_up(url=UNSLOTH_URL) -> bool:
     try:
-        return http("GET", UNSLOTH_URL + "/api/health", timeout=3).get("status") == "healthy"
+        return http("GET", url + "/api/health", timeout=3).get("status") == "healthy"
     except (OSError, ValueError, urllib.error.URLError):
         return False
 
@@ -513,24 +528,34 @@ def run_unsloth(s, h, args) -> int:
     exe = which("unsloth")
     if exe is None:
         return missing("Unsloth Studio", INSTALL["unsloth"])
-    started = False
-    if not unsloth_up():
+    started, url = False, unsloth_url(args)
+    if not unsloth_up(url):
         log = STATE_DIR / "unsloth.log"
         say(f"Starting Unsloth Studio in the background (its output: {log}) ...")
-        detached([exe, "studio", *args], log)
+        start = log.stat().st_size if log.exists() else 0
+        proc = detached([exe, "studio", *args], log)
         started = True
         end = time.time() + 300
-        while not unsloth_up() and time.time() < end:
+        while not unsloth_up(url) and time.time() < end and proc.poll() is None:
             time.sleep(1)
-        if not unsloth_up():
-            die(f"Unsloth Studio did not answer at {UNSLOTH_URL} within 5 minutes: {log}")
+        if not unsloth_up(url):
+            if proc.poll() is not None:
+                with open(log, "rb") as f:
+                    f.seek(start)
+                    out = f.read().decode(errors="replace")
+                tail = "\n".join(out.strip().splitlines()[-15:])
+                hint = ("\n(-h is Studio's --help; its host option is -H, for example: momoe run unsloth -H 0.0.0.0)"
+                        if "-h" in args else "")
+                die(f"Unsloth Studio stopped (exit {proc.returncode}) before it answered at {url}. The end of its "
+                    f"output ({log}):\n{tail}{hint}")
+            die(f"Unsloth Studio did not answer at {url} within 5 minutes: {log}")
     try:
         unsloth_provider(s, h)
     except sqlite3.Error as e:
         say(f"Could not add the MoMoE provider to Unsloth Studio ({e}). Add it in Studio's settings: provider "
             f"llama.cpp, base URL {base_url(s)}/v1")
     else:
-        say(f"Unsloth Studio {'started' if started else 'is running'}: {UNSLOTH_URL}")
+        say(f"Unsloth Studio {'started' if started else 'is running'}: {url}")
         say(f"  Its provider \"MoMoE\" points at {base_url(s)}/v1 ({h.get('model')}): pick it in the model menu.")
         if not started:
             say("  (reload the Studio page if it was open)")
