@@ -58,9 +58,9 @@ inline bool model_family_runs(ModelFamily f) { return f == ModelFamily::Qwen4Exp
 /// The refusal for a recognised family the engine does not run (empty when it runs it).
 inline std::string model_family_not_supported(ModelFamily f) {
     if (model_family_runs(f)) return {};
-    if (f == ModelFamily::Unknown) return "this is not a model family Strata knows";
+    if (f == ModelFamily::Unknown) return "this is not a model family Momoe knows";
     return std::string(model_family_title(f)) + " (architecture '" + model_family_arch(f) +
-           "') runs on the NVIDIA (CUDA) and AMD (HIP) builds of Strata; this build does not run it yet (the Intel "
+           "') runs on the NVIDIA (CUDA) and AMD (HIP) builds of Momoe; this build does not run it yet (the Intel "
            "Arc / SYCL port is in development). Use a CUDA or HIP build, or a Qwen3.8-Flash-Next model file";
 }
 

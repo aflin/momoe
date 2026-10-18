@@ -52,7 +52,7 @@ def main(argv=None) -> int:
     ap.add_argument("--gpu-policy", choices=["auto", "keep", "shrink", "unload"], default="auto")
     ap.add_argument("--gpu", type=int, help="the GPU's number for the image job (default: the backend's first)")
     ap.add_argument("--native", choices=["on", "off"], default="off",
-                    help="EXPERIMENTAL: Strata's own DiT runner on CUDA / HIP (the config's \"native\")")
+                    help="EXPERIMENTAL: Momoe's own DiT runner on CUDA / HIP (the config's \"native\")")
     ap.add_argument("--build-only", action="store_true", help="compile sd-cli only")
     ap.add_argument("--print", action="store_true", help="print the images section instead of writing it")
     ap.add_argument("--yes", action="store_true")

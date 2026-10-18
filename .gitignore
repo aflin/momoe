@@ -68,3 +68,5 @@ build-vision-cuda12.bat
 # momoe: its state (the running server, its log) and configs named at setup
 /.momoe/
 /*.json
+# local Windows HIP packaging output
+dist-hip/

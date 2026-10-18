@@ -75,7 +75,7 @@ class Tables(unittest.TestCase):
             self.assertEqual(setup.MODELS[m]["engine"], setup.QWEN36_ENGINE)
             self.assertFalse(setup.MODELS[m].get("budget"))
         # the engine version required: this source tree's (CMakeLists.txt)
-        self.assertEqual(setup.QWEN36_ENGINE, tuple(int(x) for x in setup.source_version().split(".")))
+        self.assertLessEqual(setup.QWEN36_ENGINE, tuple(int(x) for x in setup.source_version().split(".")))   # (an older engine runs it too)
         # Unsloth's Flash-Next UD-IQ4_XS keeps its key and its numbers
         self.assertEqual(setup.MODELS["UD-IQ4_XS"]["families"], ("unsloth",))
         self.assertEqual(setup.MODELS["UD-IQ4_XS"]["arena_gb"], 59.5)

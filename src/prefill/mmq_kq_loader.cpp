@@ -64,7 +64,7 @@ Lib open_lib() {
     void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
 #endif
     if (h == nullptr) {
-        std::fprintf(stderr, "strata: K-quant prompt kernels (STRATA_MMQ_KQ=1): %s not found next to the engine - "
+        std::fprintf(stderr, "momoe: K-quant prompt kernels (STRATA_MMQ_KQ=1): %s not found next to the engine - "
                              "these experts take the FP16 prompt path\n", STRATA_KQ_LIB_NAME);
         return L;
     }
@@ -73,7 +73,7 @@ Lib open_lib() {
     L.run = (strata_kq_run_fn) sym(h, "strata_kq_run");
     if (abi == nullptr || init == nullptr || L.run == nullptr || abi() / 100000 != STRATA_KQ_ABI_VERSION ||
         abi() % 100000 != abi_args_size()) {
-        std::fprintf(stderr, "strata: K-quant prompt kernels: %s is from another engine version - these experts take "
+        std::fprintf(stderr, "momoe: K-quant prompt kernels: %s is from another engine version - these experts take "
                              "the FP16 prompt path\n", path.c_str());
         L.run = nullptr;
         return L;
@@ -85,7 +85,7 @@ Lib open_lib() {
     for (int d = 0; d < n; ++d) {
         const int e = init(d);
         if (e != 0) {
-            std::fprintf(stderr, "strata: K-quant prompt kernels: %s did not start on GPU %d (CUDA error %d) - these "
+            std::fprintf(stderr, "momoe: K-quant prompt kernels: %s did not start on GPU %d (CUDA error %d) - these "
                                  "experts take the FP16 prompt path\n", path.c_str(), d, e);
             L.run = nullptr;
             cudaSetDevice(cur);
@@ -93,7 +93,7 @@ Lib open_lib() {
         }
     }
     cudaSetDevice(cur);
-    std::fprintf(stderr, "strata: K-quant prompt kernels from %s (STRATA_MMQ_KQ=1)\n", path.c_str());
+    std::fprintf(stderr, "momoe: K-quant prompt kernels from %s (STRATA_MMQ_KQ=1)\n", path.c_str());
     L.ok = true;
     return L;
 }

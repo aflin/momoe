@@ -95,7 +95,7 @@ def verdict(fp: dict, table: dict) -> tuple[str, str]:
     (naming the tensors whose quantization no file Strata runs has for them)."""
     known = {k: v for k, v in table.items() if not k.startswith("_")}
     if fp["arch"] in PREVIEW_ARCHS:
-        return "family", (f"{PREVIEW_ARCHS[fp['arch']]} (architecture {fp['arch']!r}): Strata runs it on its own "
+        return "family", (f"{PREVIEW_ARCHS[fp['arch']]} (architecture {fp['arch']!r}): Momoe runs it on its own "
                           "engine path in the NVIDIA (CUDA) and AMD (HIP) builds, not yet on Intel Arc (SYCL); setup "
                           "installs it with --family qwen36")
     if fp["arch"] != ARCH:

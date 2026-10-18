@@ -81,7 +81,7 @@ public:
         acquired_ = nullptr;
         cudaError_t e = cudaMemcpyAsync(dst, stage, bytes, cudaMemcpyHostToDevice, s);
         if (e != cudaSuccess) {
-            std::fprintf(stderr, "strata: pinned upload of %zu bytes failed: %s\n", bytes, cudaGetErrorString(e));
+            std::fprintf(stderr, "momoe: pinned upload of %zu bytes failed: %s\n", bytes, cudaGetErrorString(e));
             return e;
         }
         if (sl != nullptr && cudaEventRecord(sl->ev, s) == cudaSuccess) {
@@ -97,7 +97,7 @@ public:
         if (bytes == 0) return cudaSuccess;
         cudaError_t e = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, s);
         if (e == cudaSuccess) e = cudaStreamSynchronize(s);
-        if (e != cudaSuccess) std::fprintf(stderr, "strata: upload of %zu bytes failed: %s\n", bytes, cudaGetErrorString(e));
+        if (e != cudaSuccess) std::fprintf(stderr, "momoe: upload of %zu bytes failed: %s\n", bytes, cudaGetErrorString(e));
         return e;
     }
 
@@ -109,8 +109,43 @@ public:
         if (e == cudaSuccess) e = cudaStreamSynchronize(s);
         if (e == cudaSuccess && stage != nullptr) std::memcpy(dst, stage, bytes);
         if (stage != nullptr) acquired_ = nullptr;   // no event: the stream was drained
-        if (e != cudaSuccess) std::fprintf(stderr, "strata: download of %zu bytes failed: %s\n", bytes, cudaGetErrorString(e));
+        if (e != cudaSuccess) std::fprintf(stderr, "momoe: download of %zu bytes failed: %s\n", bytes, cudaGetErrorString(e));
         return e;
+    }
+
+    // Every slot holds at least `bytes` from here on: grown now, by a caller that must not allocate later (a pinned
+    // allocation or free takes the driver's lock and can wait for the device: STRATA_PIPED_CONCURRENT grows the rings
+    // before a read whose windows run beside it).  On the device that is current, as acquire().  False: a slot could
+    // not be had (its uploads then grow it, or go up from the caller's memory, as before).
+    bool reserve(size_t bytes) {
+        if (bytes == 0 || pageable_forced()) return true;
+        int cur = -1;
+        if (cudaGetDevice(&cur) != cudaSuccess) { cudaGetLastError(); return false; }
+        if (dev_ < 0) dev_ = cur;
+        if (cur != dev_) return false;
+        for (Slot& sl : slots_) {
+            if (sl.cap >= bytes && sl.ev != nullptr) continue;
+            if (sl.pending) {
+                sl.pending = false;
+                if (cudaEventSynchronize(sl.ev) != cudaSuccess) { cudaGetLastError(); return false; }
+            }
+            if (sl.cap < bytes) {
+                if (sl.p) { cudaFreeHost(sl.p); sl.p = nullptr; sl.cap = 0; }
+                const size_t cap = bytes < kMinCap ? kMinCap : bytes;
+                if (cudaHostAlloc(&sl.p, cap, cudaHostAllocPortable) != cudaSuccess) {
+                    cudaGetLastError();
+                    sl.p = nullptr;
+                    return false;
+                }
+                sl.cap = cap;
+            }
+            if (sl.ev == nullptr && cudaEventCreateWithFlags(&sl.ev, cudaEventDisableTiming) != cudaSuccess) {
+                cudaGetLastError();
+                sl.ev = nullptr;
+                return false;
+            }
+        }
+        return true;
     }
 
     void release() {
