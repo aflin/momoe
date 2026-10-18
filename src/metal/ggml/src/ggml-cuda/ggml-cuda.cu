@@ -4313,6 +4313,13 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 }
 
 static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {
+    static int momoe_dump_from = -1, momoe_dump_to = -1, momoe_dump_call = -1;
+    if (momoe_dump_from == -1) {
+        const char * d = getenv("MOMOE_CUDA_DUMP");
+        if (!d || sscanf(d, "%d,%d", &momoe_dump_from, &momoe_dump_to) != 2) momoe_dump_from = -2;
+    }
+    ++momoe_dump_call;
+    const bool momoe_dump_on = momoe_dump_from >= 0 && momoe_dump_call >= momoe_dump_from && momoe_dump_call <= momoe_dump_to;
     bool graph_evaluated_or_captured = false;
 
     // flag used to determine whether it is an integrated_gpu
@@ -4453,6 +4460,13 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 }
 
                 int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i);
+
+                if (momoe_dump_on) {                // Momoe: MOMOE_CUDA_DUMP=FROM,TO: the nodes of those graph calls
+                    fprintf(stderr, "NODE %d.%d %s%s%s %s [%s | %s]%s\n", momoe_dump_call, i, ggml_op_desc(node),
+                            node->type == GGML_TYPE_F32 ? "" : " ", node->type == GGML_TYPE_F32 ? "" : ggml_type_name(node->type),
+                            node->name, node->src[0] ? node->src[0]->name : "-", node->src[1] ? node->src[1]->name : "-",
+                            nodes_to_skip ? (" FUSED+" + std::to_string(nodes_to_skip)).c_str() : "");
+                }
 
                 if (nodes_to_skip != 0) {
 #ifdef GGML_CUDA_DEBUG
