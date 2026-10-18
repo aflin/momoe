@@ -247,7 +247,14 @@ Writing and prompt speed, tok/s:
 
 Since then (2026-10-13), a pool that holds every expert runs without pauses (`--preload` made automatic). On the
 MacBook, Ornith IQ4_XS, code prompt, 256 tokens: 28.4 tok/s (25.5 with pauses), 34.5 with drafting (31.6), against
-llama.cpp's 33.7 (19.8 with its drafting); every expert read in 5.1 s at the start. Not measured on en yet.
+llama.cpp's 33.7 (19.8 with its drafting); every expert read in 5.1 s at the start.
+
+On en (2026-10-18, Flash-Next IQ3_XXS, a 27-token chat prompt, 256 tokens, second half): every expert in memory
+(40.0 GiB, read in 7.2 s, no pauses) 26.7 tok/s, against llama.cpp's 34.0-34.9. With drafting too it does not fit:
+Metal's working-set limit there is 51.5 GB, and the experts, the dense weights (3.83 GiB) and the MTP layer
+(1.48 GiB) come to 45.3 GiB before the buffers ("Insufficient Memory"; at 16K context too). A pool of 34-37 GiB
+with `--mtp 3` writes 21.6-21.8 (12.9-13.0 without): any expert missing keeps the pauses, so the pool's size above
+34 GiB changes nothing; 38 GiB with drafting stopped with a bus error at the start.
 
 What follows: on a Mac where llama.cpp can map the model, llama.cpp is faster. momoe-metal is useful only where it
 cannot (Flash-Next on the 32 GB MacBook), and it would need pauses only on a miss (or none) to be worth more.

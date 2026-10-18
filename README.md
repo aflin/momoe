@@ -81,7 +81,7 @@ Speeds are in tokens per second. "Writes" is the speed of the answer, "reads" th
 | --- | --- | --- | ---: | ---: | ---: |
 | [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), files by [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) | Q2_0, IQ2_XS, IQ3_XXS, IQ3_S (about 48-62 GB of RAM) | PC, IQ3_XXS, 64K context | 61 | 2,170 (32K tokens) | |
 | | | M4 Air, IQ3_XXS, 12 GiB of experts in memory, drafting on (set up by hand) | 8.6-8.9 | 56-62 (1K-8K tokens) | 4.2 (CPU only: on the GPU it runs out of memory) |
-| | | M1 Ultra, IQ3_XXS, 34 GiB in memory, drafting on (set up by hand) | 16.4 | 214 (8K tokens) | 34.0 |
+| | | M1 Ultra, IQ3_XXS, every expert in memory (set up by hand; with drafting too it does not fit the GPU's memory limit) | 26.7 | 214 (8K tokens, 34 GiB in memory) | 34.0 |
 | Flash-Next Coder, files by [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF) | IQ1_M (about 32 GB of RAM) | PC | answered | | |
 | Swift 1.5, a Flash-Next fine-tune, files by [ukisai](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF) | IQ2_XS, IQ3_XXS, IQ3_S | not tested in MoMoE | | | |
 | Flash-Next, files by [Unsloth](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | UD-Q4_K_XL, UD-IQ4_XS (part of the experts read from the SSD) | not tested in MoMoE | | | |

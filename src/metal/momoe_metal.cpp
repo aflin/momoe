@@ -50,11 +50,21 @@ static double now_s() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+// The process ends with _exit, not exit: exit runs ggml's static destructors, and the Metal device's asserts that
+// every residency set was released first (the mapped model, the pool and the MTP layer's buffers still hold theirs,
+// and exit from a reader thread would race them anyway): "GGML_ASSERT([rsets->data count] == 0)", an abort after
+// the run's results
+[[noreturn]] static void quit(int code) {
+    fflush(stdout);
+    fflush(stderr);
+    _exit(code);
+}
+
 [[noreturn]] static void die(const char * fmt, const char * a = "") {
     fprintf(stderr, "momoe-metal: ");
     fprintf(stderr, fmt, a);
     fprintf(stderr, "\n");
-    exit(1);
+    quit(1);
 }
 
 // Apple Silicon: every backend buffer is host memory, written and read in place. CUDA (momoe-cuda): device memory,
@@ -4476,7 +4486,7 @@ int main(int argc, char ** argv) {
             std::sort(ts.begin(), ts.end());
             fprintf(stderr, "momoe-metal: window of %d: %.1f ms (%.1f ms per token)\n", T, 1000 * ts[7], 1000 * ts[7] / T);
         }
-        return 0;
+        quit(0);
     }
     if (getenv("MOMOE_TF_WINDOW")) {                          // a test: the tokens in MOMOE_TF_FILE after the prompt,
         // fed in windows of MOMOE_TF_WINDOW (as verify windows, all accepted): each window's greedy next tokens against
@@ -4617,7 +4627,7 @@ int main(int argc, char ** argv) {
         for (auto b : e.bufs) ggml_backend_buffer_free(b);
         ggml_backend_free(e.metal);
         ggml_backend_free(e.cpu);
-        return 0;
+        quit(0);
     }
     // MOMOE_KL_DUMP=FILE: each step's token and log-probabilities (f16) written; MOMOE_KL_REF=FILE: that run's tokens
     // fed instead of ours, and each step's KL(ref || ours) and top-1 agreement
@@ -4722,5 +4732,5 @@ int main(int argc, char ** argv) {
     for (auto b : e.bufs) ggml_backend_buffer_free(b);
     ggml_backend_free(e.metal);
     ggml_backend_free(e.cpu);
-    return 0;
+    quit(0);
 }
