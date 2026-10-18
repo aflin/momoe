@@ -64,7 +64,8 @@ Early, and maintained by one person.
 
 - **NVIDIA DGX Spark (early):** MoMoE's ggml engine (`momoe-cuda`) on its GB10, which shares the 128 GB of memory
   with the CPU: the experts that do not fit are read from the SSD directly, past the page cache, at 10-13 GB/s.
-  `momoe setup --family glm53` sets up GLM-5.3-Flash (320B, 157 GB at UD-IQ4_XS).
+  `momoe setup --family glm53` sets up GLM-5.3-Flash (320B) at UD-IQ3_XXS (121 GB), which is faster there than
+  UD-IQ4_XS (157 GB, `--model UD-IQ4_XS`): its store holds nearly every expert the model uses.
 
 Measured on the PC above:
 
@@ -81,6 +82,7 @@ On MoMoE's ggml engine (the server, 400-token chats, greedy / sampled):
 | --- | ---: | ---: |
 | Nemotron 3.5 Bolt UD-IQ3_XXS, the PC above (RTX 4070 Ti, 64 GB) | 30.0 / 30.6 tokens/s | 26.2 / 26.1 tokens/s |
 | GLM-5.3-Flash UD-IQ4_XS, DGX Spark (its MTP drafting on) | 11.7 / 10.4 tokens/s | 2.3 / 2.5 tokens/s |
+| GLM-5.3-Flash UD-IQ3_XXS, DGX Spark (its MTP drafting on) | 15.0 / 14.6 tokens/s | not measured |
 
 GLM-5.3-Flash on the Spark read a 3,620-token prompt at 69 tokens/s (llama.cpp: 4.1); llama.cpp there ran with the
 experts in its mapped file (`-cmoe --no-repack`; its default settings ran the machine out of memory).

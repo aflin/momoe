@@ -17,8 +17,11 @@ GLM = setup.GGML_FAMILIES["glm53"]
 
 
 class GlmSize(unittest.TestCase):
-    def test_the_measured_size_on_the_spark(self):
-        self.assertEqual(setup.ggml_size(GLM, None, 121.7), "UD-IQ4_XS")
+    def test_the_default_on_the_spark(self):
+        self.assertEqual(setup.ggml_size(GLM, None, 121.7), "UD-IQ3_XXS")
+
+    def test_the_larger_size_when_asked(self):
+        self.assertEqual(setup.ggml_size(GLM, "UD-IQ4_XS", 121.7), "UD-IQ4_XS")
 
     def test_model_in_any_case(self):
         self.assertEqual(setup.ggml_size(GLM, "ud-iq3_xxs", 121.7), "UD-IQ3_XXS")

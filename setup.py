@@ -619,7 +619,13 @@ GGML_FAMILIES = {
               # measured on the DGX Spark, 121 GB); uma False: a separate card, the whole file in the file cache
               "models": {"UD-IQ4_XS": {"about": "4-bit (Unsloth Dynamic), measured on the DGX Spark", "ram_gb": 100},
                          "UD-Q3_K_XL": {"about": "3-bit, larger (not measured yet)", "ram_gb": 100},
-                         "UD-IQ3_XXS": {"about": "3-bit, smaller (not measured yet)", "ram_gb": 100}},
+                         # measured on the Spark (300 tokens, --mtp 3): 17.5 tok/s against UD-IQ4_XS's 11.6, the store
+                         # holding ~98% of the experts it uses; its first 48 greedy tokens = llama.cpp's
+                         "UD-IQ3_XXS": {"about": "3-bit, smaller and faster (Unsloth Dynamic), measured on the DGX Spark",
+                                        "ram_gb": 100}},
+              # the size setup installs: faster on the Spark than UD-IQ4_XS (server, 400-token chats, --mtp 3: 15.0 / 14.6
+              # tok/s greedy / sampled against 11.7 / 10.4), its first 48 greedy tokens = llama.cpp's
+              "default": "UD-IQ3_XXS",
               "unified_only": True,
               # its own MTP block drafts 3 tokens a window (measured on the Spark, UD-IQ4_XS, greedy: 9.1 -> 10.9 tok/s,
               # 85% of the drafts accepted)
@@ -5735,13 +5741,16 @@ def mac_setup(a, data: Path, port: int) -> int:
 
 
 def ggml_size(fam: dict, size: str | None, ram: float) -> str:
-    """The size to install: --model's (any case), else the largest whose RAM need this PC has (the smallest when none)."""
+    """The size to install: --model's (any case), else the family's "default" when this PC has its RAM, else the largest
+    whose RAM need this PC has (the smallest when none)."""
     if size:
         for q in fam["models"]:
             if q.upper() == size.upper():
                 return q
         fail(f"{fam['title']} has no size {size}", "sizes: " + ", ".join(fam["models"]))
     fits = [q for q, d in fam["models"].items() if ram >= d["ram_gb"]]
+    if fam.get("default") in fits:                       # a family's measured pick (GLM on the Spark: UD-IQ3_XXS)
+        return fam["default"]
     return max(fits, key=lambda q: sum(p[2] for p in ggml_parts(fam, q))) if fits else next(iter(fam["models"]))
 
 
