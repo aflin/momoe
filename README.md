@@ -72,6 +72,7 @@ The machines the models were tested on:
 | **PC** | Linux (Debian 12), NVIDIA RTX 4070 Ti (12 GB), Ryzen 9 5950X, 63 GB of RAM |
 | **Spark** | NVIDIA DGX Spark: GB10, 128 GB of memory shared by the CPU and the GPU |
 | **M4 Air** | MacBook Air M4, 32 GB |
+| **M4 Air, simulated 16 GB** | the same MacBook with 16 GiB of its memory wired away (`mlock`), so that macOS can neither use nor swap it |
 | **M1 Ultra** | Mac Studio M1 Ultra, 64 GB |
 
 Speeds are in tokens per second. "Writes" is the speed of the answer, "reads" the speed of reading the prompt.
@@ -88,6 +89,7 @@ Speeds are in tokens per second. "Writes" is the speed of the answer, "reads" th
 | [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), files by [Unsloth](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) and [bartowski](https://huggingface.co/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF) | UD-IQ4_XS, UD-IQ3_S and 24 more (8-12 GB cards, 16-32 GB of RAM) | PC | answered | | |
 | [Ornith-1.5-35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B), a Qwen3.6 fine-tune, files by [bartowski](https://huggingface.co/bartowski/Ornith-1.5-35B-A3B-GGUF) | IQ4_XS, IQ3_XXS | PC, IQ4_XS, 262K context | 96-109 | about 4,130 (24K tokens, 32K context) | |
 | | | M4 Air, IQ4_XS, every expert in memory, drafting on (what setup installs on a Mac) | 34.5 | | 33.7 |
+| | | M4 Air, simulated 16 GB, IQ4_XS, setup's 16 GB config (5 GiB of experts in memory, 32K context, drafting on) | 9.7-13.1 | 126 (9,698 tokens) | |
 | | | M1 Ultra, IQ4_XS, every expert in memory | 54.6 | 582 (8K tokens, measured before every expert was preloaded) | 88.9 |
 | KAT-Coder-V2.5-Dev, a coding fine-tune of Qwen3.6, files by [Myric](https://huggingface.co/Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF) | i-quality-v2, i-quality | PC | answered | | |
 | [Nemotron 3.5 Bolt 74B-A9B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16), files by [Unsloth](https://huggingface.co/unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF) (`--family bolt`) | UD-IQ3_XXS, UD-Q3_K_XL (Linux and NVIDIA only; about 56 GB of RAM) | PC, UD-IQ3_XXS | 30.0 / 30.6 | | 26.2 / 26.1 |
@@ -99,6 +101,7 @@ How these were measured:
 - **Two numbers ("30.0 / 30.6"):** the server, 400-token chats, greedy / sampled.
 - **Flash-Next on the PC:** medians of three runs of `tools/strata_bench.py`.
 - **Ornith on the PC:** short chats.
+- **Ornith on the simulated 16 GB Mac:** the server, three 400-token chats (greedy); the same as with all 32 GB.
 - **Bolt on the Spark:** the engine on its own, not the server.
 - **Macs:** the details are in [design/mac-port.md](design/mac-port.md).
 - **llama.cpp:**
