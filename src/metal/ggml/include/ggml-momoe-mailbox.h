@@ -21,7 +21,7 @@ extern "C" {
 
 enum momoe_mailbox_kind {
     MOMOE_MAILBOX_SEND = 1, // src[0] (F32, n_f32) and src[1] (I32, n_i32) into the mailbox, then *flag := *epoch
-    MOMOE_MAILBOX_WAIT = 2, // spin until *flag == *epoch, then n_f32 floats from the mailbox into dst
+    MOMOE_MAILBOX_WAIT = 2, // spin until *flag == *epoch, then n_f32 32-bit words from the mailbox into dst (F32 or I32)
 };
 
 struct momoe_mailbox_op {
@@ -36,6 +36,10 @@ struct momoe_mailbox_op {
 };
 
 GGML_API void momoe_mailbox_cpu_stub(struct ggml_tensor * dst, int ith, int nth, void * userdata);
+
+// momoe-cuda: n bytes from `src` (host memory the GPU maps: cudaMallocHost) to device memory `dst` by a kernel on
+// `stream` (a cudaStream_t); 0 when launched
+GGML_API int momoe_copy_to_device(void * dst, const void * src, size_t n, void * stream);
 
 #ifdef __cplusplus
 }

@@ -209,6 +209,8 @@ struct Pool {
     int n_slots = 0;                                         // all groups
     size_t all_bytes = 0, pool_bytes = 0;                    // every expert; the pool's slots
     ggml_backend_buffer_t buf = nullptr;                     // the slots' memory (rebuilt by fit_pool)
+    char * host = nullptr, * dev = nullptr;                  // a host-mapped pool (unified memory, --direct-io): its
+                                                             // address for the CPU and the GPU's (readers write it)
     std::vector<int> slot_of;                                // layer * n_expert + expert -> slot in its group, -1
     uint64_t clock = 0;
     // counters
@@ -229,6 +231,11 @@ static void read_at(int fd, void * dst, size_t size, size_t off);
 // opened again with O_DIRECT, by the descriptor of its ordinary opening
 static bool g_direct = false;
 static std::vector<int> g_direct_fd;
+static bool g_rmb_copy = false;                              // resident mailboxes: the readers copy by a kernel, all on
+#if defined(MOMOE_CUDA)                                      // one stream of their own (g_copy_st): with a stream per
+static cudaStream_t g_copy_st = nullptr;                     // reader, some shared a hardware queue with the compute
+static std::mutex g_copy_mu;                                 // stream and waited behind the mailbox's wait (measured)
+#endif
 
 // read `need` bytes at `off` (a multiple of 4096) with O_DIRECT into `dst` (4096-aligned): `size` (a multiple of 4096,
 // >= need) is asked for, the end of the file may cut it short
@@ -264,11 +271,34 @@ struct Readers {
 #if defined(MOMOE_CUDA)
     // momoe-cuda: each reader copies an expert from the mapped file into its own pinned buffer, then to the device on
     // its own stream (a copy from pageable memory: ~0.8 GB/s for these 1-2 MB pieces; from pinned: ~20 GB/s)
-    struct Pinned { char * buf = nullptr; size_t cap = 0; cudaStream_t st = nullptr; };
+    struct Pinned { char * buf = nullptr; size_t cap = 0; cudaStream_t st = nullptr; cudaEvent_t ev[2] = {nullptr, nullptr}; };
+    static void wait_event(cudaEvent_t ev) {                 // (polled with short sleeps, as sync below)
+        cudaError_t r;
+        const auto t0 = std::chrono::steady_clock::now();
+        bool told = false;
+        while ((r = cudaEventQuery(ev)) == cudaErrorNotReady) {
+            std::this_thread::sleep_for(std::chrono::microseconds(20));
+            if (!told && std::chrono::steady_clock::now() - t0 > std::chrono::seconds(2)) {
+                told = true;
+                fprintf(stderr, "momoe-cuda: a reader's copy (shared stream) has not finished after 2 s\n");
+            }
+        }
+        if (r != cudaSuccess) fprintf(stderr, "momoe-cuda: a reader's copy failed: %s\n", cudaGetErrorString(r));
+    }
     // the copies are waited for by polling with short sleeps: cudaStreamSynchronize spins on a core, and 16 readers
     // spinning took those cores from the CPU's experts (measured: 24 instead of 11 ms of a token)
     static void sync(cudaStream_t st) {
-        while (cudaStreamQuery(st) == cudaErrorNotReady) std::this_thread::sleep_for(std::chrono::microseconds(20));
+        const auto t0 = std::chrono::steady_clock::now();
+        bool told = false;
+        cudaError_t r;
+        while ((r = cudaStreamQuery(st)) == cudaErrorNotReady) {
+            std::this_thread::sleep_for(std::chrono::microseconds(20));
+            if (!told && std::chrono::steady_clock::now() - t0 > std::chrono::seconds(2)) {
+                told = true;
+                fprintf(stderr, "momoe-cuda: a reader's copy to the GPU has not finished after 2 s\n");
+            }
+        }
+        if (r != cudaSuccess) fprintf(stderr, "momoe-cuda: a reader's copy failed: %s\n", cudaGetErrorString(r));
     }
     // (--direct-io: from the file at `off` instead of from `src`)
     static void to_device(Pinned & p, ggml_tensor * t, size_t t_off, const void * src, size_t n, int fd, size_t off) {
@@ -279,21 +309,55 @@ struct Readers {
             if (cudaStreamCreateWithFlags(&p.st, cudaStreamNonBlocking) != cudaSuccess) die("cannot create a stream");
         }
         char * dst = (char *) t->data + t_off;
-        for (size_t done = 0, k = 0; done < n; done += piece, ++k) {   // two halves: the next is filled while one copies
+        const bool shared = g_rmb_copy && g_copy_st;          // resident mailboxes: the one copy stream, by a kernel
+        if (shared && !p.ev[0]) {
+            for (auto & ev : p.ev)
+                if (cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) die("cannot create an event");
+        }
+        size_t k = 0;
+        for (size_t done = 0; done < n; done += piece, ++k) {   // two halves: the next is filled while one copies
             const size_t len = std::min(piece, n - done);
             char * b = p.buf + (k & 1) * half;
-            if (k >= 2) sync(p.st);                          // (simple: wait before reusing a half)
+            if (k >= 2) { if (shared) wait_event(p.ev[k & 1]); else sync(p.st); }   // (wait before reusing a half)
             const char * from = b;
             if (g_direct) {
                 const size_t at = off + done, a0 = at & ~(A - 1), lead = at - a0;
                 read_direct(g_direct_fd[fd], b, (lead + len + A - 1) & ~(A - 1), a0, lead + len);
                 from = b + lead;
             } else memcpy(b, (const char *) src + done, len);
-            if (cudaMemcpyAsync(dst + done, from, len, cudaMemcpyHostToDevice, p.st) != cudaSuccess) die("a copy to the GPU failed");
+            // (resident mailboxes: by a kernel, which runs beside the mailbox's wait; MOMOE_COPY_KERNEL=0: cudaMemcpyAsync)
+            static const bool kernel_off = getenv("MOMOE_COPY_KERNEL") && !strcmp(getenv("MOMOE_COPY_KERNEL"), "0");
+            if (shared) {
+                const auto l0 = std::chrono::steady_clock::now();
+                std::lock_guard<std::mutex> lk(g_copy_mu);
+                const auto l1 = std::chrono::steady_clock::now();
+                const bool ok = kernel_off ? cudaMemcpyAsync(dst + done, from, len, cudaMemcpyHostToDevice, g_copy_st) == cudaSuccess
+                                           : momoe_copy_to_device(dst + done, from, len, (void *) g_copy_st) == 0;
+                if (!ok || cudaEventRecord(p.ev[k & 1], g_copy_st) != cudaSuccess) die("a copy to the GPU failed");
+                const auto l2 = std::chrono::steady_clock::now();
+                if (l2 - l0 > std::chrono::milliseconds(200))
+                    fprintf(stderr, "momoe-cuda: a copy's launch took %.0f ms (%.0f ms for the lock)\n",
+                            std::chrono::duration<double, std::milli>(l2 - l0).count(), std::chrono::duration<double, std::milli>(l1 - l0).count());
+            } else if (cudaMemcpyAsync(dst + done, from, len, cudaMemcpyHostToDevice, p.st) != cudaSuccess) die("a copy to the GPU failed");
         }
-        sync(p.st);
+        if (shared) {
+            wait_event(p.ev[(k - 1) & 1]);
+            if (k >= 2) wait_event(p.ev[k & 1]);
+        } else sync(p.st);
     }
 #endif
+    // --direct-io into host memory (a host-mapped pool): 4 KiB-aligned windows into this thread's aligned buffer, copied
+    // to `dst` by the CPU
+    static void to_host_direct(void * dst, int fd, size_t off, size_t n) {
+        const size_t piece = (size_t) 8 << 20, A = 4096;
+        static thread_local char * buf = nullptr;
+        if (!buf && posix_memalign((void **) &buf, A, piece + 2 * A) != 0) die("cannot allocate a reader's buffer");
+        for (size_t done = 0; done < n; done += piece) {
+            const size_t len = std::min(piece, n - done), at = off + done, a0 = at & ~(A - 1), lead = at - a0;
+            read_direct(g_direct_fd[fd], buf, (lead + len + A - 1) & ~(A - 1), a0, lead + len);
+            memcpy((char *) dst + done, buf + lead, len);
+        }
+    }
     void work() {
 #if defined(MOMOE_CUDA)
         cudaSetDevice(device);
@@ -313,6 +377,7 @@ struct Readers {
             else
 #endif
             if (j.src) memcpy(j.dst, j.src, j.size);
+            else if (g_direct) to_host_direct(j.dst, j.fd, j.off, j.size);
             else read_at(j.fd, j.dst, j.size, j.off);
             j.left->fetch_sub(1, std::memory_order_release);
         }
@@ -502,6 +567,8 @@ struct Engine {
     std::vector<int> fds;                                    // the model's files (shards)
     std::vector<int32_t> tok_at;                             // qwen4exp: the token at each position (the PLE n-grams)
     Readers readers;
+    Readers demand;                                          // MOMOE_DEMAND_READERS: the reads a layer waits for, on
+                                                             // readers of their own (never behind predictions)
     Readers fillers;                                         // momoe-cuda --hybrid: the background fills (few threads:
                                                              // many took the RAM bandwidth the CPU's experts need)
     int n_ctx = 32768, max_batch = 512;
@@ -515,6 +582,8 @@ struct Engine {
     std::vector<float> xl_host;
 #if defined(MOMOE_CUDA)
     bool mailbox = false;                                    // --hybrid through mailboxes (default)
+    bool rmb = false;                                        // resident mailboxes (rmb_init: the GPU waits, the CPU
+                                                             // makes the experts resident and hands back their slots)
     Mailbox mb;
     bool mb_graph = false;                                   // this graph uses them
     std::vector<ggml_tensor *> force_gpu;                    // ops the scheduler must place on the GPU
@@ -753,6 +822,25 @@ static void make_pool(Engine & e, double frac) {
         P.n_slots += G.n_slots;
         P.pool_bytes += G.bytes * G.n_slots;
     }
+    P.host = P.dev = nullptr;
+#if defined(MOMOE_CUDA)
+    if (e.uma && g_direct && getenv("MOMOE_POOL_HOST")) {
+        // unified memory: the pool in pinned host memory the GPU maps.  The readers write the slots with the CPU (no
+        // copy through the GPU, no stream to wait for); a copy through the GPU could not finish while a resident
+        // mailbox's wait held the GPU (measured: the readers' copies stalled behind it)
+        size_t total = 0;
+        for (auto & G : P.g)
+            for (int w = m.part0(); w < 3; ++w) total += (ggml_nbytes(G.t[w]) + 4095) / 4096 * 4096;
+        void * h = nullptr;
+        P.buf = ggml_backend_cuda_buffer_from_host(e.device, total + 4096, &h);
+        if (!P.buf) die("cannot allocate the expert pool (mapped host memory)");
+        ggml_tallocr ta = ggml_tallocr_new(P.buf);
+        for (auto & G : P.g)
+            for (int w = m.part0(); w < 3; ++w) ggml_tallocr_alloc(&ta, G.t[w]);
+        P.host = (char *) h;
+        P.dev = (char *) ggml_backend_buffer_get_base(P.buf);
+    } else
+#endif
     P.buf = ggml_backend_alloc_ctx_tensors(cp, e.metal);
     if (!P.buf) die("cannot allocate the expert pool");
     if (e.hybrid) {                                          // a slot of zeros per group: a missing expert's slot (the
@@ -1329,6 +1417,8 @@ static void fill_slot(Engine & e, int il, int x, int slot, std::vector<Readers::
     for (int w = p0; w < 3; ++w) {
         const size_t off = L.exp_off[w] + (size_t) x * L.exp_bytes[w], t_off = (size_t) slot * G.t[w]->nb[2];
         if (kHostMem) jobs.push_back({L.exp_fd[w], (char *) G.t[w]->data + t_off, L.exp_bytes[w], off, &G.left[slot]});
+        else if (P.host)                                     // a host-mapped pool: written by the reader's CPU
+            jobs.push_back({L.exp_fd[w], P.host + ((char *) G.t[w]->data - P.dev) + t_off, L.exp_bytes[w], off, &G.left[slot]});
         else jobs.push_back({L.exp_fd[w], nullptr, L.exp_bytes[w], off, &G.left[slot], L.exp_map[w] + off, G.t[w], t_off});
         P.bytes_read += L.exp_bytes[w];
     }
@@ -1486,7 +1576,7 @@ static void make_resident(Engine & e, int il, const int32_t * ids, int n_tok) {
     }
     sleft[0].store(n_stage, std::memory_order_relaxed);
     const double t0 = now_s();
-    e.readers.submit(jobs, true);
+    (e.demand.th.empty() ? e.readers : e.demand).submit(jobs, true);
     for (int slot : wait)
         while (G.left[slot].load(std::memory_order_acquire)) { }
     P.read_s += now_s() - t0;
@@ -1608,7 +1698,10 @@ static void prefetch(Engine & e, int il, const int32_t * ids, int n_tok) {
     if (!kHostMem && staged(m.n_used, G.n_slots, n_tok)) return;
     std::vector<Readers::Job> jobs;
     const uint64_t stamp = ++P.clock;                        // newer than the layer the GPU is computing: kept
+    // MOMOE_PREDICT_K: only each token's K most likely predicted experts (the top-k comes in order) are read
+    static const int pk = getenv("MOMOE_PREDICT_K") ? std::max(1, atoi(getenv("MOMOE_PREDICT_K"))) : 1 << 30;
     for (size_t i = 0; i < (size_t) m.n_used * n_tok; ++i) {
+        if ((int) (i % m.n_used) >= pk) continue;
         const int x = ids[i];
         if (x < 0 || x >= m.n_expert) {
             fprintf(stderr, "momoe-metal: layer %d prediction %zu is %d (tokens %d)\n", il, i, x, n_tok);
@@ -1760,6 +1853,9 @@ static void mb_layer(Engine & e, int il, int T) {
     C.wait();
 }
 
+static void rmb_layer(Engine & e, int il, int T);
+static void rmb_after(Engine & e, int il, int T);
+
 // the worker: per graph, the MoE layers in order, each when the GPU has posted it
 static void mb_worker(Engine & e) {
     Mailbox & M = e.mb;
@@ -1794,10 +1890,12 @@ static void mb_worker(Engine & e) {
             }
             std::atomic_thread_fence(std::memory_order_acquire);
             const double w0 = now_s();
-            mb_layer(e, il, T);
+            if (e.rmb) rmb_layer(e, il, T);
+            else mb_layer(e, il, T);
             e.t_cpu_wait += now_s() - w0;
             std::atomic_thread_fence(std::memory_order_release);
             *B.done = cur;
+            if (e.rmb) rmb_after(e, il, T);                  // (the GPU goes on meanwhile)
         }
         {
             std::lock_guard<std::mutex> lk(M.mu);
@@ -1853,7 +1951,124 @@ static void mb_init(Engine & e) {
     fprintf(stderr, "momoe-cuda: mailboxes for %zu MoE layers (%.1f MiB of mapped memory)\n", M.moe.size(), total / 1048576.0);
 }
 
+// Resident mailboxes (glm5-next, --direct-io: no CPU experts): a decode token is one graph with no stops.  At each MoE
+// block the GPU posts its chosen experts (and the predictions after them) to the block's mailbox and waits; the worker
+// makes the chosen ones resident (the misses read in, the ones still being read waited for), writes their slot
+// numbers back, lets the GPU go on, and only then reads the next block's predictions in.  The GPU takes the slots from
+// the wait itself: no slot table, and only the worker touches the pool while the graph runs.
+static void rmb_layer(Engine & e, int il, int T) {
+    Model & m = e.m;
+    Pool & P = e.pool;
+    Layer & L = m.layers[il];
+    Group & G = P.g[L.grp];
+    MbLayer & B = e.mb.layer[il];
+    const int k = m.n_used;
+    const uint64_t pin = ++P.clock;
+    if (++P.uses % ((uint64_t) 64 * m.n_layer) == 0)
+        for (auto & c : P.freq) c >>= 1;
+    int32_t * slots = (int32_t *) B.out;
+    std::vector<Readers::Job> jobs;
+    std::vector<int> wait;
+    for (int i = 0; i < k * T; ++i) {
+        const int x = B.ids[i];
+        const int key = il * m.n_expert + x;
+        ++P.freq[key];
+        int slot = P.slot_of[key];
+        if (slot >= 0) {
+            ++P.hits;
+            if (G.by_prefetch[slot]) { ++P.prefetch_hits; G.by_prefetch[slot] = 0; }
+            if (G.left[slot].load(std::memory_order_acquire)) { ++P.late; wait.push_back(slot); }
+        } else {
+            ++P.misses;
+            slot = take_slot(P, G, pin);
+            while (slot < 0) {                               // every slot this block's or being read: wait for a read
+                std::this_thread::sleep_for(std::chrono::microseconds(20));
+                slot = take_slot(P, G, pin);
+            }
+            fill_slot(e, il, x, slot, jobs);
+            G.by_prefetch[slot] = 0;
+            G.owner[slot] = key;
+            P.slot_of[key] = slot;
+            wait.push_back(slot);
+        }
+        G.used[slot] = pin;
+        slots[i] = slot;
+    }
+    const double t0 = now_s();
+    const size_t n_jobs = jobs.size();
+    (e.demand.th.empty() ? e.readers : e.demand).submit(jobs, true);
+    for (int slot : wait) {
+        bool told = false;
+        while (G.left[slot].load(std::memory_order_acquire)) {
+            if (!told && now_s() - t0 > 2) {
+                told = true;
+                fprintf(stderr, "momoe-cuda: rmb layer %d: slot %d still %d parts to read after 2 s (%zu jobs submitted)\n",
+                        il, slot, G.left[slot].load(), n_jobs);
+            }
+        }
+    }
+    P.read_s += now_s() - t0;
+    static const bool dbg = getenv("MOMOE_RMB_DEBUG") != nullptr;
+    if (dbg) fprintf(stderr, "RMB layer %d T %d: %zu reads, %zu waited for, %.2f ms\n", il, T, n_jobs, wait.size(), 1000 * (now_s() - t0));
+}
+
+// after the GPU went on: the predictions for the next block(s), posted after this block's own experts
+static void rmb_after(Engine & e, int il, int T) {
+    MbLayer & B = e.mb.layer[il];
+    const size_t own = (size_t) e.m.n_used * T, n = (size_t) B.send.n_i32;
+    if (n > own && il + 1 < e.m.n_layer) prefetch(e, il + 1, B.ids + own, T);
+    if (n > 2 * own && il + 2 < e.m.n_layer) prefetch(e, il + 2, B.ids + 2 * own, T);
+}
+
+static void rmb_init(Engine & e) {
+    Model & m = e.m;
+    Mailbox & M = e.mb;
+    const size_t ids_b = sizeof(int32_t) * (size_t) m.n_used * HYB_MAX_T * 3;   // own + two blocks of predictions
+    const size_t out_b = sizeof(int32_t) * (size_t) m.n_used * HYB_MAX_T;      // the slots
+    const size_t per = 256 + (ids_b + out_b + 255) / 256 * 256;
+    size_t total = 256;
+    for (auto & L : m.layers) total += L.exp_fd[1] >= 0 ? per : 0;
+    cudaSetDevice(e.device);
+    void * h = nullptr, * d = nullptr;
+    if (cudaHostAlloc(&h, total, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
+        cudaHostGetDevicePointer(&d, h, 0) != cudaSuccess) die("cannot allocate the mailboxes (mapped host memory)");
+    memset(h, 0, total);
+    M.host = (char *) h;
+    M.dev = (char *) d;
+    auto dev = [&](const void * p) { return (void *) (M.dev + ((const char *) p - M.host)); };
+    M.epoch = (volatile uint32_t *) M.host;
+    M.timeout = (volatile uint32_t *) (M.host + 64);
+    M.layer.resize(m.n_layer);
+    size_t at = 256;
+    for (int il = 0; il < m.n_layer; ++il) {
+        if (m.layers[il].exp_fd[1] < 0) continue;            // (a dense block)
+        MbLayer & B = M.layer[il];
+        char * base = M.host + at;
+        B.sent = (volatile uint32_t *) base;
+        B.done = (volatile uint32_t *) (base + 64);
+        B.ids = (int32_t *) (base + 256);
+        B.out = (float *) (base + 256 + ids_b);
+        at += per;
+        B.send = {MOMOE_MAILBOX_MAGIC, MOMOE_MAILBOX_SEND, 1, 0, dev(B.out), dev(B.ids), (volatile uint32_t *) dev((const void *) B.sent),
+                  (const volatile uint32_t *) dev((const void *) M.epoch), (volatile uint32_t *) dev((const void *) M.timeout)};
+        B.wait = {MOMOE_MAILBOX_MAGIC, MOMOE_MAILBOX_WAIT, 0, 0, dev(B.out), nullptr, (volatile uint32_t *) dev((const void *) B.done),
+                  (const volatile uint32_t *) dev((const void *) M.epoch), (volatile uint32_t *) dev((const void *) M.timeout)};
+        M.moe.push_back(il);
+    }
+    e.rmb = true;
+    g_rmb_copy = !e.pool.host;                               // (a device pool: filled by kernels, see to_device)
+    if (g_rmb_copy && cudaStreamCreateWithFlags(&g_copy_st, cudaStreamNonBlocking) != cudaSuccess) die("cannot create the copy stream");
+    M.th = std::thread([&e] { mb_worker(e); });
+    fprintf(stderr, "momoe-cuda: resident mailboxes for %zu MoE layers (no stops while writing)\n", M.moe.size());
+}
+
 static void mb_stop(Engine & e) {
+    if (e.rmb) {
+        { std::lock_guard<std::mutex> lk(e.mb.mu); e.mb.quit = true; }
+        e.mb.cv.notify_all();
+        e.mb.th.join();
+        return;
+    }
     if (!e.mailbox) return;
     { std::lock_guard<std::mutex> lk(e.mb.mu); e.mb.quit = true; }
     e.mb.cv.notify_all();
@@ -2700,7 +2915,7 @@ static ggml_tensor * glm_swiglu(ggml_context * c, ggml_tensor * gate, ggml_tenso
 // pred_in: the next block's MoE input as this block's residual gives it (its FFN mix and norm, without its attention):
 // that block's router on it predicts its experts, chosen in the same step (read while the GPU goes on)
 static ggml_tensor * glm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, int il, ggml_tensor * x, int T,
-                                   ggml_tensor * pred_in) {
+                                   ggml_tensor * pred_in, ggml_tensor * pred_in2 = nullptr) {
     Model & m = e.m;
     Layer & L = m.layers[il];
     const int k = m.n_used;
@@ -2714,16 +2929,45 @@ static ggml_tensor * glm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
         ggml_tensor * pl = ggml_add(c, ggml_sigmoid(c, ggml_mul_mat(c, N.gate_inp, pred_in)), N.exp_probs_b);
         both = ggml_concat(c, top, ggml_cont(c, ggml_argsort_top_k(c, pl, k)), 1);
     }
-    ggml_format_name(both, "topk-%d", il);                    // made resident here (the stop)
+    if (pred_in && pred_in2) {                               // [k, 3T]: and the one after it (MOMOE_PREDICT2)
+        const Layer & N2 = m.layers[il + 2];
+        ggml_tensor * pl = ggml_add(c, ggml_sigmoid(c, ggml_mul_mat(c, N2.gate_inp, pred_in2)), N2.exp_probs_b);
+        both = ggml_concat(c, both, ggml_cont(c, ggml_argsort_top_k(c, pl, k)), 1);
+    }
+    Group & G = e.pool.g[L.grp];
+    const bool big = staged(k, G.n_slots, T);
+#if defined(MOMOE_CUDA)
+    const bool rmb = e.rmb && !big && T <= HYB_MAX_T;       // the resident mailbox (rmb_layer): no stop here
+#else
+    const bool rmb = false;
+#endif
+    ggml_format_name(both, rmb ? "rmbtopk-%d" : "topk-%d", il);   // topk-: made resident here (the stop)
     e.topk[il] = both;
     ggml_build_forward_expand(gf, both);
     if (pred_in) top = ggml_view_2d(c, both, k, T, both->nb[1], 0);
     ggml_tensor * w = ggml_reshape_2d(c, ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, m.n_expert, T), top), k, T);
     w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
     w = ggml_reshape_3d(c, ggml_scale(c, w, m.exp_scale), 1, k, T);
-    ggml_tensor * slots = ggml_reshape_2d(c, ggml_get_rows(c, L.slot_map, ggml_reshape_1d(c, top, (int64_t) k * T)), k, T);
-    Group & G = e.pool.g[L.grp];
-    const bool big = staged(k, G.n_slots, T);
+    ggml_tensor * slots = nullptr;
+#if defined(MOMOE_CUDA)
+    if (rmb) {                                               // the choice to the worker; the slots back from it
+        MbLayer & B = e.mb.layer[il];
+        B.send.n_i32 = (int32_t) ggml_nelements(both);
+        B.wait.n_f32 = k * T;
+        ggml_tensor * args[2] = {ggml_view_1d(c, lg, 1, 0), both};
+        ggml_tensor * send = ggml_custom_4d(c, GGML_TYPE_I32, 1, 1, 1, 1, args, 2, momoe_mailbox_cpu_stub, 1, &B.send);
+        ggml_format_name(send, "rmbsend-%d", il);
+        ggml_build_forward_expand(gf, send);
+        ggml_tensor * wargs[1] = {send};
+        slots = ggml_custom_4d(c, GGML_TYPE_I32, k, T, 1, 1, wargs, 1, momoe_mailbox_cpu_stub, 1, &B.wait);
+        ggml_format_name(slots, "rmbwait-%d", il);
+        e.force_gpu.push_back(send);
+        e.force_gpu.push_back(slots);
+        e.mb_graph = true;
+        e.mb.graph.push_back(il);
+    } else
+#endif
+    slots = ggml_reshape_2d(c, ggml_get_rows(c, L.slot_map, ggml_reshape_1d(c, top, (int64_t) k * T)), k, T);
     ggml_tensor * as[3] = {big ? G.stage[0] : G.t[0], big ? G.stage[1] : G.t[1], big ? G.stage[2] : G.t[2]};
     if (big && e.preloaded) {                                // the layer's experts in a row in the pool: a view
         const int64_t s0 = L.slots_host()[0];
@@ -3045,14 +3289,16 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
             if (il < m.n_dense)
                 f = ggml_mul_mat(c, L.ffn_down, glm_swiglu(c, ggml_mul_mat(c, L.ffn_gate, f), ggml_mul_mat(c, L.ffn_up, f), m.clamp_sh[il]));
             else {
-                ggml_tensor * pred = nullptr;                // the next block's predicted MoE input (see glm_moe_layer)
-                if (e.predict && il + 1 < m.n_layer) {
-                    const Layer & N = m.layers[il + 1];
+                ggml_tensor * pred = nullptr, * pred2 = nullptr;   // the next blocks' predicted MoE inputs
+                auto pred_of = [&](int j) {                  // (see glm_moe_layer)
+                    const Layer & N = m.layers[j];
                     ggml_tensor * po = nullptr, * co = nullptr;
-                    pred = norm(c, glm_hc_pre(e, c, res, N.hc_ffn_fn, N.hc_ffn_scale, N.hc_ffn_base, &po, &co),
+                    return norm(c, glm_hc_pre(e, c, res, N.hc_ffn_fn, N.hc_ffn_scale, N.hc_ffn_base, &po, &co),
                                 N.ffn_norm, m.rms_eps);
-                }
-                f = glm_moe_layer(e, c, gf, il, f, T, pred);
+                };
+                if (e.predict && il + 1 < m.n_layer) pred = pred_of(il + 1);
+                if (pred && e.predict2 && il + 2 < m.n_layer) pred2 = pred_of(il + 2);
+                f = glm_moe_layer(e, c, gf, il, f, T, pred, pred2);
             }
             ggml_format_name(f, "ffn_out-%d", il);
             res = ggml_dsv4_hc_post(c, f, res, post, comb);
@@ -3379,6 +3625,8 @@ static void fit_pool(Engine & e) {
     const double want = (double) e.pool.pool_bytes + (double) fr - margin;
     fprintf(stderr, "momoe-cuda: %.2f GiB of VRAM free after the compute buffers: the pool gets %.2f GiB\n",
             fr / 1073741824.0, want / 1073741824.0);
+    if (e.uma && want < 4.0 * 1073741824.0)                 // (unified memory: what is left after the reserve cannot
+        die("too little memory left for the expert pool: is another program holding it?");   // hold a useful pool)
     make_pool(e, std::max(0.0, want / (double) e.pool.all_bytes));
 #else
     (void) e;
@@ -4101,10 +4349,25 @@ int main(int argc, char ** argv) {
         cudaDeviceProp prop;                                 // MOMOE_NO_DIRECT (paging the mapped file in: 0.1-0.25 of the
         if (cudaGetDeviceProperties(&prop, e.device) == cudaSuccess && prop.integrated) {   // SSD there; measured)
             e.uma = true;
+            // enough hardware queues that the readers' copy stream does not share the compute stream's (before the
+            // context is made: the resident mailboxes' waits would hold it)
+            setenv("CUDA_DEVICE_MAX_CONNECTIONS", "32", 0);
             if (!getenv("MOMOE_NO_DIRECT")) g_direct = true;
             fprintf(stderr, "momoe-cuda: %s shares the system's memory: experts %s\n", prop.name,
                     g_direct ? "read from the SSD directly (--direct-io; MOMOE_NO_DIRECT=1: from the mapped file)"
                              : "copied from the mapped file");
+            // a machine whose memory another program holds (another momoe-cuda, llama.cpp): refused before anything is
+            // loaded.  The GPU's allocations come out of the RAM and are charged to no cgroup, so two engines at once
+            // ran the DGX Spark out of memory and it stopped answering (2026-10-17)
+            const double reserve = (getenv("MOMOE_UMA_RESERVE_GIB") ? atof(getenv("MOMOE_UMA_RESERVE_GIB")) : 10) * 1073741824.0;
+            const double need = reserve + (getenv("MOMOE_UMA_MIN_GIB") ? atof(getenv("MOMOE_UMA_MIN_GIB")) : 24) * 1073741824.0
+                                + std::max(0.0, pool_gib) * 1073741824.0;   // (--pool-gib: that pool on top)
+            const double room = uma_free_bytes();
+            if (room < need) {
+                const std::string why = std::to_string((int) (room / 1073741824.0)) + " GiB are free, " +
+                                        std::to_string((int) (need / 1073741824.0)) + " GiB are needed (MOMOE_UMA_RESERVE_GIB + MOMOE_UMA_MIN_GIB)";
+                die("not enough free memory to start: %s; is another momoe-cuda or llama.cpp running?", why.c_str());
+            }
         }
     }
 #endif
@@ -4117,14 +4380,23 @@ int main(int argc, char ** argv) {
                                                   : std::max(2, (int) std::thread::hardware_concurrency() / 2));
 #if defined(MOMOE_CUDA)
     if (e.hybrid && e.m.nemo && !getenv("MOMOE_NO_MAILBOX") && e.pool.n_slots < e.m.n_exp_all) mb_init(e);
-    else setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0);   // CUDA graphs for the mailbox's one-graph token only: with the
-                                                       // stops' many splits, instantiating them ran out of VRAM
+    else if (e.m.glm5 && g_direct && getenv("MOMOE_RMB") && e.pool.host && e.pool.n_slots < e.m.n_exp_all) {
+        // (opt-in, MOMOE_RMB=1 with MOMOE_POOL_HOST=1: with a device pool the readers' copies to the GPU did not run
+        // while a mailbox's wait held it, on the DGX Spark; with the host pool they work, measured 8.9 against 8.5
+        // tok/s, but the device pool with the stops is faster still: 9.2)
+        rmb_init(e);                                         // (a graph per token, built again each time: no CUDA graphs)
+        if (!getenv("MOMOE_CUDA_GRAPHS")) setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0);
+    } else if (!getenv("MOMOE_CUDA_GRAPHS"))                 // CUDA graphs for the mailbox's one-graph token only: with
+        setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0);         // the stops' many splits, instantiating them ran out of
+                                                            // VRAM (12 GB card; MOMOE_CUDA_GRAPHS=1: on anyway)
 #endif
     if (mtp_k > 0 && !e.m.has_mtp) die("--mtp: this model file has no MTP layer");
     e.readers.device = e.device;
     e.fillers.device = e.device;
     if (e.hybrid) e.fillers.start(getenv("MOMOE_FILLERS") ? atoi(getenv("MOMOE_FILLERS")) : 2);
     e.readers.start(getenv("MOMOE_READERS") ? atoi(getenv("MOMOE_READERS")) : kHostMem ? 8 : 16);   // (CUDA: measured)
+    e.demand.device = e.device;
+    if (getenv("MOMOE_DEMAND_READERS")) e.demand.start(atoi(getenv("MOMOE_DEMAND_READERS")));
     e.predict = !getenv("MOMOE_NO_PREDICT") && !(e.hybrid && e.m.nemo);   // (hybrid: measured faster without)
     e.predict2 = e.predict && getenv("MOMOE_PREDICT2");      // two layers ahead: as fast, a third more read (M4)
 #if !defined(MOMOE_CUDA)
@@ -4167,7 +4439,11 @@ int main(int argc, char ** argv) {
 
     if (serve) {
         const int r = serve_loop(e, mtp_k, spec_min_p);
+#if defined(MOMOE_CUDA)
+        mb_stop(e);                                          // (the mailbox worker: a joinable thread at exit aborts)
+#endif
         e.readers.stop();
+        e.demand.stop();
         ggml_backend_sched_free(e.sched);
         for (auto b : e.bufs) ggml_backend_buffer_free(b);
         ggml_backend_free(e.metal);
@@ -4332,7 +4608,11 @@ int main(int argc, char ** argv) {
                 1000 * e.t_mtp / windows);
         fprintf(stderr, "momoe-metal: generated %d tokens in %.2f s (%.1f tok/s): expert hit rate %.1f%%\n", n_gen, tg,
                 (n_gen - 1) / tg, 100.0 * e.pool.hits / std::max<uint64_t>(1, e.pool.hits + e.pool.misses));
+#if defined(MOMOE_CUDA)
+        mb_stop(e);
+#endif
         e.readers.stop();
+        e.demand.stop();
         ggml_backend_sched_free(e.sched);
         for (auto b : e.bufs) ggml_backend_buffer_free(b);
         ggml_backend_free(e.metal);
@@ -4437,6 +4717,7 @@ int main(int argc, char ** argv) {
     if (e.cpu_x.n_threads) e.cpu_x.stop();
     if (!e.fillers.th.empty()) e.fillers.stop();
     e.readers.stop();
+    e.demand.stop();
     ggml_backend_sched_free(e.sched);
     for (auto b : e.bufs) ggml_backend_buffer_free(b);
     ggml_backend_free(e.metal);

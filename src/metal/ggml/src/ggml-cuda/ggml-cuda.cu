@@ -723,6 +723,7 @@ struct ggml_backend_cuda_buffer_context {
     int device;
     void * dev_ptr = nullptr;
     std::string name;
+    void * host_ptr = nullptr;      // Momoe: ggml_backend_cuda_buffer_from_host's memory (freed with cudaFreeHost)
 
     ggml_backend_cuda_buffer_context(int device, void * dev_ptr) :
         device(device), dev_ptr(dev_ptr),
@@ -730,7 +731,11 @@ struct ggml_backend_cuda_buffer_context {
     }
 
     ~ggml_backend_cuda_buffer_context() {
-        CUDA_CHECK(cudaFree(dev_ptr));
+        if (host_ptr) {
+            CUDA_CHECK(cudaFreeHost(host_ptr));
+        } else {
+            CUDA_CHECK(cudaFree(dev_ptr));
+        }
     }
 };
 
@@ -893,6 +898,28 @@ static ggml_backend_buffer_t ggml_backend_cuda_buffer_type_alloc_buffer(ggml_bac
     ggml_backend_cuda_buffer_context * ctx = new ggml_backend_cuda_buffer_context(buft_ctx->device, dev_ptr);
 
     return ggml_backend_buffer_init(buft, ggml_backend_cuda_buffer_interface, ctx, size);
+}
+
+// Momoe: a CUDA buffer whose memory is pinned host memory the GPU maps (cudaHostAlloc, mapped): on a GPU that shares
+// the system's memory (the DGX Spark) the CPU writes into it directly (no copy through the GPU) and the kernels read it
+// as device memory.  *host: its address for the CPU.
+ggml_backend_buffer_t ggml_backend_cuda_buffer_from_host(int device, size_t size, void ** host) {
+    ggml_cuda_set_device(device);
+    void * h = nullptr, * d = nullptr;
+    if (cudaHostAlloc(&h, size, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess) {
+        (void) cudaGetLastError();
+        GGML_LOG_ERROR("%s: allocating %.2f MiB of mapped host memory failed\n", __func__, size / 1024.0 / 1024.0);
+        return nullptr;
+    }
+    if (cudaHostGetDevicePointer(&d, h, 0) != cudaSuccess) {
+        (void) cudaGetLastError();
+        cudaFreeHost(h);
+        return nullptr;
+    }
+    ggml_backend_cuda_buffer_context * ctx = new ggml_backend_cuda_buffer_context(device, d);
+    ctx->host_ptr = h;
+    *host = h;
+    return ggml_backend_buffer_init(ggml_backend_cuda_buffer_type(device), ggml_backend_cuda_buffer_interface, ctx, size);
 }
 
 static size_t ggml_backend_cuda_buffer_type_get_alignment(ggml_backend_buffer_type_t buft) {
