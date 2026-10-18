@@ -46,60 +46,68 @@ this note.
 
 ## Status
 
-Early, and maintained by one person.
+Early, and maintained by one person. MoMoE has three engines:
+- **Strata's engine** (`momoe`), on Linux with an NVIDIA card: Qwen3.8-Flash-Next and the Qwen3.6 family.
+- **MoMoE's ggml engine** (`momoe-cuda`), on Linux with an NVIDIA card, including the DGX Spark, whose GB10 shares its
+  128 GB of memory with the CPU. The experts that don't fit are read from the SSD directly, at 10-13 GB/s. It runs
+  Nemotron 3.5 Bolt and GLM-5.3-Flash.
+- **MoMoE's Metal engine** (`momoe-metal`, [src/metal](src/metal/README.md)), on Apple Silicon Macs (early). On a Mac
+  with less than about 28 GB, the experts that don't fit are read from the SSD as needed.
 
-- **Tested:** Linux (Debian 12), NVIDIA RTX 4070 Ti (12 GB), Ryzen 9 5950X, 63 GB RAM.
-  - Flash-Next, its Coder, Qwen3.6, Ornith and KAT-Coder have been set up and have answered on that PC.
-  - `momoe run` has been used there with Claude Code, Codex, OpenCode, Unsloth Studio and LM Studio.
-- **Not tested in MoMoE:**
-  - Windows, and AMD or Intel cards;
-  - several GPUs with the Qwen3.6 family (it runs on one GPU);
-  - Swift 1.5 and Unsloth's Flash-Next files.
+`momoe run` has been used with Claude Code, Codex, OpenCode, Unsloth Studio and LM Studio.
 
-  Strata's code for these is still here, but MoMoE has changed things around it.
-- **Macs (early):** MoMoE's own Metal engine ([src/metal](src/metal/README.md)), tested on a MacBook Air M4 (32 GB)
-  and a Mac Studio M1 Ultra (64 GB). `momoe setup` sets up Ornith-1.5 IQ4_XS; on a Mac with less than ~28 GB the
-  experts that do not fit are read from the SSD as needed. Flash-Next runs too, set up by hand
-  ([design/mac-port.md](design/mac-port.md)).
+Not tested in MoMoE:
+- Windows, and AMD or Intel cards;
+- several GPUs with the Qwen3.6 family (it runs on one GPU);
+- Swift 1.5 and Unsloth's Flash-Next files.
 
-- **NVIDIA DGX Spark (early):** MoMoE's ggml engine (`momoe-cuda`) on its GB10, which shares the 128 GB of memory
-  with the CPU: the experts that do not fit are read from the SSD directly, past the page cache, at 10-13 GB/s.
-  `momoe setup --family glm53` sets up GLM-5.3-Flash (320B) at UD-IQ3_XXS (121 GB), which is faster there than
-  UD-IQ4_XS (157 GB, `--model UD-IQ4_XS`): its store holds nearly every expert the model uses.
-
-Measured on the PC above:
-
-| Model | Writes answers | Reads a prompt |
-| --- | ---: | ---: |
-| Qwen3.8-Flash-Next IQ3_XXS, 64K context | 61 tokens/s (short chats) | 2,170 tokens/s (a 32K-token prompt) |
-| Ornith-1.5-35B-A3B IQ4_XS | 96-109 tokens/s (short chats, 262K context) | about 4,130 tokens/s (a 24K-token prompt, 32K context) |
-
-Flash-Next: medians of three runs of `tools/strata_bench.py`; more in the [design notes](design/).
-
-On MoMoE's ggml engine (the server, 400-token chats, greedy / sampled):
-
-| Model, machine | MoMoE | llama.cpp, same machine |
-| --- | ---: | ---: |
-| Nemotron 3.5 Bolt UD-IQ3_XXS, the PC above (RTX 4070 Ti, 64 GB) | 30.0 / 30.6 tokens/s | 26.2 / 26.1 tokens/s |
-| GLM-5.3-Flash UD-IQ4_XS, DGX Spark (its MTP drafting on) | 11.7 / 10.4 tokens/s | 2.3 / 2.5 tokens/s |
-| GLM-5.3-Flash UD-IQ3_XXS, DGX Spark (its MTP drafting on) | 15.0 / 14.6 tokens/s | not measured |
-
-GLM-5.3-Flash on the Spark read a 3,620-token prompt at 69 tokens/s (llama.cpp: 4.1); llama.cpp there ran with the
-experts in its mapped file (`-cmoe --no-repack`; its default settings ran the machine out of memory).
+Strata's code for these is still here, but MoMoE has changed things around it.
 
 ## Models
 
-| Family | Files from | Sizes setup offers | Notes |
-| --- | --- | --- | --- |
-| [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) | [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) | Q2_0, IQ2_XS, IQ3_XXS, IQ3_S | Strata's model; about 48-62 GB of RAM |
-| Flash-Next Coder | [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF) | IQ1_M | about 32 GB of RAM |
-| Swift 1.5 | [ukisai](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF) | IQ2_XS, IQ3_XXS, IQ3_S | a Flash-Next fine-tune |
-| Flash-Next (Unsloth) | [Unsloth](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | UD-Q4_K_XL, UD-IQ4_XS | part of the experts read from the SSD |
-| [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) | [Unsloth](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF), [bartowski](https://huggingface.co/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF) | UD-IQ4_XS, UD-IQ3_S and 24 more | 8-12 GB cards, 16-32 GB of RAM |
-| [Ornith-1.5-35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B) | [bartowski](https://huggingface.co/bartowski/Ornith-1.5-35B-A3B-GGUF) | IQ4_XS, IQ3_XXS | a Qwen3.6 fine-tune |
-| KAT-Coder-V2.5-Dev | [Myric](https://huggingface.co/Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF) | i-quality-v2, i-quality | a coding fine-tune of Qwen3.6 |
-| [Nemotron 3.5 Bolt 74B-A9B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16) | [Unsloth](https://huggingface.co/unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF) | UD-IQ3_XXS, UD-Q3_K_XL | Linux, NVIDIA; about 56 GB of RAM (`--family bolt`) |
-| [GLM-5.3-Flash 320B-A18B](https://huggingface.co/zai-org/GLM-5.3-Flash) | [Unsloth](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF) | UD-IQ4_XS, UD-Q3_K_XL, UD-IQ3_XXS | the DGX Spark (`--family glm53`); text only |
+The machines the models were tested on:
+
+| Name | Machine |
+| --- | --- |
+| **PC** | Linux (Debian 12), NVIDIA RTX 4070 Ti (12 GB), Ryzen 9 5950X, 63 GB of RAM |
+| **Spark** | NVIDIA DGX Spark: GB10, 128 GB of memory shared by the CPU and the GPU |
+| **M4 Air** | MacBook Air M4, 32 GB |
+| **M1 Ultra** | Mac Studio M1 Ultra, 64 GB |
+
+Speeds are in tokens per second. "Writes" is the speed of the answer, "reads" the speed of reading the prompt.
+"Answered" means the model was set up there and answered, but its speed hasn't been measured.
+
+| Model | Sizes setup offers | Tested on | Writes | Reads | llama.cpp writes, same machine |
+| --- | --- | --- | ---: | ---: | ---: |
+| [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), files by [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) | Q2_0, IQ2_XS, IQ3_XXS, IQ3_S (about 48-62 GB of RAM) | PC, IQ3_XXS, 64K context | 61 | 2,170 (32K tokens) | |
+| | | M4 Air, IQ3_XXS, 12 GiB of experts in memory, drafting on (set up by hand) | 8.6-8.9 | 56-62 (1K-8K tokens) | 4.2 (CPU only: on the GPU it runs out of memory) |
+| | | M1 Ultra, IQ3_XXS, 34 GiB in memory, drafting on (set up by hand) | 16.4 | 214 (8K tokens) | 34.0 |
+| Flash-Next Coder, files by [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF) | IQ1_M (about 32 GB of RAM) | PC | answered | | |
+| Swift 1.5, a Flash-Next fine-tune, files by [ukisai](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF) | IQ2_XS, IQ3_XXS, IQ3_S | not tested in MoMoE | | | |
+| Flash-Next, files by [Unsloth](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | UD-Q4_K_XL, UD-IQ4_XS (part of the experts read from the SSD) | not tested in MoMoE | | | |
+| [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), files by [Unsloth](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) and [bartowski](https://huggingface.co/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF) | UD-IQ4_XS, UD-IQ3_S and 24 more (8-12 GB cards, 16-32 GB of RAM) | PC | answered | | |
+| [Ornith-1.5-35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B), a Qwen3.6 fine-tune, files by [bartowski](https://huggingface.co/bartowski/Ornith-1.5-35B-A3B-GGUF) | IQ4_XS, IQ3_XXS | PC, IQ4_XS, 262K context | 96-109 | about 4,130 (24K tokens, 32K context) | |
+| | | M4 Air, IQ4_XS, every expert in memory, drafting on (what setup installs on a Mac) | 34.5 | | 33.7 |
+| | | M1 Ultra, IQ4_XS, every expert in memory | 54.6 | 582 (8K tokens, measured before every expert was preloaded) | 88.9 |
+| KAT-Coder-V2.5-Dev, a coding fine-tune of Qwen3.6, files by [Myric](https://huggingface.co/Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF) | i-quality-v2, i-quality | PC | answered | | |
+| [Nemotron 3.5 Bolt 74B-A9B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16), files by [Unsloth](https://huggingface.co/unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF) (`--family bolt`) | UD-IQ3_XXS, UD-Q3_K_XL (Linux and NVIDIA only; about 56 GB of RAM) | PC, UD-IQ3_XXS | 30.0 / 30.6 | | 26.2 / 26.1 |
+| | | Spark, UD-Q4_K_XL (not offered by setup), every expert in memory | 20.2 | | |
+| [GLM-5.3-Flash 320B-A18B](https://huggingface.co/zai-org/GLM-5.3-Flash), files by [Unsloth](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF) (`--family glm53`) | UD-IQ3_XXS (setup's choice), UD-IQ4_XS, UD-Q3_K_XL (the DGX Spark; text only) | Spark, UD-IQ3_XXS, drafting on | 15.0 / 14.6 | | not measured |
+| | | Spark, UD-IQ4_XS, drafting on | 11.7 / 10.4 | 69 (3,620 tokens) | 2.3 / 2.5 |
+
+How these were measured:
+- **Two numbers ("30.0 / 30.6"):** the server, 400-token chats, greedy / sampled.
+- **Flash-Next on the PC:** medians of three runs of `tools/strata_bench.py`.
+- **Ornith on the PC:** short chats.
+- **Bolt on the Spark:** the engine on its own, not the server.
+- **Macs:** the details are in [design/mac-port.md](design/mac-port.md).
+- **llama.cpp:**
+  - on the M1 Ultra, `llama-server` with six 500-token answers;
+  - on the Spark, the experts read from its mapped file (`-cmoe --no-repack`; its default settings ran the machine out
+    of memory). It read GLM's 3,620-token prompt at 4.1 tokens/s.
+
+GLM-5.3-Flash's UD-IQ3_XXS (121 GB) writes faster than UD-IQ4_XS (157 GB) on the Spark because the expert store holds
+nearly every expert it uses; `--model UD-IQ4_XS` installs the larger file.
 
 `./setup.sh --check` lists what fits your PC. The Qwen3.6-family files are described in
 [docs/QWEN36.md](docs/QWEN36.md) and [docs/QWEN35MOE_GGUFS.md](docs/QWEN35MOE_GGUFS.md). The authors and quantizers
