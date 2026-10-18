@@ -319,6 +319,28 @@ RAM a 16 GB Mac does not have), the owner's browsers left open, and setup's 16 G
   (recommendedMaxWorkingSetSize: 78% of the 32 GB; the M1 Ultra's is 75% of 64 GB); on a 16 GB Mac it would be about
   11-12 GB if the share is the same, not far above the engine's 9.35 GB footprint. Only a real 16 GB Mac can say.
 
+### llama.cpp the same way: it brings the Mac down
+
+llama.cpp b11429 (`llama-bench -p 512 -n 128`) on the same Ornith IQ4_XS file (19.3 GB), with the same 16 GiB wired
+away and ornith-mac stopped:
+
+| layers on the GPU | what happened |
+|---|---|
+| all 40 (`-ngl 99`) | macOS hung about 2 minutes in, before the first token; kernel panic and restart |
+| 20 of 40 (`-ngl 20`) | the same, about 2 minutes in |
+| none (`-ngl 0`) | not tried |
+
+- Both panics read "watchdog timeout: no checkins from watchdogd in 90 seconds". The system stopped running,
+  rather than a program being stopped. At the panic llama-bench held about 120 MB but had read 1.17 million pages
+  (16 KiB each, about the size of the file). In the second panic, 631 kernel threads were waiting on memory.
+- The monitor (every 2 s, written to the disk) for the second run: the file was read at about 1.7 GB/s. About 25 s in,
+  pressure went to "warn" and swap grew by about 1.2 GB every 2 s, to 2.9 GB at the last line. It never reached
+  "critical", so the watchdog (critical for 5 s) never fired.
+- Metal still offered 26.8 GB (recommendedMaxWorkingSetSize does not count wired memory), so llama.cpp sized itself
+  for the whole Mac and not the 16 GB it really had.
+- The browsers were holding about 6-7 GB in the first run and under 1 GB in the second, and both crashed the same way.
+- momoe-metal ran under the same 16 GiB wire (above) because its pool and file-cache bypass keep it to about 9.35 GB.
+
 ## Next
 
 1. Prompt speed: 236 tok/s on 16K tokens (llama.cpp 270-333); every chunk stages all 256 experts of each layer.
