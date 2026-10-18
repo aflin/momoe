@@ -299,12 +299,31 @@ Mac Studio M1 Ultra (en), 64 GB, macOS 15.6.1:
 - Not measured: Ornith with every expert in memory on en since preloading became automatic; prompt reading on the
   MacBook for a like-for-like pair.
 
+## A 16 GB Mac, with the memory really missing (2026-10-18)
+
+The MacBook (32 GB) with 16 GiB wired away by a small program (`mlock`: macOS can neither compress nor swap it, as
+RAM a 16 GB Mac does not have), the owner's browsers left open, and setup's 16 GB config (Ornith IQ4_XS, a 5 GiB pool,
+32K context, `--nocache`, `--mtp 4`) through the server. Greedy, three 400-token chats and one long prompt:
+
+| | 16 GiB wired away | the same run, all 32 GB (the first try, when the wiring was released too early) |
+|---|---:|---:|
+| chat 1 / 2 / 3, writing | 11.2 / 9.7 / 13.1 tok/s | 11.3 / 9.3 / 13.8 tok/s |
+| a 9,698-token prompt, reading | 126 tok/s | 114 tok/s |
+| writing after it | 6.1 tok/s | 6.4 tok/s |
+
+- The memory missing changes nothing measurable: the pool and the file-cache bypass already keep the engine to its
+  own memory. Its footprint was 8.6 GB at the start and 9.35 GB at the end (`footprint`).
+- macOS was at memory pressure "warn" (level 2) for 44 of the 45 samples (every 5 s), never "critical" once settled;
+  it moved ~6 GB of the other programs to swap while the 16 GiB was wired.
+- What this still does not show: a real 16 GB Mac's GPU limit. Metal's limit here stayed 26.8 GB
+  (recommendedMaxWorkingSetSize: 78% of the 32 GB; the M1 Ultra's is 75% of 64 GB); on a 16 GB Mac it would be about
+  11-12 GB if the share is the same, not far above the engine's 9.35 GB footprint. Only a real 16 GB Mac can say.
+
 ## Next
 
 1. Prompt speed: 236 tok/s on 16K tokens (llama.cpp 270-333); every chunk stages all 256 experts of each layer.
 2. Writing at long context: 9.8 tok/s at 16K.
-3. A real 16 GB test: measure the engine's footprint, and lock away half of this Mac's memory to run under real
-   memory pressure.
+3. A 16 GB test on a real 16 GB Mac: Metal's GPU limit there (~11-12 GB?) against the engine's 9.35 GB footprint.
 4. `momoe setup` on macOS: building momoe-metal, the config, the tokenizer folder without a Linux pack; setup's
    NVIDIA-specific messages.
 5. Flash-Next: the 64 GB Mac Studio; Strata's MTP (mtp/rt); per-token speed (~100 ms with the experts in memory,
