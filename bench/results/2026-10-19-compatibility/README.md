@@ -18,19 +18,25 @@ and streamed) and answered after the tool's result. Every row, with its conditio
 
 | Model, size | PC (4070 Ti) | PC, two cards | Spark | Jetson | M1 Ultra | M4 Air |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.8-Flash-Next IQ3_XXS | 57.9 | – | 31.8 | – | 28.1 | 8.6–8.9 (set up by hand, earlier) |
-| Flash-Next Coder IQ1_M | 54.8 | – | 28.4 | – | 25.5 ⁱ | – |
-| Swift 1.5 IQ3_XXS | 63.4 | – | 30.3 | – | 25.7 ⁱ | – |
-| Flash-Next (Unsloth) UD-IQ4_XS | 12.4 | – | 24.5 | – | 12.0 ⁱ | – |
-| Qwen3.6-35B-A3B (Unsloth) UD-IQ4_XS | 158.7 | – | 61.0 | – | 110.8 | – |
-| Qwen3.6-35B-A3B (bartowski) IQ4_XS | 157.5 | – | 77.1 | – | 96.4 | – |
-| Ornith-1.5 IQ4_XS | 99.0 | – | 68.2 | – | 67.5 (no drafting) | 31.1 (as a 16 GB Mac, earlier: 9.7–13.1) |
-| KAT-Coder i-quality-v2 | 126.2 | – | 57.3 | – | 82.5 | – |
+| Qwen3.8-Flash-Next IQ3_XXS | 57.9* | – | 31.8 | – | 28.1 | 8.6–8.9* (set up by hand, earlier) |
+| Flash-Next Coder IQ1_M | 54.8* | – | 28.4 | – | 25.5 ⁱ | – |
+| Swift 1.5 IQ3_XXS | 63.4* | – | 30.3 | – | 25.7 ⁱ | – |
+| Flash-Next (Unsloth) UD-IQ4_XS | 12.4* | – | 24.5 | – | 12.0 ⁱ | – |
+| Qwen3.6-35B-A3B (Unsloth) UD-IQ4_XS | 158.7* | – | 61.0* | – | 110.8* | – |
+| Qwen3.6-35B-A3B (bartowski) IQ4_XS | 157.5* | – | 77.1* | – | 96.4* | – |
+| Ornith-1.5 IQ4_XS | 99.0* | – | 68.2* | – | 67.5 | 31.1* (as a 16 GB Mac, earlier: 9.7–13.1) |
+| KAT-Coder i-quality-v2 | 126.2* | – | 57.3* | – | 82.5* | – |
 | Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 | runs (split 18.0, helper 14.4, right after a start) | 27.4 | – | 33.7 (UD-Q3_K_XL) | – |
-| GLM-5.3-Flash UD-IQ3_XXS | doesn't fit one 12 GB card | 0.5 (split) | 18.0 | – | 4.0 | – |
+| GLM-5.3-Flash UD-IQ3_XXS | doesn't fit one 12 GB card | 0.5 (split) | 18.0* | – | 4.0* | – |
 | LFM2.5-24B-A2B | 75.9 (UD-Q4_K_XL) | 42.1 (helper, store warm; 40.6 over 300 tokens from a start, against 20.4 on one card) | 126.0 | 6.9 | 70.5 | 12.1 (as an 8 GB Mac) |
 | LFM2.5-8B-A1B UD-Q4_K_XL | 255 | 197 (split) | 157.1 | 16.6 | 154.5 | 41.5 (as an 8 GB Mac) |
 | Flash-Next NVFP4 | PC only (Strata's own packs), not tested in MoMoE | | | | | |
+
+\* With drafting: the model's own multi-token-prediction (MTP) layer proposes up to 3 or 4 tokens ahead and the model
+checks them in one pass (Strata's engine on the PC: `--spec 4`; `momoe-cuda` / `momoe-metal`: `--mtp 3` for GLM and
+Flash-Next on the M4 Air, `--mtp 4` for the Qwen3.6 family). Without \*: no drafting. The Flash-Next family on the
+Spark and the M1 Ultra and Ornith on the M1 Ultra were measured without it, the two-card runs too, LFM has no MTP
+layer, and MoMoE does not yet draft with Bolt's. llama.cpp's numbers are all without drafting.
 
 ⁱ Measured while macOS had moved the engine, started in the background over SSH, to the M1 Ultra's efficiency cores
 (graph building ~4x slower: 3.5 against 0.8 ms a token; the same build wrote 154.5 tok/s on LFM2.5-8B before and 65
@@ -57,13 +63,15 @@ helper: 300 of 300; Bolt with the helper: 200 of 200, the split at a near-tie).
 | LFM2.5-8B UD-Q4_K_XL | PC | 255 | 305.8 |
 | LFM2.5-8B UD-Q4_K_XL | M1 Ultra | 154.5 | 169 (190 later the same day) |
 | LFM2.5-24B UD-IQ3_XXS | M1 Ultra | 70.5 | 108.7 |
-| Qwen3.6 (Unsloth) UD-IQ4_XS | M1 Ultra | 110.8 (drafting) | 90.2–91.2 |
-| Qwen3.6 (bartowski) IQ4_XS | M1 Ultra | 96.4 (drafting) | 96.8 |
-| KAT-Coder i-quality-v2 | M1 Ultra | 82.5 (drafting) | 87.5 |
+| Qwen3.6 (Unsloth) UD-IQ4_XS | M1 Ultra | 110.8* | 90.2–91.2 |
+| Qwen3.6 (bartowski) IQ4_XS | M1 Ultra | 96.4* | 96.8 |
+| KAT-Coder i-quality-v2 | M1 Ultra | 82.5* | 87.5 |
 | Bolt UD-Q3_K_XL | M1 Ultra | 33.7 | 38.5 (it cannot read prompts there: no Metal kernel for 9 experts a token) |
 | Bolt UD-IQ3_XXS | PC | 30.0 / 30.6 (server, earlier) | 26.2 / 26.1 |
-| GLM-5.3 UD-IQ3_XXS | Spark | 18.0 (drafting) / 15.0 / 14.6 (server, 10-17); 13.3 (no drafting, 10-17) | 1.3 (10-17, a 48-token check with every expert on the CPU, cold; not a speed test) |
-| GLM-5.3 UD-IQ4_XS | Spark | 11.7 / 10.4 (server, 10-17); 9.3 (no drafting, 10-17) | 2.3 / 2.5 |
+| GLM-5.3 UD-IQ3_XXS | Spark | 18.0* / 15.0* / 14.6* (server, 10-17); 13.3 (10-17) | 1.3 (10-17, a 48-token check with every expert on the CPU, cold; not a speed test) |
+| GLM-5.3 UD-IQ4_XS | Spark | 11.7* / 10.4* (server, 10-17); 9.3 (10-17) | 2.3 / 2.5 |
+
+\* With drafting (see above); the others without.
 
 llama.cpp: `llama-bench` tg128 (b11724; b11699 on the PC, pinned to the 4070 Ti), or `llama-server` where marked. The
 files larger than Metal's working set (48 GiB on the M1 Ultra) were not run in llama.cpp there.
