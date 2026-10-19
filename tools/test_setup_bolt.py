@@ -1,4 +1,4 @@
-"""tools/test_setup_bolt.py - Momoe: Nemotron 3.5 Bolt on the ggml engine (GGML_FAMILIES, ggml_setup): the size chosen by
+"""tools/test_setup_bolt.py - Momoe: Nemotron 3.5 Bolt on the ggml engine (GGML_FAMILIES, momoe_setup): the size chosen by
 RAM, --model in any case, the model card's sampling, and every offered size pinned with its size and SHA-256."""
 from __future__ import annotations
 

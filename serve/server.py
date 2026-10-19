@@ -58,7 +58,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SHUTDOWN = threading.Event()                      # set by POST /shutdown (momoe stop)
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
-from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
+from serve.frontend import (THINK_END, THINK_START, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
                             forced_call, glm_forced, lfm_forced, images_of, literal_tags, mark_think_literals,
                             openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
@@ -3208,6 +3208,9 @@ class Service:
         self.glm = "<arg_key>" in getattr(template, "source", "")
         # LFM2's (<|tool_call_start|>[name(k=v)]<|tool_call_end|>, a Python list): rewritten too (LfmCallRewriter)
         self.lfm = not self.glm and "<|tool_call_start|>" in getattr(template, "source", "")
+        # does the template's generation prompt open the thinking (Qwen, GLM-5, LFM2.5-24B: "<think>")?  One that does
+        # not (LFM2.5-8B-A1B) leaves it to the model, which may answer at once: the parser waits for the reply's start
+        self.think_opened = template_opens_think(template)
         # #567: a prompt re-encodes only what follows the last special token it shares with a recent prompt (the
         # same ids as a full encode: tools/strata_tokenizer.py PromptEncoder).  Tokenizers without resume points
         # encode in full.
@@ -3987,6 +3990,15 @@ class Service:
             self.prompts.forget(ids)
 
 
+    def prompt_opens_think(self, ids) -> bool:
+        """Does this prompt end with <think> (the model writes its thinking first)?  False when it cannot be told."""
+        if not ids or THINK_START not in getattr(self.template, "source", ""):
+            return False
+        try:
+            return self.tok.decode(list(ids[-4:])).rstrip().endswith(THINK_START)
+        except Exception:  # noqa: BLE001 - a tokenizer without decode (tests): the template's rule
+            return False
+
     def prepare(self, messages, tools, kwargs, max_new=None, force=None, req=None, cancel=None):
         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
         the rest of the context.  `force` (forced_call): without thinking the reply starts with it, so it ends the
@@ -4222,6 +4234,14 @@ class Service:
     def _run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
         `force` (forced_call): the opening of the call the reply must make - see prepare()."""
+        # where the reply starts: inside the thinking when this prompt ends with <think> (whatever the request asked:
+        # GLM-5.3-Flash's template has no switch to turn it off), else a template that writes <think> leaves it to the
+        # model (LFM2.5-8B-A1B: it opens it, or answers at once), else as asked
+        opened = self.prompt_opens_think(ids)
+        if opened and not thinking:
+            thinking = True
+        if not opened and not self.think_opened:
+            opened = None                                # (the template's own rule: wait for the reply's start)
         # the model card's sampling for this thinking state, then the config's block, then the Chat settings shared with
         # apps; the request's own fields win over all of them
         defaults = {**model_card_sampling(self.model_arch, thinking), **self.sampling_defaults, **self.shared}
@@ -4248,7 +4268,7 @@ class Service:
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
         parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
-                              glm=self.glm, lfm=self.lfm)
+                              glm=self.glm, lfm=self.lfm, opened=opened is not None)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
@@ -6813,6 +6833,18 @@ MODEL_CARD_SAMPLING = {
     "qwen35moe": {"thinking": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.5},
                   "instruct": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}},
 }
+
+
+def template_opens_think(template) -> bool:
+    """Does a one-question prompt end inside the thinking (its generation prompt writes <think>)?  True for a template
+    that never writes <think> or cannot be rendered (as before: the reply is taken as thinking first)."""
+    if THINK_START not in getattr(template, "source", ""):
+        return True
+    try:
+        prompt = template.render([{"role": "user", "content": "hi"}], add_generation_prompt=True)
+    except Exception:  # noqa: BLE001 - a template's own error; the server reports those where requests render
+        return True
+    return isinstance(prompt, str) and prompt.rstrip().endswith(THINK_START)
 
 
 def model_card_sampling(arch, thinking) -> dict:

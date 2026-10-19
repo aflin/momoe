@@ -121,10 +121,13 @@ struct Layer {
     ggml_tensor *slot_map = nullptr;                         // [1, n_expert] i32: expert -> slot, for this layer's
                                                              // chosen experts (looked up on the GPU: a real dependency)
     int grp = 0;                                             // the pool group of this layer's experts (their formats)
+    int dev = 0;                                             // momoe-cuda --layer-split: the card it runs on
     int exp_fd[3] = {-1, -1, -1};                            // the file (shard) each expert tensor is in (a split
     const char * exp_map[3] = {};                            // model may put a layer's up and down in two); momoe-cuda: mapped
     std::vector<int32_t> map_host;                           // momoe-cuda: slot_map's host copy (written, then set)
     int32_t * slots_host() { return kHostMem ? (int32_t *) slot_map->data : map_host.data(); }
+    ggml_tensor *hslot_map = nullptr;                        // --helper-tier: expert -> the helper card's slot (its
+    std::vector<int32_t> hmap_host;                          // slot of zeros for the others), on that card
     void sync_slots() { if (!kHostMem) ggml_backend_tensor_set(slot_map, map_host.data(), 0, ggml_nbytes(slot_map)); }
     // qwen4exp: hyper-connections (before the token mixer and before the MoE) and the n-gram embedding (PLE, one layer)
     ggml_tensor *hc_attn_norm = nullptr, *hc_attn_down = nullptr, *hc_attn_up = nullptr, *hc_attn_inject = nullptr;
@@ -151,7 +154,7 @@ struct Layer {
 
 struct Model {
     int n_embd, n_layer, n_head, n_head_kv, head_dim, n_rot, n_expert, n_used, n_ff_exp, n_vocab;
-    int ssm_conv, ssm_state, ssm_groups, ssm_dt_rank, ssm_inner, full_attn_interval;
+    int ssm_conv = 0, ssm_state = 0, ssm_groups = 0, ssm_dt_rank = 0, ssm_inner = 0, full_attn_interval = 0;
     int sections[4];
     float rms_eps, rope_base;
     bool qwen4 = false;                                      // qwen4exp (Flash-Next): hyper-connections, PLE, sigmoid
@@ -217,6 +220,7 @@ struct Group {
     std::unique_ptr<std::atomic<int>[]> left;                // slot -> parts still being read
     std::vector<uint8_t> by_prefetch;                        // slot -> filled by a prediction, not used yet
     int zero = -1;                                           // --nostall: a slot of zeros, never taken
+    int dev = 0;                                             // momoe-cuda --layer-split: the card its slots are on
 };
 
 struct Pool {
@@ -224,6 +228,8 @@ struct Pool {
     int n_slots = 0;                                         // all groups
     size_t all_bytes = 0, pool_bytes = 0;                    // every expert; the pool's slots
     ggml_backend_buffer_t buf = nullptr;                     // the slots' memory (rebuilt by fit_pool)
+    std::vector<ggml_backend_buffer_t> more;                 // --layer-split: the later cards' slots
+    std::vector<double> frac;                                // --layer-split: each card's share of its experts
     char * host = nullptr, * dev = nullptr;                  // a host-mapped pool (unified memory, --direct-io): its
                                                              // address for the CPU and the GPU's (readers write it)
     std::vector<int> slot_of;                                // layer * n_expert + expert -> slot in its group, -1
@@ -246,6 +252,14 @@ static void read_at(int fd, void * dst, size_t size, size_t off);
 // opened again with O_DIRECT, by the descriptor of its ordinary opening
 static bool g_direct = false;
 static std::vector<int> g_direct_fd;
+// momoe-cuda --layer-split: the card each of the engine's buffers is on (the readers copy to it on its own stream)
+static std::vector<std::pair<ggml_backend_buffer_t, int>> g_buf_dev;
+static int buf_dev(ggml_backend_buffer_t b) {
+    for (auto & x : g_buf_dev)
+        if (x.first == b) return x.second;
+    return 0;
+}
+static const int MAX_CARDS = 8;
 static bool g_rmb_copy = false;                              // resident mailboxes: the readers copy by a kernel, all on
 #if defined(MOMOE_CUDA)                                      // one stream of their own (g_copy_st): with a stream per
 static cudaStream_t g_copy_st = nullptr;                     // reader, some shared a hardware queue with the compute
@@ -286,7 +300,7 @@ struct Readers {
 #if defined(MOMOE_CUDA)
     // momoe-cuda: each reader copies an expert from the mapped file into its own pinned buffer, then to the device on
     // its own stream (a copy from pageable memory: ~0.8 GB/s for these 1-2 MB pieces; from pinned: ~20 GB/s)
-    struct Pinned { char * buf = nullptr; size_t cap = 0; cudaStream_t st = nullptr; cudaEvent_t ev[2] = {nullptr, nullptr}; };
+    struct Pinned { char * buf = nullptr; size_t cap = 0; cudaStream_t sts[MAX_CARDS] = {}; cudaEvent_t ev[2] = {nullptr, nullptr}; };
     static void wait_event(cudaEvent_t ev) {                 // (polled with short sleeps, as sync below)
         cudaError_t r;
         const auto t0 = std::chrono::steady_clock::now();
@@ -321,8 +335,11 @@ struct Readers {
         if (!p.buf) {
             p.cap = 2 * half;
             if (cudaMallocHost((void **) &p.buf, p.cap) != cudaSuccess) die("cannot allocate pinned memory");
-            if (cudaStreamCreateWithFlags(&p.st, cudaStreamNonBlocking) != cudaSuccess) die("cannot create a stream");
         }
+        const int d = g_buf_dev.empty() ? -1 : buf_dev(t->buffer);   // (--layer-split: the card the tensor is on)
+        if (d >= 0) cudaSetDevice(d);
+        cudaStream_t & st = p.sts[std::max(d, 0)];
+        if (!st && cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking) != cudaSuccess) die("cannot create a stream");
         char * dst = (char *) t->data + t_off;
         const bool shared = g_rmb_copy && g_copy_st;          // resident mailboxes: the one copy stream, by a kernel
         if (shared && !p.ev[0]) {
@@ -333,7 +350,7 @@ struct Readers {
         for (size_t done = 0; done < n; done += piece, ++k) {   // two halves: the next is filled while one copies
             const size_t len = std::min(piece, n - done);
             char * b = p.buf + (k & 1) * half;
-            if (k >= 2) { if (shared) wait_event(p.ev[k & 1]); else sync(p.st); }   // (wait before reusing a half)
+            if (k >= 2) { if (shared) wait_event(p.ev[k & 1]); else sync(st); }   // (wait before reusing a half)
             const char * from = b;
             if (g_direct) {
                 const size_t at = off + done, a0 = at & ~(A - 1), lead = at - a0;
@@ -353,12 +370,12 @@ struct Readers {
                 if (l2 - l0 > std::chrono::milliseconds(200))
                     fprintf(stderr, "momoe-cuda: a copy's launch took %.0f ms (%.0f ms for the lock)\n",
                             std::chrono::duration<double, std::milli>(l2 - l0).count(), std::chrono::duration<double, std::milli>(l1 - l0).count());
-            } else if (cudaMemcpyAsync(dst + done, from, len, cudaMemcpyHostToDevice, p.st) != cudaSuccess) die("a copy to the GPU failed");
+            } else if (cudaMemcpyAsync(dst + done, from, len, cudaMemcpyHostToDevice, st) != cudaSuccess) die("a copy to the GPU failed");
         }
         if (shared) {
             wait_event(p.ev[(k - 1) & 1]);
             if (k >= 2) wait_event(p.ev[k & 1]);
-        } else sync(p.st);
+        } else sync(st);
     }
 #endif
     // --direct-io into host memory (a host-mapped pool): 4 KiB-aligned windows into this thread's aligned buffer, copied
@@ -615,6 +632,18 @@ struct Engine {
     double t_mtp = 0;                                        // time in the MTP layer
     int max_window = 8;                                      // verify windows up to this many tokens
     ggml_backend_t metal = nullptr, cpu = nullptr;
+    // momoe-cuda --layer-split auto|K[,K2..] (the PC engine's flag, the server adds it for a config's "gpu": [a, b]): the
+    // layers in contiguous ranges, one per visible card (CUDA's numbering, the config's order), each range's weights,
+    // state and experts on its card; the token embedding on the first, the head and the MTP layer on the last
+    std::vector<ggml_backend_t> gpus;                        // gpus[0] == metal
+    std::string split;                                       // the --layer-split value ("": one card)
+    // momoe-cuda --helper-tier (the PC engine's switch; "gpu": [main, helper]): the second visible card holds a second
+    // pool under the main one - the experts the main pool evicts, computed there when a token chooses them
+    bool helper = false;
+    ggml_backend_t helper_gpu = nullptr;
+    Pool hpool;
+    double helper_gib = 0, helper_reserve_mib = 512;         // --helper-gib, --helper-reserve-mib
+    uint64_t helper_hits = 0, helper_down = 0;               // experts computed there; evictions copied down to it
     ggml_backend_sched_t sched = nullptr;
     std::vector<ggml_backend_buffer_t> bufs;
     std::vector<int32_t> ids_host;                           // scratch for the callback
@@ -638,6 +667,13 @@ struct Engine {
     uint64_t ns_tokens = 0, ns_wanted = 0, ns_missing = 0;
     double t_build = 0, t_compute = 0, t_wait = 0;
 };
+
+// the backend of card d (one card, and Metal: the GPU backend)
+static ggml_backend_t card(const Engine & e, int d) {
+    return d > 0 && d < (int) e.gpus.size() ? e.gpus[d] : e.metal;
+}
+
+static int n_cards(const Engine & e) { return std::max(1, (int) e.gpus.size()); }
 
 static int gguf_int(gguf_context * g, const std::string & key) {
     int64_t i = gguf_find_key(g, key.c_str());
@@ -781,7 +817,7 @@ static void load_mtp_qwen4(Engine & e) {
         ggml_set_name(t, (w.name + (w.how == 3 ? ".up" : "")).c_str());
         *w.to = t;
     }
-    e.bufs.push_back(ggml_backend_alloc_ctx_tensors(cm, e.metal));
+    e.bufs.push_back(ggml_backend_alloc_ctx_tensors(cm, card(e, n_cards(e) - 1)));   // (--layer-split: the last card)
     size_t bytes = 0;
     std::vector<char> raw;
     for (size_t i = 0; i < want.size(); ++i) {
@@ -822,20 +858,37 @@ static bool lfm_rmb(const Engine & e, int n_slots) {
 #endif
 
 // the pool's slots: each group gets `frac` of its experts (at least a few tokens' worth), every slot empty
+// a buffer of card d, known to the readers (--layer-split: they copy to it on that card's stream)
+static void card_buf(ggml_backend_buffer_t b, int d) {
+    if (b) g_buf_dev.push_back({b, d});
+}
+
+static void free_card_buf(ggml_backend_buffer_t b) {
+    for (size_t i = 0; i < g_buf_dev.size(); ++i)
+        if (g_buf_dev[i].first == b) { g_buf_dev.erase(g_buf_dev.begin() + i); break; }
+    ggml_backend_buffer_free(b);
+}
+
 static void make_pool(Engine & e, double frac) {
     Model & m = e.m;
     Pool & P = e.pool;
-    if (P.buf) { ggml_backend_buffer_free(P.buf); P.buf = nullptr; }
+    if (P.buf) { free_card_buf(P.buf); P.buf = nullptr; }
+    for (auto b : P.more) free_card_buf(b);
+    P.more.clear();
     ggml_init_params ip = {ggml_tensor_overhead() * 64 * (P.g.size() + 1), nullptr, true};
-    ggml_context * cp = ggml_init(ip);
+    const int nc = n_cards(e);
+    std::vector<ggml_context *> cps(nc);
+    for (auto & c : cps) c = ggml_init(ip);
+    ggml_context * cp = cps[0];
     P.n_slots = 0;
     P.pool_bytes = 0;
     const int min_tok = P.g.size() > 4 ? 4 : 16;             // a file with many formats (Bolt: 17): 4 tokens' worth
     for (auto & G : P.g) {
         const int n_all = G.n_all;
-        G.n_slots = std::min(std::max((int) (frac * n_all), min_tok * m.n_used), n_all);
+        const double f = (int) P.frac.size() > G.dev ? P.frac[G.dev] : frac;   // (--layer-split: its card's share)
+        G.n_slots = std::min(std::max((int) (f * n_all), min_tok * m.n_used), n_all);
         for (int w = m.part0(); w < 3; ++w)
-            G.t[w] = ggml_new_tensor_3d(cp, G.type[w], G.ne[w][0], G.ne[w][1], G.n_slots);
+            G.t[w] = ggml_new_tensor_3d(cps[G.dev], G.type[w], G.ne[w][0], G.ne[w][1], G.n_slots);
         if (G.t[0]) ggml_set_name(G.t[0], "pool_gate");
         ggml_set_name(G.t[1], "pool_up");
         ggml_set_name(G.t[2], "pool_down");
@@ -866,10 +919,21 @@ static void make_pool(Engine & e, double frac) {
         P.dev = (char *) ggml_backend_buffer_get_base(P.buf);
     } else
 #endif
-    P.buf = ggml_backend_alloc_ctx_tensors(cp, e.metal);
-    if (!P.buf) die("cannot allocate the expert pool");
-    if (e.hybrid) {                                          // a slot of zeros per group: a missing expert's slot (the
-        for (auto & G : P.g) {                               // GPU adds nothing for it; the CPU computes it)
+    if (nc == 1) {
+        P.buf = ggml_backend_alloc_ctx_tensors(cp, e.metal);
+        if (!P.buf) die("cannot allocate the expert pool");
+    } else {                                                 // --layer-split: each card's groups in its own buffer
+        for (int d = 0; d < nc; ++d) {
+            if (!ggml_get_first_tensor(cps[d])) continue;    // (a card whose layers have no experts)
+            ggml_backend_buffer_t b = ggml_backend_alloc_ctx_tensors(cps[d], card(e, d));
+            if (!b) die("cannot allocate the expert pool on card %s", std::to_string(d).c_str());
+            card_buf(b, d);
+            if (!P.buf) P.buf = b;
+            else P.more.push_back(b);
+        }
+    }
+    if (e.hybrid || e.helper) {                              // a slot of zeros per group: a missing expert's slot (the
+        for (auto & G : P.g) {                               // GPU adds nothing for it; the CPU or the helper computes it)
             if (G.n_slots < 2) die("the expert pool is too small for --hybrid");
             G.zero = G.n_slots - 1;
             G.used[G.zero] = UINT64_MAX;                     // never taken
@@ -885,6 +949,73 @@ static void make_pool(Engine & e, double frac) {
     fprintf(stderr, "momoe-metal: expert pool %d slots = %.2f GiB of %.2f GiB (%d experts in the model, %.0f%%), %zu "
             "format group%s\n", P.n_slots, P.pool_bytes / 1073741824.0, P.all_bytes / 1073741824.0, m.n_exp_all,
             100.0 * P.pool_bytes / P.all_bytes, P.g.size(), P.g.size() == 1 ? "" : "s");
+}
+
+// --layer-split: which card each layer runs on.  "auto": in proportion to each card's free VRAM (every layer counted
+// alike); else the first layer of each later card ("18", or "16,32" for three cards), as the PC engine reads it
+static void assign_cards(Engine & e) {
+#if defined(MOMOE_CUDA)
+    Model & m = e.m;
+    if (e.split.empty()) return;
+    int nc = 0;
+    if (cudaGetDeviceCount(&nc) != cudaSuccess || nc < 2) {
+        fprintf(stderr, "momoe-cuda: --layer-split %s with %d card(s) visible: one card\n", e.split.c_str(), nc);
+        e.split.clear();
+        return;
+    }
+    nc = std::min(nc, MAX_CARDS);
+    if (e.device != 0) die("--layer-split runs on the visible cards in order: no --device");
+    std::vector<int> first(nc, 0);                           // first[d]: card d's first layer
+    if (e.split == "auto") {
+        std::vector<double> fr(nc);
+        double all = 0;
+        for (int d = 0; d < nc; ++d) {
+            size_t f = 0, t = 0;
+            cudaSetDevice(d);
+            cudaMemGetInfo(&f, &t);
+            fr[d] = (double) f;
+            all += fr[d];
+        }
+        double acc = 0;
+        for (int d = 1; d < nc; ++d) {
+            acc += fr[d - 1];
+            first[d] = std::min(m.n_layer - (nc - d), std::max(first[d - 1] + 1, (int) std::lround(m.n_layer * acc / all)));
+        }
+    } else {
+        std::string v = e.split;
+        int d = 1;
+        for (size_t at = 0; at <= v.size() && d < nc; ++d) {
+            const size_t comma = v.find(',', at);
+            const int k = atoi(v.substr(at, comma == std::string::npos ? std::string::npos : comma - at).c_str());
+            if (k <= first[d - 1] || k >= m.n_layer) die("--layer-split %s: each card's first layer must rise, below the "
+                                                          "layer count", v.c_str());
+            first[d] = k;
+            if (comma == std::string::npos) { ++d; break; }
+            at = comma + 1;
+        }
+        nc = d;                                              // (fewer numbers than cards: the cards they name)
+    }
+    for (int il = 0; il < m.n_layer; ++il) {
+        int d = 0;
+        while (d + 1 < nc && il >= first[d + 1]) ++d;
+        m.layers[il].dev = d;
+    }
+    e.gpus.assign(nc, nullptr);                              // (gpus[0]: the GPU backend, set at its start)
+    std::string where;
+    for (int d = 0; d < nc; ++d) {
+        if (d > 0) {
+            e.gpus[d] = ggml_backend_cuda_init(d);
+            if (!e.gpus[d]) die("--layer-split: no CUDA device %s", std::to_string(d).c_str());
+        }
+        char desc[256];
+        ggml_backend_cuda_get_device_description(d, desc, sizeof desc);
+        const int last = d + 1 < nc ? first[d + 1] - 1 : m.n_layer - 1;
+        where += (d ? "; " : "") + std::string("layers ") + std::to_string(first[d]) + "-" + std::to_string(last) + " on " + desc;
+    }
+    fprintf(stderr, "momoe-cuda: layer split (%s): %s\n", e.split.c_str(), where.c_str());
+#else
+    (void) e;
+#endif
 }
 
 static void load(Engine & e, const char * path, double pool_gib, int slots_arg) {
@@ -1111,11 +1242,23 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     for (int il = 0; il < m.n_layer; ++il) m.layers[il].recurrent = (il + 1) % m.full_attn_interval != 0;
     }
 
+    assign_cards(e);
     // the dense weights: every tensor but the routed experts, the MTP layer and the PLE table, in one Metal buffer
     const int n_split = gguf_find_key(g, "split.count") >= 0 ? gguf_int(g, "split.count") : 1;
     const std::vector<std::string> paths = shard_paths(path, n_split);
     ggml_init_params ip = {ggml_tensor_overhead() * 4096, nullptr, true};
     ggml_context * cw = ggml_init(ip);
+    // --layer-split: a context per card - a layer's weights on its card, the token embedding on the first, the head,
+    // the output norm and the MTP layer on the last
+    const int nc = n_cards(e);
+    std::vector<ggml_context *> cws(nc, cw);
+    for (int d = 1; d < nc; ++d) cws[d] = ggml_init(ip);
+    auto cw_of = [&](int il, const char * name) -> ggml_context * {
+        if (nc == 1) return cw;
+        if (il >= 0 && il < m.n_layer) return cws[m.layers[il].dev];
+        if (il < 0 && !strcmp(name, "token_embd.weight")) return cws[0];
+        return cws[nc - 1];
+    };
     // momoe-cuda: the token embeddings stay in RAM (a few rows a token, read on the CPU), as llama.cpp keeps them:
     // their VRAM goes to the expert pool. Only when the head has its own weights (output.weight in this file)
     ggml_context * ccpu = ggml_init(ip);
@@ -1172,7 +1315,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
             }
             if (il == m.n_layer) {                             // the MTP layer: everything whole, its experts too
                 if (m.qwen4) continue;                         // (qwen4exp's: not yet)
-                ggml_tensor * t = ggml_dup_tensor(cw, src);
+                ggml_tensor * t = ggml_dup_tensor(cw_of(il, name), src);
                 ggml_set_name(t, name);
                 to_read.push_back({t, fd, off});
                 Layer & L = m.mtp;
@@ -1213,7 +1356,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
                 L.exp_map[w] = fmap;
                 continue;
             }
-            ggml_tensor * t = ggml_dup_tensor(embd_cpu && !strcmp(name, "token_embd.weight") ? ccpu : cw, src);
+            ggml_tensor * t = ggml_dup_tensor(embd_cpu && !strcmp(name, "token_embd.weight") ? ccpu : cw_of(il, name), src);
             ggml_set_name(t, name);
             to_read.push_back({t, fd, off});
             if (il < 0) {
@@ -1299,8 +1442,16 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     if (!e.metal) die("no Metal device");
 #endif
     e.cpu = ggml_backend_cpu_init();
-    ggml_backend_buffer_t bw = ggml_backend_alloc_ctx_tensors(cw, e.metal);
-    e.bufs.push_back(bw);
+    if (!e.gpus.empty()) e.gpus[0] = e.metal;
+    for (int d = 0; d < nc; ++d) {
+        if (d > 0 && !ggml_get_first_tensor(cws[d])) continue;
+        ggml_backend_buffer_t bw = ggml_backend_alloc_ctx_tensors(cws[d], card(e, d));
+        if (nc > 1) {
+            if (!bw) die("cannot allocate the dense weights on card %s", std::to_string(d).c_str());
+            card_buf(bw, d);
+        }
+        e.bufs.push_back(bw);
+    }
     if (embd_cpu) e.bufs.push_back(ggml_backend_alloc_ctx_tensors_from_buft(ccpu, ggml_backend_cpu_buffer_type()));
     size_t dense = 0;
     std::vector<char> tmp;
@@ -1326,7 +1477,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
         fclose(f);
         ggml_context * cd = ggml_init(ip);
         m.dhead = ggml_new_tensor_2d(cd, m.output->type, m.n_embd, n);
-        e.bufs.push_back(ggml_backend_alloc_ctx_tensors(cd, e.metal));
+        e.bufs.push_back(ggml_backend_alloc_ctx_tensors(cd, card(e, nc - 1)));
         const size_t row = m.output->nb[1];
         std::vector<char> r(row);
         for (long i = 0; i < n; ++i) {
@@ -1349,7 +1500,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
             bool same = true;
             for (int w = 0; w < 3; ++w)
                 same &= G.type[w] == L.exp_type[w] && G.ne[w][0] == L.exp_ne[w][0] && G.ne[w][1] == L.exp_ne[w][1];
-            if (same) break;
+            if (same && G.dev == L.dev) break;
         }
         if (gi == (int) P.g.size()) {
             P.g.emplace_back();
@@ -1360,6 +1511,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
                 G.ne[w][1] = L.exp_ne[w][1];
                 G.bytes += L.exp_bytes[w];
             }
+            G.dev = L.dev;
         }
         L.grp = gi;
         ++P.g[gi].n_layers;
@@ -1373,14 +1525,20 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     const double frac = slots_arg > 0 ? (double) slots_arg / m.n_exp_all : pool_gib > 0 ? pool_gib * 1073741824.0 / all_bytes
                       : kHostMem ? 1.0 : 0.0;
     make_pool(e, frac);
-    size_t stage_bytes = 0;
-    for (auto & G : P.g) stage_bytes = std::max(stage_bytes, G.bytes * m.n_expert);
-    // one staging buffer for every group (one layer at a time): each group's staging tensors at its start
-    {
-        ggml_backend_buffer_t sb = ggml_backend_alloc_buffer(e.metal, stage_bytes + 4096 * 3);
+    // one staging buffer for every group (one layer at a time): each group's staging tensors at its start (--layer-split:
+    // one a card, for its groups)
+    for (int d = 0; d < nc; ++d) {
+        size_t stage_bytes = 0;
+        for (auto & G : P.g)
+            if (G.dev == d) stage_bytes = std::max(stage_bytes, G.bytes * m.n_expert);
+        if (!stage_bytes) continue;
+        ggml_backend_buffer_t sb = ggml_backend_alloc_buffer(card(e, d), stage_bytes + 4096 * 3);
+        if (!sb) die("cannot allocate the staging copy");
+        if (nc > 1) card_buf(sb, d);
         e.bufs.push_back(sb);
         ggml_context * cg = ggml_init(ip);
         for (auto & G : P.g) {
+            if (G.dev != d) continue;
             char * at = (char *) ggml_backend_buffer_get_base(sb);
             for (int w = p0; w < 3; ++w) {
                 G.stage[w] = ggml_new_tensor_3d(cg, G.type[w], G.ne[w][0], G.ne[w][1], m.n_expert);
@@ -1392,11 +1550,15 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     P.lfu = !(getenv("MOMOE_POLICY") && !strcmp(getenv("MOMOE_POLICY"), "lru"));   // lfu by default (measured faster)
 
     // state: the KV cache of the attention layers, the delta net's conv and recurrent states, the slot numbers
-    ggml_context * cs = ggml_init(ip);
+    // (--layer-split: on the layer's card)
+    std::vector<ggml_context *> css(nc);
+    for (auto & c : css) c = ggml_init(ip);
+    ggml_context * cs = css[nc - 1];                         // (the MTP layer's: the last card)
     const int conv_ch = m.ssm_inner + 2 * m.ssm_groups * m.ssm_state;
-    const int head_v = m.ssm_inner / m.ssm_dt_rank;
+    const int head_v = m.ssm_dt_rank ? m.ssm_inner / m.ssm_dt_rank : 0;   // (lfm2moe has no SSM)
     for (int il = 0; il < m.n_layer; ++il) {
         Layer & L = m.layers[il];
+        ggml_context * cs = css[L.dev];
         if (m.glm5 && L.kind == 'k') {                       // KDA: q, k, v's convolution histories; the state
             L.conv_state = ggml_new_tensor_1d(cs, GGML_TYPE_F32, (int64_t) 3 * (m.ssm_conv - 1) * m.ssm_inner);
             L.ssm_state = ggml_new_tensor_1d(cs, GGML_TYPE_F32, (int64_t) m.kda_hd * m.kda_hd * m.n_head);
@@ -1440,13 +1602,33 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
         m.mtp.k_cache = ggml_new_tensor_3d(cs, GGML_TYPE_F16, m.head_dim, m.n_head_kv, e.n_ctx);
         m.mtp.v_cache = ggml_new_tensor_3d(cs, GGML_TYPE_F16, m.head_dim, m.n_head_kv, e.n_ctx);
     }
-    ggml_backend_buffer_t bs = ggml_backend_alloc_ctx_tensors(cs, e.metal);
-    ggml_backend_buffer_clear(bs, 0);
-    e.bufs.push_back(bs);
+    for (int d = 0; d < nc; ++d) {
+        if (!ggml_get_first_tensor(css[d])) continue;
+        ggml_backend_buffer_t bs = ggml_backend_alloc_ctx_tensors(css[d], card(e, d));
+        if (!bs) die("cannot allocate the state");
+        ggml_backend_buffer_clear(bs, 0);
+        if (nc > 1) card_buf(bs, d);
+        e.bufs.push_back(bs);
+    }
     for (auto & L : m.layers) L.map_host.assign(L.slot_map ? ggml_nelements(L.slot_map) : 0, 0);
 
-    ggml_backend_t backends[2] = {e.metal, e.cpu};
-    e.sched = ggml_backend_sched_new(backends, nullptr, 2, 32768, false, true);
+    std::vector<ggml_backend_t> backends;                    // (--layer-split: every card, then the CPU)
+    for (int d = 0; d < nc; ++d) backends.push_back(card(e, d));
+#if defined(MOMOE_CUDA)
+    if (e.helper) {                                          // --helper-tier: the second visible card
+        int n = 0;
+        if (cudaGetDeviceCount(&n) != cudaSuccess || n < 2) die("--helper-tier needs a second visible card");
+        if (e.device != 0 || nc > 1) die("--helper-tier: the main card is the first visible one (no --device, no --layer-split)");
+        e.helper_gpu = ggml_backend_cuda_init(1);
+        if (!e.helper_gpu) die("--helper-tier: cannot start CUDA device 1");
+        char desc[256];
+        ggml_backend_cuda_get_device_description(1, desc, sizeof desc);
+        fprintf(stderr, "momoe-cuda: helper tier: the second pool on %s\n", desc);
+        backends.push_back(e.helper_gpu);
+    }
+#endif
+    backends.push_back(e.cpu);
+    e.sched = ggml_backend_sched_new(backends.data(), nullptr, (int) backends.size(), 32768, false, true);
     gguf_free(g);
 }
 
@@ -1488,6 +1670,23 @@ static void fill_slot(Engine & e, int il, int x, int slot, std::vector<Readers::
     const int key = il * e.m.n_expert + x;
     G.owner[slot] = key;
     P.slot_of[key] = slot;
+}
+
+// --helper-tier: expert `key` (an eviction of the main pool) read into helper slot `hs`, in the background
+static void fill_hslot(Engine & e, int key, int hs, std::vector<Readers::Job> & jobs) {
+    Model & m = e.m;
+    Pool & H = e.hpool;
+    const int il = key / m.n_expert, x = key % m.n_expert;
+    Layer & L = m.layers[il];
+    Group & K = H.g[L.grp];
+    K.left[hs].store(3 - m.part0(), std::memory_order_relaxed);
+    for (int w = m.part0(); w < 3; ++w) {
+        const size_t off = L.exp_off[w] + (size_t) x * L.exp_bytes[w], t_off = (size_t) hs * K.t[w]->nb[2];
+        jobs.push_back({L.exp_fd[w], nullptr, L.exp_bytes[w], off, &K.left[hs], L.exp_map[w] + off, K.t[w], t_off});
+    }
+    K.owner[hs] = key;
+    H.slot_of[key] = hs;
+    ++e.helper_down;
 }
 
 // called at a layer's pause with its chosen experts ([n_used, n_tokens] i32): every one is made resident (a hit, a
@@ -1587,14 +1786,32 @@ static void make_resident(Engine & e, int il, const int32_t * ids, int n_tok) {
     if (++P.uses % ((uint64_t) 64 * m.n_layer) == 0)       // aging: every 64 tokens' worth of layers
         for (auto & c : P.freq) c >>= 1;
     std::vector<uint8_t> seen(stage ? m.n_expert : 0, 0);
+    // --helper-tier (not a staged batch): an expert the helper card holds is computed there (the main table points at
+    // the slot of zeros, the helper's at its slot); an expert the main pool evicts goes down to the helper
+    const bool hp = e.helper && !stage && !L.hmap_host.empty();
+    Pool & H = e.hpool;
+    Group * K = hp ? &H.g[L.grp] : nullptr;
+    int32_t * hmap = hp ? L.hmap_host.data() : nullptr;
+    const uint64_t hpin = hp ? ++H.clock : 0;                // this layer's helper experts: not taken by the evictions
+    std::vector<Readers::Job> hjobs;
     for (size_t i = 0; i < (size_t) m.n_used * n_tok; ++i) {
         const int x = ids[i];
-        ++P.freq[il * m.n_expert + x];
+        const int key = il * m.n_expert + x;
+        ++P.freq[key];
         if (stage) {
             if (seen[x]) continue;
             seen[x] = 1;
         }
-        int slot = P.slot_of[il * m.n_expert + x];
+        int slot = P.slot_of[key];
+        if (slot < 0 && hp && H.slot_of[key] >= 0 && K->left[H.slot_of[key]].load(std::memory_order_acquire) == 0) {
+            const int hs = H.slot_of[key];
+            K->used[hs] = hpin;
+            ++H.freq[key];
+            ++e.helper_hits;
+            map[x] = G.zero;
+            hmap[x] = hs;
+            continue;
+        }
         if (slot >= 0) {
             ++P.hits;
             if (G.by_prefetch[slot]) { ++P.prefetch_hits; G.by_prefetch[slot] = 0; }
@@ -1608,6 +1825,13 @@ static void make_resident(Engine & e, int il, const int32_t * ids, int n_tok) {
                 if (!reading) break;
                 std::this_thread::sleep_for(std::chrono::microseconds(20));
                 slot = take_slot(P, G, pin);
+            }
+            if (hp && slot >= 0) {                           // the expert it evicts: down to the helper (read in the
+                const int old = G.owner[slot];               // background; the helper's own least used goes)
+                if (old >= 0 && H.slot_of[old] < 0) {
+                    const int hs = take_slot(H, *K, hpin);
+                    if (hs >= 0) fill_hslot(e, old, hs, hjobs);
+                }
             }
             if (slot < 0) {
                 if (!stage) {
@@ -1636,7 +1860,9 @@ static void make_resident(Engine & e, int il, const int32_t * ids, int n_tok) {
         }
         G.used[slot] = pin;
         map[x] = slot;
+        if (hp) hmap[x] = K->zero;
     }
+    if (!hjobs.empty()) e.readers.submit(hjobs);              // (behind this layer's own reads)
     sleft[0].store(n_stage, std::memory_order_relaxed);
     const double t0 = now_s();
     (e.demand.th.empty() ? e.readers : e.demand).submit(jobs, true);
@@ -1669,6 +1895,7 @@ static void make_resident(Engine & e, int il, const int32_t * ids, int n_tok) {
         while (sleft[0].load(std::memory_order_acquire)) { }
     }
     L.sync_slots();
+    if (hp) tset(L.hslot_map, L.hmap_host.data(), 0, ggml_nbytes(L.hslot_map));
 }
 
 // --nostall, before a graph (the GPU idle): which experts are in the pool (read completely), as the layers'
@@ -1771,6 +1998,7 @@ static void prefetch(Engine & e, int il, const int32_t * ids, int n_tok) {
             die("a predicted expert is out of range");
         }
         if (P.slot_of[il * m.n_expert + x] >= 0) continue;
+        if (e.helper && e.hpool.slot_of.size() && e.hpool.slot_of[il * m.n_expert + x] >= 0) continue;   // (computed there)
         const int slot = take_slot(P, G, stamp - 1);        // not the experts of the layer being computed
         if (slot < 0) break;                                 // a small pool: the rest is read when needed
         fill_slot(e, il, x, slot, jobs);
@@ -2587,6 +2815,22 @@ static void ple_rows(Engine & e, const int32_t * toks, int T, int p0, std::vecto
     }
 }
 
+// --helper-tier (not a staged batch): the chosen experts the helper card holds, computed there through its slot table
+// (its slot of zeros for the others; the main table points at the main pool's for these): their down projections, to
+// add to the main card's.  act(gate or nullptr, up): the model's activation
+template <class Act>
+static ggml_tensor * helper_down(Engine & e, ggml_context * c, Layer & L, ggml_tensor * x3, ggml_tensor * ids, int T,
+                                 Act act) {
+    const int k = e.m.n_used;
+    Group & K = e.hpool.g[L.grp];
+    ggml_tensor * hs = ggml_reshape_2d(c, ggml_get_rows(c, L.hslot_map, ggml_reshape_1d(c, ids, (int64_t) k * T)), k, T);
+    ggml_tensor * up = ggml_mul_mat_id(c, K.t[1], x3, hs);
+    ggml_tensor * gt = K.t[0] ? ggml_mul_mat_id(c, K.t[0], x3, hs) : nullptr;
+    return ggml_mul_mat_id(c, K.t[2], act(gt, up), hs);
+}
+
+static bool helper_on(const Engine & e, const Layer & L, bool big) { return e.helper && !big && L.hslot_map; }
+
 static ggml_tensor * moe_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, int il, ggml_tensor * x, int T,
                                ggml_tensor * pred_in, ggml_tensor * pred_in2) {
     Model & m = e.m;
@@ -2594,35 +2838,60 @@ static ggml_tensor * moe_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, i
     ggml_tensor * lg = ggml_mul_mat(c, L.gate_inp, x);
     ggml_format_name(lg, "ffn_moe_logits-%d", il);
     ggml_tensor * probs = ggml_soft_max(c, lg);                                         // [n_expert, T]
-    // the next layer's router on this layer's hidden state predicts its experts: computed in the same top-k, so the
-    // pause has both (the prediction is read while the GPU goes on)
-    // (and the one after it, on the same state: less accurate, but twice the time to read)
-    ggml_tensor * both = probs;
-    if (pred_in) {
-        ggml_tensor * p2 = ggml_soft_max(c, ggml_mul_mat(c, m.layers[il + 1].gate_inp, pred_in));
-        both = ggml_concat(c, probs, p2, 1);                                            // [n_expert, 2T]
-    }
-    if (pred_in2) {
-        ggml_tensor * p3 = ggml_soft_max(c, ggml_mul_mat(c, m.layers[il + 2].gate_inp, pred_in2));
-        both = ggml_concat(c, both, p3, 1);                                             // [n_expert, 3T]
-    }
-    ggml_tensor * top = ggml_cont(c, ggml_argsort_top_k(c, both, m.n_used));          // [n_used, T or 2T]
-    // made resident here: a pause point (or the callback); no-stall: what the layer wanted, read after the graph
     const bool masked = !ns_paused(e, il);
-    ggml_format_name(top, masked ? "want-%d" : "topk-%d", il);
-    if (e.ns_graph) ggml_set_output(top);
-    e.topk[il] = top;
-    ggml_build_forward_expand(gf, top);
-    ggml_tensor * ids = pred_in ? ggml_view_2d(c, top, m.n_used, T, top->nb[1], 0) : top;   // [n_used, T]
-    if (masked && e.nostall == 1)                            // sub: the best of the experts in the pool
-        ids = ggml_cont(c, ggml_argsort_top_k(c, ggml_add(c, probs, L.res_mask), m.n_used));
-    ggml_tensor * w = ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, m.n_expert, T), ids);   // [1, n_used, T]
-    if (masked && e.nostall == 2)                            // drop: the missing ones weigh nothing
-        w = ggml_mul(c, w, ggml_reshape_3d(c, ggml_get_rows(c, L.res_keep, ggml_reshape_1d(c, ids, (int64_t) m.n_used * T)),
-                                           1, m.n_used, T));
-    w = ggml_reshape_2d(c, w, m.n_used, T);
-    w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
-    w = ggml_reshape_3d(c, w, 1, m.n_used, T);
+    ggml_tensor * top = nullptr, * ids = nullptr, * w = nullptr;
+    if (!masked) {
+        // llama.cpp's order, so that the backends fuse the routing as there (CUDA's and Metal's topk-moe kernels): the
+        // choice and its normalized weights first, then the next layers' predicted experts (see below) beside it
+        ggml_tensor * chosen = ggml_argsort_top_k(c, probs, m.n_used);                 // [n_used, T] (a view)
+        w = ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, m.n_expert, T), chosen);      // [1, n_used, T]
+        w = ggml_reshape_2d(c, w, m.n_used, T);
+        w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
+        w = ggml_reshape_3d(c, w, 1, m.n_used, T);
+        ggml_build_forward_expand(gf, w);
+        top = ggml_cont(c, chosen);
+        for (int j = 1; j <= 2; ++j) {
+            ggml_tensor * in = j == 1 ? pred_in : pred_in2;
+            if (!in) continue;
+            ggml_tensor * pl = ggml_soft_max(c, ggml_mul_mat(c, m.layers[il + j].gate_inp, in));
+            top = ggml_concat(c, top, ggml_cont(c, ggml_argsort_top_k(c, pl, m.n_used)), 1);
+        }
+        ggml_format_name(top, "topk-%d", il);                // made resident here: a pause point (or the callback)
+        if (e.ns_graph) ggml_set_output(top);
+        e.topk[il] = top;
+        ggml_build_forward_expand(gf, top);
+        ids = pred_in ? ggml_view_2d(c, top, m.n_used, T, top->nb[1], 0) : top;       // [n_used, T]
+    } else {
+        // --nostall: the next layer's router on this layer's hidden state predicts its experts: computed in the same
+        // top-k, so the pause has both (the prediction is read while the GPU goes on) (and the one after it, on the
+        // same state: less accurate, but twice the time to read)
+        ggml_tensor * both = probs;
+        if (pred_in) {
+            ggml_tensor * p2 = ggml_soft_max(c, ggml_mul_mat(c, m.layers[il + 1].gate_inp, pred_in));
+            both = ggml_concat(c, probs, p2, 1);                                            // [n_expert, 2T]
+        }
+        if (pred_in2) {
+            ggml_tensor * p3 = ggml_soft_max(c, ggml_mul_mat(c, m.layers[il + 2].gate_inp, pred_in2));
+            both = ggml_concat(c, both, p3, 1);                                             // [n_expert, 3T]
+        }
+        top = ggml_cont(c, ggml_argsort_top_k(c, both, m.n_used));          // [n_used, T or 2T]
+        // made resident here: a pause point (or the callback); no-stall: what the layer wanted, read after the graph
+        ggml_format_name(top, masked ? "want-%d" : "topk-%d", il);
+        if (e.ns_graph) ggml_set_output(top);
+        e.topk[il] = top;
+        ggml_build_forward_expand(gf, top);
+        ids = pred_in ? ggml_view_2d(c, top, m.n_used, T, top->nb[1], 0) : top;   // [n_used, T]
+        if (masked && e.nostall == 1)                            // sub: the best of the experts in the pool
+            ids = ggml_cont(c, ggml_argsort_top_k(c, ggml_add(c, probs, L.res_mask), m.n_used));
+        w = ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, m.n_expert, T), ids);   // [1, n_used, T]
+        if (masked && e.nostall == 2)                            // drop: the missing ones weigh nothing
+            w = ggml_mul(c, w, ggml_reshape_3d(c, ggml_get_rows(c, L.res_keep,
+                                                                ggml_reshape_1d(c, ids, (int64_t) m.n_used * T)),
+                                               1, m.n_used, T));
+        w = ggml_reshape_2d(c, w, m.n_used, T);
+        w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
+        w = ggml_reshape_3d(c, w, 1, m.n_used, T);
+    }
     ggml_tensor * slots = ggml_get_rows(c, L.slot_map, ggml_reshape_1d(c, ids, (int64_t) m.n_used * T));
     slots = ggml_reshape_2d(c, slots, m.n_used, T);                                     // [n_used, T]
     ggml_tensor * x3 = ggml_reshape_3d(c, x, m.n_embd, 1, T);
@@ -2642,14 +2911,23 @@ static ggml_tensor * moe_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, i
     ggml_tensor * gt = ggml_mul_mat_id(c, as[0], x3, slots);
     ggml_tensor * h = ggml_swiglu_split(c, gt, up);
     ggml_tensor * dn = ggml_mul_mat_id(c, as[2], h, slots);                             // [n_embd, n_used, T]
+    if (helper_on(e, L, big))
+        dn = ggml_add(c, dn, helper_down(e, c, L, x3, ids, T, [&](ggml_tensor * g, ggml_tensor * u) { return ggml_swiglu_split(c, g, u); }));
     ggml_format_name(up, "moe_up-%d", il);
     ggml_format_name(dn, "moe_down-%d", il);
     ggml_format_name(w, "moe_w-%d", il);
     dn = ggml_mul(c, dn, w);
-    ggml_tensor * moe = nullptr;
+    ggml_build_forward_expand(gf, dn);
+    ggml_tensor * v[64];                                     // the views before the adds (llama.cpp's order)
+    GGML_ASSERT(m.n_used <= 64);
     for (int i = 0; i < m.n_used; ++i) {
-        ggml_tensor * v = ggml_view_2d(c, dn, m.n_embd, T, dn->nb[2], i * dn->nb[1]);
-        moe = moe ? ggml_add(c, moe, v) : v;
+        v[i] = ggml_view_2d(c, dn, m.n_embd, T, dn->nb[2], i * dn->nb[1]);
+        ggml_build_forward_expand(gf, v[i]);
+    }
+    ggml_tensor * moe = v[0];
+    for (int i = 1; i < m.n_used; ++i) {
+        moe = ggml_add(c, moe, v[i]);
+        ggml_build_forward_expand(gf, moe);
     }
     // the shared expert, gated by a sigmoid
     ggml_tensor * sh = ggml_swiglu_split(c, ggml_mul_mat(c, L.gate_sh, x), ggml_mul_mat(c, L.up_sh, x));
@@ -2741,7 +3019,15 @@ static ggml_tensor * nemo_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * 
     ggml_tensor * lg = ggml_mul_mat(c, L.gate_inp, x);                                    // [n_exp, T]
     ggml_format_name(lg, "ffn_moe_logits-%d", il);
     ggml_tensor * probs = ggml_sigmoid(c, lg);
-    ggml_tensor * top = ggml_cont(c, ggml_argsort_top_k(c, ggml_add(c, probs, L.exp_probs_b), k));   // [k, T]
+    // llama.cpp's order (the routing's nodes in a row: CUDA's topk-moe kernel): the choice and its weights first
+    ggml_tensor * chosen = ggml_argsort_top_k(c, ggml_add(c, probs, L.exp_probs_b), k);   // [k, T] (a view)
+    ggml_tensor * w = ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, n_exp, T), chosen);   // [1, k, T]
+    w = ggml_reshape_2d(c, w, k, T);
+    w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
+    w = ggml_reshape_3d(c, w, 1, k, T);
+    w = ggml_scale(c, w, m.exp_scale);
+    ggml_build_forward_expand(gf, w);
+    ggml_tensor * top = ggml_cont(c, chosen);                                             // [k, T]
     ggml_tensor * both = top;
     if (pred_in) {                                           // [k, 2T]: this block's, then the next one's predicted
         const Layer & N = m.layers[L.next_moe];
@@ -2776,11 +3062,6 @@ static ggml_tensor * nemo_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * 
         e.mb.graph.push_back(il);
     }
 #endif
-    ggml_tensor * w = ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, n_exp, T), top);     // [1, k, T]
-    w = ggml_reshape_2d(c, w, k, T);
-    w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
-    w = ggml_scale(c, w, m.exp_scale);
-    w = ggml_reshape_3d(c, w, 1, k, T);
     ggml_tensor * slots = ggml_reshape_2d(c, ggml_get_rows(c, L.slot_map, ggml_reshape_1d(c, top, (int64_t) k * T)), k, T);
     Group & G = e.pool.g[L.grp];
     const bool big = staged(k, G.n_slots, T);
@@ -2796,6 +3077,8 @@ static ggml_tensor * nemo_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * 
     ggml_tensor * up = ggml_mul_mat_id(c, as[1], xl, slots);                              // [n_ff, k, T]
     ggml_tensor * h = ggml_sqr(c, ggml_relu(c, up));
     ggml_tensor * dn = ggml_mul_mat_id(c, as[2], h, slots);                               // [latent, k, T]
+    if (helper_on(e, L, big))
+        dn = ggml_add(c, dn, helper_down(e, c, L, xl, top, T, [&](ggml_tensor *, ggml_tensor * u) { return ggml_sqr(c, ggml_relu(c, u)); }));
 #if defined(MOMOE_CUDA)
     if (mbx) {                                               // the CPU's experts, waited for after the GPU's own
         MbLayer & B = e.mb.layer[il];
@@ -2812,10 +3095,17 @@ static ggml_tensor * nemo_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * 
         dn = ggml_add(c, dn, ggml_view_3d(c, L.cpu_dn, m.latent, k, T, L.cpu_dn->nb[1], L.cpu_dn->nb[2], 0));
     }
     dn = ggml_mul(c, dn, w);
-    ggml_tensor * moe = nullptr;
+    ggml_build_forward_expand(gf, dn);
+    ggml_tensor * v[64];                                     // the views before the adds (llama.cpp's order)
+    GGML_ASSERT(k <= 64);
     for (int i = 0; i < k; ++i) {
-        ggml_tensor * v = ggml_view_2d(c, dn, m.latent, T, dn->nb[2], i * dn->nb[1]);
-        moe = moe ? ggml_add(c, moe, v) : v;
+        v[i] = ggml_view_2d(c, dn, m.latent, T, dn->nb[2], i * dn->nb[1]);
+        ggml_build_forward_expand(gf, v[i]);
+    }
+    ggml_tensor * moe = v[0];
+    for (int i = 1; i < k; ++i) {
+        moe = ggml_add(c, moe, v[i]);
+        ggml_build_forward_expand(gf, moe);
     }
     moe = ggml_mul_mat(c, L.latent_up, moe);
     ggml_tensor * sh = ggml_mul_mat(c, L.down_sh, ggml_sqr(c, ggml_relu(c, ggml_mul_mat(c, L.up_sh, x))));
@@ -2870,60 +3160,57 @@ static ggml_tensor * lfm_attn_layer(Engine & e, ggml_context * c, ggml_cgraph * 
 }
 
 // the MoE (llama.cpp's build_moe_ffn with the sigmoid gate, norm_w): the bias only chooses, the chosen experts'
-// sigmoid weights normalized; SwiGLU experts, no shared expert.  pred_in / pred_in2: the next blocks' routers on this
-// block's residual, chosen in the same step (read ahead while the GPU goes on), as moe_layer
+// sigmoid weights normalized; SwiGLU experts, no shared expert.  Built in llama.cpp's order, so that the backends fuse
+// it as there: the choice and its weights first (sigmoid, bias, top-k, weights, norm: CUDA's topk-moe kernel), and the
+// weighted experts' views before their sum (Metal's MOE_REDUCE).  pred_in / pred_in2: the next blocks' routers on this
+// block's residual, chosen after it (read ahead while the GPU goes on), as moe_layer.  (--nostall: not for lfm2moe.)
 static ggml_tensor * lfm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, int il, ggml_tensor * x, int T,
                                    ggml_tensor * pred_in, ggml_tensor * pred_in2) {
     Model & m = e.m;
     Layer & L = m.layers[il];
+    const int k = m.n_used;
     ggml_tensor * lg = ggml_mul_mat(c, L.gate_inp, x);
     ggml_format_name(lg, "ffn_moe_logits-%d", il);
     ggml_tensor * probs = ggml_sigmoid(c, lg);                                            // [n_expert, T]
-    ggml_tensor * both = ggml_add(c, probs, L.exp_probs_b);
-    if (pred_in) {
-        const Layer & N = m.layers[il + 1];
-        both = ggml_concat(c, both, ggml_add(c, ggml_sigmoid(c, ggml_mul_mat(c, N.gate_inp, pred_in)), N.exp_probs_b), 1);
+    ggml_tensor * chosen = ggml_argsort_top_k(c, ggml_add(c, probs, L.exp_probs_b), k);  // [k, T] (a view)
+    ggml_tensor * w = ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, m.n_expert, T), chosen);   // [1, k, T]
+    w = ggml_reshape_2d(c, w, k, T);
+    w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
+    w = ggml_reshape_3d(c, w, 1, k, T);
+    if (m.exp_scale != 1.0f) w = ggml_scale(c, w, m.exp_scale);
+    ggml_build_forward_expand(gf, w);                        // (the routing's nodes in a row: fused)
+    // this block's choice, then the predicted blocks', in one tensor: what the stop or the mailbox reads
+    ggml_tensor * top = ggml_cont(c, chosen);                                             // [k, T (2T, 3T)]
+    for (int j = 1; j <= 2; ++j) {
+        ggml_tensor * in = j == 1 ? pred_in : pred_in2;
+        if (!in) continue;
+        const Layer & N = m.layers[il + j];
+        ggml_tensor * pl = ggml_add(c, ggml_sigmoid(c, ggml_mul_mat(c, N.gate_inp, in)), N.exp_probs_b);
+        top = ggml_concat(c, top, ggml_cont(c, ggml_argsort_top_k(c, pl, k)), 1);
     }
-    if (pred_in2) {
-        const Layer & N = m.layers[il + 2];
-        both = ggml_concat(c, both, ggml_add(c, ggml_sigmoid(c, ggml_mul_mat(c, N.gate_inp, pred_in2)), N.exp_probs_b), 1);
-    }
-    ggml_tensor * top = ggml_cont(c, ggml_argsort_top_k(c, both, m.n_used));            // [n_used, T (2T, 3T)]
-    const bool masked = !ns_paused(e, il);
     Group & G = e.pool.g[L.grp];
-    const bool big = staged(m.n_used, G.n_slots, T);         // the staging copy, by expert number
+    const bool big = staged(k, G.n_slots, T);                // the staging copy, by expert number
 #if defined(MOMOE_CUDA)
     const bool rmb = e.rmb && !big && T <= HYB_MAX_T;       // the resident mailbox (rmb_layer): no stop here
 #else
     const bool rmb = false;
 #endif
-    ggml_format_name(top, masked ? "want-%d" : rmb ? "rmbtopk-%d" : "topk-%d", il);
-    if (e.ns_graph) ggml_set_output(top);
+    ggml_format_name(top, rmb ? "rmbtopk-%d" : "topk-%d", il);
     e.topk[il] = top;
     ggml_build_forward_expand(gf, top);
-    ggml_tensor * ids = pred_in ? ggml_view_2d(c, top, m.n_used, T, top->nb[1], 0) : top;   // [n_used, T]
-    if (masked && e.nostall == 1)                            // sub: the best of the experts in the pool
-        ids = ggml_cont(c, ggml_argsort_top_k(c, ggml_add(c, ggml_add(c, probs, L.exp_probs_b), L.res_mask), m.n_used));
-    ggml_tensor * w = ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, m.n_expert, T), ids);   // [1, n_used, T]
-    if (masked && e.nostall == 2)                            // drop: the missing ones weigh nothing
-        w = ggml_mul(c, w, ggml_reshape_3d(c, ggml_get_rows(c, L.res_keep, ggml_reshape_1d(c, ids, (int64_t) m.n_used * T)),
-                                           1, m.n_used, T));
-    w = ggml_reshape_2d(c, w, m.n_used, T);
-    w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
-    if (m.exp_scale != 1.0f) w = ggml_scale(c, w, m.exp_scale);
-    w = ggml_reshape_3d(c, w, 1, m.n_used, T);
+    ggml_tensor * ids = pred_in ? ggml_view_2d(c, top, k, T, top->nb[1], 0) : top;     // [k, T], contiguous
     ggml_tensor * slots = nullptr;
 #if defined(MOMOE_CUDA)
     if (rmb) {                                               // the choice to the worker; the slots back from it
         MbLayer & B = e.mb.layer[il];
         B.send.n_i32 = (int32_t) ggml_nelements(top);
-        B.wait.n_f32 = m.n_used * T;
+        B.wait.n_f32 = k * T;
         ggml_tensor * args[2] = {ggml_view_1d(c, lg, 1, 0), top};
         ggml_tensor * send = ggml_custom_4d(c, GGML_TYPE_I32, 1, 1, 1, 1, args, 2, momoe_mailbox_cpu_stub, 1, &B.send);
         ggml_format_name(send, "rmbsend-%d", il);
         ggml_build_forward_expand(gf, send);
         ggml_tensor * wargs[1] = {send};
-        slots = ggml_custom_4d(c, GGML_TYPE_I32, m.n_used, T, 1, 1, wargs, 1, momoe_mailbox_cpu_stub, 1, &B.wait);
+        slots = ggml_custom_4d(c, GGML_TYPE_I32, k, T, 1, 1, wargs, 1, momoe_mailbox_cpu_stub, 1, &B.wait);
         ggml_format_name(slots, "rmbwait-%d", il);
         e.force_gpu.push_back(send);
         e.force_gpu.push_back(slots);
@@ -2931,7 +3218,7 @@ static ggml_tensor * lfm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
         e.mb.graph.push_back(il);
     } else
 #endif
-    slots = ggml_reshape_2d(c, ggml_get_rows(c, L.slot_map, ggml_reshape_1d(c, ids, (int64_t) m.n_used * T)), m.n_used, T);
+    slots = ggml_reshape_2d(c, ggml_get_rows(c, L.slot_map, ggml_reshape_1d(c, ids, (int64_t) k * T)), k, T);
     ggml_tensor * x3 = ggml_reshape_3d(c, x, m.n_embd, 1, T);
     ggml_tensor ** as = big ? G.stage : G.t;
     ggml_tensor * layer_t[3];
@@ -2943,15 +3230,24 @@ static ggml_tensor * lfm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
         as = layer_t;
     }
     if (big) slots = ids;
-    ggml_tensor * up = ggml_mul_mat_id(c, as[1], x3, slots);                            // [n_ff, n_used, T]
+    ggml_tensor * up = ggml_mul_mat_id(c, as[1], x3, slots);                            // [n_ff, k, T]
     ggml_tensor * gt = ggml_mul_mat_id(c, as[0], x3, slots);
-    ggml_tensor * dn = ggml_mul_mat_id(c, as[2], ggml_swiglu_split(c, gt, up), slots); // [n_embd, n_used, T]
+    ggml_tensor * dn = ggml_mul_mat_id(c, as[2], ggml_swiglu_split(c, gt, up), slots); // [n_embd, k, T]
+    if (helper_on(e, L, big))
+        dn = ggml_add(c, dn, helper_down(e, c, L, x3, ids, T, [&](ggml_tensor * g, ggml_tensor * u) { return ggml_swiglu_split(c, g, u); }));
     ggml_format_name(dn, "moe_down-%d", il);
     dn = ggml_mul(c, dn, w);
-    ggml_tensor * moe = nullptr;
-    for (int i = 0; i < m.n_used; ++i) {
-        ggml_tensor * v = ggml_view_2d(c, dn, m.n_embd, T, dn->nb[2], i * dn->nb[1]);
-        moe = moe ? ggml_add(c, moe, v) : v;
+    ggml_build_forward_expand(gf, dn);
+    ggml_tensor * v[64];                                     // the views before the adds (llama.cpp's order)
+    GGML_ASSERT(k <= 64);
+    for (int i = 0; i < k; ++i) {
+        v[i] = ggml_view_2d(c, dn, m.n_embd, T, dn->nb[2], i * dn->nb[1]);
+        ggml_build_forward_expand(gf, v[i]);
+    }
+    ggml_tensor * moe = v[0];
+    for (int i = 1; i < k; ++i) {
+        moe = ggml_add(c, moe, v[i]);
+        ggml_build_forward_expand(gf, moe);
     }
     ggml_format_name(moe, "ffn_moe_out-%d", il);
     return moe;
@@ -3119,7 +3415,13 @@ static ggml_tensor * glm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
     ggml_tensor * lg = ggml_mul_mat(c, L.gate_inp, x);
     ggml_format_name(lg, "ffn_moe_logits-%d", il);
     ggml_tensor * probs = ggml_sigmoid(c, lg);                                            // [n_expert, T]
-    ggml_tensor * top = ggml_cont(c, ggml_argsort_top_k(c, ggml_add(c, probs, L.exp_probs_b), k));
+    // llama.cpp's order (the routing's nodes in a row: CUDA's topk-moe kernel): the choice and its weights first
+    ggml_tensor * chosen = ggml_argsort_top_k(c, ggml_add(c, probs, L.exp_probs_b), k);  // [k, T] (a view)
+    ggml_tensor * w = ggml_reshape_2d(c, ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, m.n_expert, T), chosen), k, T);
+    w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
+    w = ggml_scale(c, ggml_reshape_3d(c, w, 1, k, T), m.exp_scale);
+    ggml_build_forward_expand(gf, w);
+    ggml_tensor * top = ggml_cont(c, chosen);
     ggml_tensor * both = top;
     if (pred_in) {                                           // [k, 2T]: this block's, then the next one's predicted
         const Layer & N = m.layers[il + 1];
@@ -3142,9 +3444,6 @@ static ggml_tensor * glm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
     e.topk[il] = both;
     ggml_build_forward_expand(gf, both);
     if (pred_in) top = ggml_view_2d(c, both, k, T, both->nb[1], 0);
-    ggml_tensor * w = ggml_reshape_2d(c, ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, m.n_expert, T), top), k, T);
-    w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
-    w = ggml_reshape_3d(c, ggml_scale(c, w, m.exp_scale), 1, k, T);
     ggml_tensor * slots = nullptr;
 #if defined(MOMOE_CUDA)
     if (rmb) {                                               // the choice to the worker; the slots back from it
@@ -3177,11 +3476,21 @@ static ggml_tensor * glm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
     ggml_tensor * up = ggml_mul_mat_id(c, as[1], x3, slots);                              // [n_ff, k, T]
     ggml_tensor * gt = ggml_mul_mat_id(c, as[0], x3, slots);
     ggml_tensor * dn = ggml_mul_mat_id(c, as[2], glm_swiglu(c, gt, up, m.clamp_exp[il]), slots);   // [n_embd, k, T]
+    if (helper_on(e, L, big))
+        dn = ggml_add(c, dn, helper_down(e, c, L, x3, top, T,
+                                         [&](ggml_tensor * g, ggml_tensor * u) { return glm_swiglu(c, g, u, m.clamp_exp[il]); }));
     dn = ggml_mul(c, dn, w);
-    ggml_tensor * moe = nullptr;
+    ggml_build_forward_expand(gf, dn);
+    ggml_tensor * v[64];                                     // the views before the adds (llama.cpp's order)
+    GGML_ASSERT(k <= 64);
     for (int i = 0; i < k; ++i) {
-        ggml_tensor * v = ggml_view_2d(c, dn, m.n_embd, T, dn->nb[2], i * dn->nb[1]);
-        moe = moe ? ggml_add(c, moe, v) : v;
+        v[i] = ggml_view_2d(c, dn, m.n_embd, T, dn->nb[2], i * dn->nb[1]);
+        ggml_build_forward_expand(gf, v[i]);
+    }
+    ggml_tensor * moe = v[0];
+    for (int i = 1; i < k; ++i) {
+        moe = ggml_add(c, moe, v[i]);
+        ggml_build_forward_expand(gf, moe);
     }
     ggml_tensor * sh = glm_swiglu(c, ggml_mul_mat(c, L.gate_sh, x), ggml_mul_mat(c, L.up_sh, x), m.clamp_sh[il]);
     sh = ggml_mul_mat(c, L.down_sh, sh);
@@ -3878,9 +4187,96 @@ static void fit_pool(Engine & e) {
                               * mem_total_gib() * 1073741824.0);
     fprintf(stderr, "momoe-cuda: %.2f GiB of VRAM free after the compute buffers: the pool gets %.2f GiB\n",
             fr / 1073741824.0, want / 1073741824.0);
+    if (n_cards(e) > 1) {                                    // --layer-split: each card's groups get what that card has
+        Pool & P = e.pool;
+        P.frac.assign(n_cards(e), 0.0);
+        for (int d = 0; d < n_cards(e); ++d) {
+            size_t f = 0, t = 0;
+            cudaSetDevice(d);
+            cudaMemGetInfo(&f, &t);
+            double have = 0, all = 0;
+            for (auto & G : P.g)
+                if (G.dev == d) { have += (double) G.bytes * G.n_slots; all += (double) G.bytes * G.n_all; }
+            const double w = std::max(0.0, have + (double) f - margin);
+            P.frac[d] = all > 0 ? w / all : 0.0;
+            fprintf(stderr, "momoe-cuda: card %d: %.2f GiB free after the compute buffers: its pool gets %.2f GiB of %.2f\n",
+                    d, f / 1073741824.0, std::min(w, all) / 1073741824.0, all / 1073741824.0);
+        }
+        cudaSetDevice(0);
+        make_pool(e, 0.0);
+        return;
+    }
     if (e.uma && want < std::min(4.0, uma_min_gib()) * 1073741824.0)   // (unified memory: what is left after the reserve cannot
         die("too little memory left for the expert pool: is another program holding it?");   // hold a useful pool)
     make_pool(e, std::max(0.0, want / (double) e.pool.all_bytes));
+#else
+    (void) e;
+#endif
+}
+
+// --helper-tier: the helper card's pool, a group for each of the main pool's (the same formats), each the same share
+// of its experts, with a slot of zeros; and each layer's expert -> helper slot table on that card.  Its size: the card's
+// free VRAM less --helper-reserve-mib (its compute buffers), at most --helper-gib
+static void make_hpool(Engine & e) {
+#if defined(MOMOE_CUDA)
+    Model & m = e.m;
+    Pool & P = e.pool, & H = e.hpool;
+    size_t fr = 0, tot = 0;
+    cudaSetDevice(1);
+    cudaMemGetInfo(&fr, &tot);
+    cudaSetDevice(e.device);
+    double room = (double) fr - e.helper_reserve_mib * 1048576.0;
+    if (e.helper_gib > 0) room = std::min(room, e.helper_gib * 1073741824.0);
+    const double frac = std::max(0.0, room) / (double) P.all_bytes;
+    ggml_init_params ip = {ggml_tensor_overhead() * (64 * (P.g.size() + 1) + m.n_layer + 4), nullptr, true};
+    ggml_context * ch = ggml_init(ip);
+    H.g.clear();
+    H.g.resize(P.g.size());
+    H.n_slots = 0;
+    H.pool_bytes = 0;
+    for (size_t gi = 0; gi < P.g.size(); ++gi) {
+        const Group & G = P.g[gi];
+        Group & K = H.g[gi];
+        for (int w = 0; w < 3; ++w) { K.type[w] = G.type[w]; K.ne[w][0] = G.ne[w][0]; K.ne[w][1] = G.ne[w][1]; }
+        K.bytes = G.bytes;
+        K.n_layers = G.n_layers;
+        K.n_all = G.n_all;
+        K.dev = 1;
+        K.n_slots = std::max(2, std::min((int) (frac * G.n_all), G.n_all) + 1);   // (+ the slot of zeros)
+        for (int w = m.part0(); w < 3; ++w) K.t[w] = ggml_new_tensor_3d(ch, K.type[w], K.ne[w][0], K.ne[w][1], K.n_slots);
+        K.owner.assign(K.n_slots, -1);
+        K.used.assign(K.n_slots, 0);
+        K.left.reset(new std::atomic<int>[K.n_slots]);
+        for (int i = 0; i < K.n_slots; ++i) K.left[i] = 0;
+        K.by_prefetch.assign(K.n_slots, 0);
+        K.zero = K.n_slots - 1;
+        K.used[K.zero] = UINT64_MAX;                         // never taken
+        H.n_slots += K.n_slots;
+        H.pool_bytes += K.bytes * K.n_slots;
+    }
+    for (auto & L : m.layers)
+        if (L.slot_map) L.hslot_map = ggml_new_tensor_2d(ch, GGML_TYPE_I32, 1, m.n_expert);
+    H.buf = ggml_backend_alloc_ctx_tensors(ch, e.helper_gpu);
+    if (!H.buf) die("--helper-tier: cannot allocate the helper's pool (lower --helper-gib)");
+    card_buf(H.buf, 1);
+    for (auto & K : H.g)
+        for (int w = m.part0(); w < 3; ++w) {
+            std::vector<char> z(K.t[w]->nb[2], 0);
+            tset(K.t[w], z.data(), (size_t) K.zero * K.t[w]->nb[2], z.size());
+        }
+    for (auto & L : m.layers) {
+        if (!L.hslot_map) continue;
+        L.hmap_host.assign(m.n_expert, H.g[L.grp].zero);
+        tset(L.hslot_map, L.hmap_host.data(), 0, ggml_nbytes(L.hslot_map));
+    }
+    const int all = m.n_layer * m.n_expert;
+    H.slot_of.assign(all, -1);
+    H.freq.assign(all, 0);
+    H.lfu = P.lfu;
+    H.all_bytes = P.all_bytes;
+    fprintf(stderr, "momoe-cuda: helper tier: its pool %d slots = %.2f GiB (%.0f%% of the experts; %.2f GiB free on the "
+            "card, %.0f MiB kept)\n", H.n_slots - (int) H.g.size(), H.pool_bytes / 1073741824.0,
+            100.0 * H.pool_bytes / P.all_bytes, fr / 1073741824.0, e.helper_reserve_mib);
 #else
     (void) e;
 #endif
@@ -4573,6 +4969,10 @@ int main(int argc, char ** argv) {
         else if (a == "--spec-min-p") spec_min_p = (float) atof(next());
         else if (a == "--profile") profile = next();
         else if (a == "--device") e.device = atoi(next());
+        else if (a == "--layer-split") e.split = next();     // (see Engine::split; momoe-cuda only)
+        else if (a == "--helper-tier") e.helper = true;      // (see Engine::helper; momoe-cuda only)
+        else if (a == "--helper-gib") e.helper_gib = atof(next());
+        else if (a == "--helper-reserve-mib") e.helper_reserve_mib = atof(next());
         else if (a == "--direct-io") g_direct = true;     // (see g_direct)
         else if (a == "--tokens" || a == "--tokens-file") {   // (a file: a long prompt, past the 128 KB of an argument)
             std::string s = next();
@@ -4626,10 +5026,17 @@ int main(int argc, char ** argv) {
         }
     }
 #endif
-    e.hybrid = !kHostMem && !g_direct && !getenv("MOMOE_NO_HYBRID");   // (--direct-io: the CPU's experts read the mapping)     // (nemo only, for now: hybrid_on)
+    // (--direct-io: the CPU's experts read the mapping; nemo only, for now: hybrid_on; --layer-split: the stops)
+    e.hybrid = !kHostMem && !g_direct && !getenv("MOMOE_NO_HYBRID") && e.split.empty() && !e.helper;
     load(e, model, pool_gib, slots);
     if (mtp_k > 0 && e.m.nemo) die("--mtp: not yet for Nemotron models");
     if (!kHostMem && pool_gib <= 0 && slots <= 0) fit_pool(e);
+    if (e.helper && kHostMem) die("--helper-tier: NVIDIA cards only");
+    if (e.helper && e.pool.n_slots + (int) e.pool.g.size() >= e.m.n_exp_all) {
+        fprintf(stderr, "momoe-cuda: helper tier: not used (the main card holds every expert)\n");
+        e.helper = false;
+    }
+    if (e.helper) make_hpool(e);
     if (e.hybrid && e.m.nemo)                                // the CPU's experts: the physical cores less the readers'
         e.cpu_x.start(getenv("MOMOE_CPU_THREADS") ? atoi(getenv("MOMOE_CPU_THREADS"))
                                                   : std::max(2, (int) std::thread::hardware_concurrency() / 2));
@@ -4971,6 +5378,9 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "momoe-metal: generated %d tokens in %.2f s (%.1f tok/s): hit rate %.1f%%, %.0f MiB read in %.2f s\n",
             n_gen, t_gen, n_gen / t_gen, 100.0 * gh / std::max<uint64_t>(1, gh + gm),
             (e.pool.bytes_read - pb) / 1048576.0, e.pool.read_s - pr);
+    if (e.helper)
+        fprintf(stderr, "momoe-cuda: helper tier: %llu chosen experts computed on the helper card, %llu evictions copied "
+                "down to it\n", (unsigned long long) e.helper_hits, (unsigned long long) e.helper_down);
     if (e.cpu_x.n_threads)
         fprintf(stderr, "momoe-cuda: hybrid: %llu of %llu chosen experts computed on the CPU (%d threads), %.2f s waited for "
                 "them\n", (unsigned long long) e.hyb_miss, (unsigned long long) (e.hyb_hits + e.hyb_miss),

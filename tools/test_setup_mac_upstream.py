@@ -39,7 +39,7 @@ M5 = {"machdep.cpu.brand_string": "Apple M5 Max", "hw.memsize": str(128 * 2 ** 3
 
 
 def setUpModule():
-    raise unittest.SkipTest("Momoe's Mac setup is mac_setup (momoe-metal); upstream's metal/setup_mac.py is not used")
+    raise unittest.SkipTest("Momoe's Mac setup is momoe_setup (momoe-metal); upstream's metal/setup_mac.py is not used")
 
 class MacCheck(unittest.TestCase):
     def test_reads_chip_memory_macos_and_tools(self):
@@ -185,7 +185,7 @@ class HandOver(unittest.TestCase):
     def test_other_platforms_never_reach_it(self):
         src = (ROOT / "setup.py").read_text(encoding="utf-8")
         self.assertIn('if sys.platform == "darwin":', src)
-        with mock.patch.object(setup, "mac_setup", side_effect=AssertionError("called")), \
+        with mock.patch.object(setup, "momoe_setup", side_effect=AssertionError("called")), \
                 mock.patch.object(setup.sys, "platform", "linux"), \
                 mock.patch.object(setup.sys, "argv", ["setup.py", "--inspect", "x"]), \
                 mock.patch.object(setup.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):

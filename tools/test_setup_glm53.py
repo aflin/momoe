@@ -1,4 +1,4 @@
-"""tools/test_setup_glm53.py - Momoe: GLM-5.3-Flash on the ggml engine (GGML_FAMILIES["glm53"], ggml_setup): the size
+"""tools/test_setup_glm53.py - Momoe: GLM-5.3-Flash on the ggml engine (GGML_FAMILIES["glm53"], momoe_setup): the size
 chosen by RAM, every offered size's files pinned with their sizes and SHA-256, the model card's sampling, and a GPU that
 shares the system's memory (the DGX Spark's GB10: nvidia-smi gives its memory as [N/A]) found as one."""
 from __future__ import annotations
@@ -19,6 +19,10 @@ GLM = setup.GGML_FAMILIES["glm53"]
 class GlmSize(unittest.TestCase):
     def test_the_default_on_the_spark(self):
         self.assertEqual(setup.ggml_size(GLM, None, 121.7), "UD-IQ3_XXS")
+
+    def test_the_smallest_on_a_64_gb_mac(self):
+        # no size fits 64 GB: the smallest file (UD-IQ3_XXS, 121 GB), not the first listed (UD-IQ4_XS, 157 GB)
+        self.assertEqual(setup.ggml_size(GLM, None, 64), "UD-IQ3_XXS")
 
     def test_the_larger_size_when_asked(self):
         self.assertEqual(setup.ggml_size(GLM, "UD-IQ4_XS", 121.7), "UD-IQ4_XS")

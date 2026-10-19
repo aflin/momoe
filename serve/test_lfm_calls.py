@@ -86,6 +86,69 @@ class LfmCalls(unittest.TestCase):
         self.assertIsNone(lfm_forced(None))
 
 
+class Opening(unittest.TestCase):
+    """LFM2.5-8B-A1B's template ends its prompt at "<|im_start|>assistant\n" (the 24B's: "...\n<think>"): the reply
+    opens its thinking itself, or answers at once (after a tool's result, measured)."""
+    def run_opening(self, chunks):
+        p = OutputParser(thinking=True, tools=TOOLS, stream_tools=True, lfm=True, opened=False)
+        evs = []
+        for c in chunks:
+            evs += p.feed(c)
+        evs += p.finish()
+        out = []
+        for e in evs:
+            if e.kind in ("content", "reasoning") and e.text:
+                if out and out[-1][0] == e.kind:
+                    out[-1] = (e.kind, out[-1][1] + e.text)
+                else:
+                    out.append((e.kind, e.text))
+            elif e.kind == "tool_call":
+                out.append(("tool_call", (e.call.name, e.call.arguments)))
+        return out
+
+    def test_own_think(self):
+        text = "<think>Let me check.</think>" + S + "[read_file(path='a.py')]" + E
+        want = [("reasoning", "Let me check."), ("tool_call", ("read_file", {"path": "a.py"}))]
+        self.assertEqual(self.run_opening([text]), want)
+        self.assertEqual(self.run_opening(list(text)), want)
+
+    def test_answer_at_once(self):
+        text = "The current weather in Paris is 14\u00b0C with light rain."
+        self.assertEqual(self.run_opening([text]), [("content", text)])
+        self.assertEqual(self.run_opening(list(text)), [("content", text)])
+
+    def test_whitespace_before_think_and_a_lone_part(self):
+        self.assertEqual(self.run_opening(["\n", "<th", "ink>x</think>y"]), [("reasoning", "x"), ("content", "y")])
+        self.assertEqual(self.run_opening(["<thi"]), [("content", "<thi")])
+        self.assertEqual(self.run_opening(["  \n"]), [])
+
+    def test_template_check(self):
+        from serve.server import template_opens_think
+        mk = lambda src, out: type("T", (), {"source": src, "render": lambda self, *a, **k: out})()
+        self.assertTrue(template_opens_think(mk("x <think> y", "<|im_start|>assistant\n<think>")))
+        self.assertFalse(template_opens_think(mk("x <think> y", "<|im_start|>assistant\n")))
+        self.assertTrue(template_opens_think(mk("no tag", "<|im_start|>assistant\n")))     # (says nothing of it)
+
+
+class PromptOpens(unittest.TestCase):
+    """Where a reply starts is read from the prompt itself: GLM-5.3-Flash's template ends every prompt with <think>
+    (thinking cannot be turned off), so a request without thinking still gets its reasoning apart (measured: it went
+    into the answer text)."""
+    def svc(self, src, tail):
+        from serve.server import Service
+        s = Service.__new__(Service)
+        s.template = type("T", (), {"source": src})()
+        s.tok = type("K", (), {"decode": lambda self, ids: tail})()
+        return s
+
+    def test_prompt_ending_in_think(self):
+        self.assertTrue(self.svc("x <think> y", "<|assistant|><think>").prompt_opens_think([1, 2, 3]))
+        self.assertTrue(self.svc("x <think> y", "assistant\n<think>\n").prompt_opens_think([1]))
+        self.assertFalse(self.svc("x <think> y", "<|im_start|>assistant\n").prompt_opens_think([1]))
+        self.assertFalse(self.svc("no tag", "<think>").prompt_opens_think([1]))   # (a template that never writes it)
+        self.assertFalse(self.svc("x <think> y", "<think>").prompt_opens_think([]))
+
+
 class LfmTemplate(unittest.TestCase):
     SRC = ("{{- bos_token -}}{%- for m in messages -%}<|im_start|>{{ m.role }}\n"
            "{%- if m.role == 'assistant' -%}{%- generation -%}{{ m.content }}{%- endgeneration -%}"

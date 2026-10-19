@@ -640,11 +640,11 @@ GGML_FAMILIES = {
               # the size setup installs: faster on the Spark than UD-IQ4_XS (server, 400-token chats, --mtp 3: 15.0 / 14.6
               # tok/s greedy / sampled against 11.7 / 10.4), its first 48 greedy tokens = llama.cpp's
               "default": "UD-IQ3_XXS",
-              "unified_only": True,
               # its own MTP block drafts 3 tokens a window (measured on the Spark, UD-IQ4_XS, greedy: 9.1 -> 10.9 tok/s,
               # 85% of the drafts accepted)
               "engine_args": ["--mtp", "3"],
-              "context": 65536, "min_vram_gb": 11,
+              # a 12 GB card cannot start it alone (dense 7.2 GiB + pool + staging): two share its layers (setup)
+              "context": 65536, "min_vram_gb": 16,
               "license": "MIT: https://huggingface.co/zai-org/GLM-5.3-Flash"},
     "lfm25": {"title": "LFM2.5-24B-A2B", "by": "Liquid AI; Unsloth's GGUFs",
               "about": "short convolutions + attention + MoE, 2.4B active, an agent model that always thinks; "
@@ -4676,7 +4676,8 @@ SAMPLING_NEMOTRON = {"temperature": 1.0, "top_p": 0.95}                  # Nemot
 SAMPLING_GLM53 = {"temperature": 1.0, "top_p": 0.95}                     # GLM-5.3-Flash: its card's evaluation settings
 SAMPLING_LFM25 = {"temperature": 0.1, "top_k": 50}                       # LFM2.5: the card's (and its repetition
                                                                           # penalty 1.05, which momoe-cuda does not apply)
-SAMPLING_LFM25_8B = {"temperature": 0.2, "top_k": 80}                    # LFM2.5-8B-A1B: its card's (the same penalty)
+SAMPLING_LFM25_8B = {"temperature": 0.2, "top_k": 64}                    # LFM2.5-8B-A1B: its card's (top_k 80 there: the
+                                                                          # server's sampler takes 1..64; the same penalty)
 
 
 def recommended_sampling(model_name) -> dict | None:
@@ -5857,8 +5858,14 @@ def sycl_setup(argv) -> int:
 # pool read from the SSD as needed. Measured on a MacBook Air M4 (32 GB): with a 5 GiB pool and a 32K context the
 # server's footprint is 8.6 GB (about 3 GiB more than the pool); every expert in memory needs ~28 GB of RAM.
 MAC_MODEL = "Ornith-1.5-IQ4_XS"
-MAC_EXPERTS_GIB = 16.4                                 # Ornith IQ4_XS's routed experts
+MAC_EXPERTS_GIB = 15.9                                 # Ornith IQ4_XS's routed experts (its MTP layer's: with the rest)
 MAC_KEEP_GIB = 11                                      # RAM left beside the pool: the engine's ~3 GiB, macOS and apps
+MAC_DENSE_GIB = 2.0                                    # Ornith IQ4_XS's other weights (MAC_KEEP_GIB holds them)
+MAC_GPU_SHARE = 0.75                                   # Metal's working-set limit (recommendedMaxWorkingSetSize: 48 GiB
+                                                       # on a 64 GB M1 Ultra): the pool, the other weights and
+MAC_GPU_MARGIN_GIB = 3.0                               # the compute buffers (and the KV cache, counted apart) must stay
+                                                       # under it (Swift IQ3_XXS: 40 + 4 GiB of weights and 1.5 of KV at
+                                                       # 64K with 2 GiB left: Metal out of memory on the M1 Ultra)
 
 
 def mac_memory_gib() -> float:
@@ -5868,90 +5875,6 @@ def mac_memory_gib() -> float:
         return int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout) / 2**30
     except (OSError, ValueError):
         return 0.0
-
-
-def mac_pool_gib(mem_gib: float) -> int | None:
-    """The expert pool for a Mac with this much RAM: None when every expert fits (no pool), else whole GiB."""
-    pool = int(mem_gib - MAC_KEEP_GIB)
-    return None if pool >= MAC_EXPERTS_GIB else max(pool, 3)
-
-
-def mac_setup(a, data: Path, port: int) -> int:
-    step(1, "checking your Mac")
-    chip = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
-    mem = mac_memory_gib()
-    say(f"  {chip or 'unknown chip'}, {mem:.0f} GB of memory")
-    if platform.machine() != "arm64":
-        fail("Momoe on a Mac needs Apple Silicon (M1 or later)")
-    if mem < 15.5:
-        fail(f"{mem:.0f} GB of memory: Momoe on a Mac needs at least 16 GB")
-    if subprocess.run(["xcode-select", "-p"], capture_output=True).returncode != 0:
-        fail("Xcode's command line tools are not installed (the engine is compiled here)",
-             "install them with:  xcode-select --install   then run momoe setup again")
-    if (a.family and a.family != "ornith") or (a.model and model_key("ornith", a.model) != MAC_MODEL):
-        fail("on a Mac Momoe sets up Ornith-1.5 IQ4_XS for now (the one tested with the Mac engine)",
-             "run momoe setup without --family / --model")
-    for opt in ("gpu", "gpus", "backend", "vision", "kv"):
-        if getattr(a, opt, None):
-            warn(f"--{opt.replace('_', '-')}: not used on a Mac")
-    pool = mac_pool_gib(mem)
-    ctx = a.context or (65536 if pool is None else 32768)
-    ok("every expert fits in memory" if pool is None else
-       f"a {pool} GiB expert pool (the rest of the experts are read from the SSD as needed), {ctx // 1024}K context")
-
-    step(2, "building the engine (momoe-metal)")
-    pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES, "Python packages (cmake, the server's)")
-    exe = ROOT / "build-metal" / "momoe-metal"
-    run(["sh", str(ROOT / "src" / "metal" / "build.sh")])
-    if not exe.exists():
-        fail("the engine did not build", f"see {ROOT / 'build-metal' / 'cmake.build.log'}")
-    ok(str(exe))
-
-    fam = FAMILIES["ornith"]
-    tag = fam["tag"] + size_of(MAC_MODEL)
-    gguf = Path(a.models_dir) / tag / model_file(fam, MAC_MODEL, 1)
-    step(3, f"downloading {fam['title']} {size_of(MAC_MODEL)} ({fam['sha256'][gguf.name][0] / 1e9:.1f} GB)")
-    if not (gguf.exists() and done(gguf)):
-        say(f"  The model goes in {gguf.parent}")
-        download(fam["hf"] + gguf.name, gguf)
-    verify_sha256(gguf, *fam["sha256"][gguf.name])
-    ok("model file present")
-
-    step(4, "the tokenizer")
-    pack = data / "packs" / tag.lower()
-    if not (pack / "tokenizer" / "vocab.json").exists():
-        run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(gguf), "--out", str(pack)],
-            quiet=True)
-    ok(str(pack / "tokenizer"))
-
-    step(5, "the config")
-    args = ["-m", str(gguf), "--ctx", str(ctx)]
-    if pool is not None:
-        args += ["--pool-gib", str(pool), "--nocache"]
-    draft = a.draft_vocab or "en"
-    args += ["--mtp", "4", "--draft-vocab", str(ROOT / "data" / DRAFT_VOCABS[draft])]
-    cfg_path = name_config(config_path_for(a.config_name, tag + "-mac") if a.config_name else
-                           config_dir() / "ornith-mac.json", a)
-    cfg = {"exe": str(exe), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
-           "model_name": f"{fam['name']}-{size_of(MAC_MODEL).lower()}", "log": str(ROOT / "logs" / (cfg_path.stem + ".log")),
-           "port": port, "setup_tag": tag, "fit_max_tokens": True}
-    if a.host:
-        cfg["host"] = a.host
-    if a.api_key:
-        cfg["api_key"] = a.api_key
-    write_setup_config(cfg_path, cfg)                  # what the user added to an earlier one is kept
-    ok(f"config: {cfg_path.name}")
-
-    say()
-    say("All set.")
-    say(f"  API (OpenAI):     http://127.0.0.1:{port}/v1")
-    say(f"  API (Anthropic):  http://127.0.0.1:{port}/v1/messages")
-    say(f"  Next time:        momoe start {cfg_path.stem}   (momoe stop ends it; momoe run claude|codex|opencode)")
-    say(f"  A speed test:     build-metal/momoe-metal -m {gguf} --tokens 760,6511,314,9338,369 -n 256"
-        + ("" if pool is None else f" --pool-gib {pool} --nocache"))
-    if a.no_start:
-        return 0
-    return start(cfg_path, port)
 
 
 def ggml_size(fam: dict, size: str | None, ram: float) -> str:
@@ -5965,97 +5888,324 @@ def ggml_size(fam: dict, size: str | None, ram: float) -> str:
     fits = [q for q, d in fam["models"].items() if ram >= d["ram_gb"]]
     if fam.get("default") in fits:                       # a family's measured pick (GLM on the Spark: UD-IQ3_XXS)
         return fam["default"]
-    return max(fits, key=lambda q: sum(p[2] for p in ggml_parts(fam, q))) if fits else next(iter(fam["models"]))
+    size = lambda q: sum(p[2] for p in ggml_parts(fam, q))
+    return max(fits, key=size) if fits else min(fam["models"], key=size)
 
 
-def ggml_setup(a, data: Path, port: int, family: str) -> int:
-    """A family on Momoe's ggml engine (GGML_FAMILIES: Nemotron 3.5 Bolt), on Linux with an NVIDIA card: the card and
-    the RAM, the size, momoe-cuda compiled here (src/metal/build_cuda.sh), the GGUF (pinned revision, size, SHA-256), its
-    tokenizer, the config (the model card's sampling), then the start.  The engine sizes its expert pool to the VRAM
-    left after its compute buffers, so there is nothing about VRAM to choose."""
-    fam = GGML_FAMILIES[family]
-    step(1, "checking your PC")
-    if WIN or sys.platform == "darwin":
-        fail(f"{fam['title']} runs on Linux with an NVIDIA card for now (Momoe's ggml engine, momoe-cuda)",
-             "on a Mac: momoe setup (Ornith-1.5); on Windows: not yet")
-    found = [g for g in gpus() if gpu_problem(g) is None]
-    if not found:
-        fail(f"no NVIDIA card Momoe can use: {fam['title']} needs one (nvidia-smi lists none, or none is new enough)")
-    if a.gpu is not None:
-        gpu = next((g for g in found if g["index"] == a.gpu), None)
-        if gpu is None:
-            fail(f"--gpu {a.gpu}: no such NVIDIA card here", "cards: " + ", ".join(str(g["index"]) for g in found))
+MAC_AVAIL_MARGIN_GIB = 6                               # left of what macOS can hand out now (the engine's own ~1 GiB)
+
+
+def mac_available_gib() -> float:
+    """What macOS can hand out now (free, inactive, speculative and purgeable pages), GiB; 0 when unknown."""
+    if os.environ.get("MOMOE_MAC_AVAILABLE_GIB"):       # tests
+        return float(os.environ["MOMOE_MAC_AVAILABLE_GIB"])
+    try:
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
+    except OSError:
+        return 0.0
+    page = int(re.search(r"page size of (\d+)", out).group(1)) if "page size of" in out else 16384
+    n = sum(int(m.group(2)) for m in re.finditer(r"Pages (free|inactive|speculative|purgeable):\s+(\d+)", out))
+    return n * page / 2**30
+
+
+def mac_pool_gib(mem_gib: float, experts_gib: float = MAC_EXPERTS_GIB, dense_gib: float = MAC_DENSE_GIB,
+                 avail_gib: float = 0.0, kv_gib: float = 0.0) -> int | None:
+    """The expert pool for a Mac with this much RAM: None when every expert fits (no pool), else whole GiB.  A model whose
+    other weights are larger than Ornith's (GLM-5.3-Flash: 9.8 GiB) leaves the pool that much less; and what the other
+    programs leave (avail_gib, when known) caps it (GLM-5.3-Flash on a 64 GB M1 Ultra whose other programs held ~20 GB:
+    a 35 GiB pool ran it out of memory, 20.9 GiB left 8 GB)."""
+    pool = min(mem_gib - MAC_KEEP_GIB - max(0.0, dense_gib - MAC_DENSE_GIB),
+               MAC_GPU_SHARE * mem_gib - dense_gib - kv_gib - MAC_GPU_MARGIN_GIB)   # (above it: a bus error, measured)
+    if avail_gib > 0:
+        pool = min(pool, avail_gib - dense_gib - kv_gib - MAC_AVAIL_MARGIN_GIB)
+    return None if pool >= experts_gib else max(int(pool), 3)
+
+
+def momoe_files(family: str, q: str) -> list:
+    """The files of a size installed by momoe_setup: [(URL, local name, bytes or None, SHA-256 or None)], the model's
+    first.  A ggml family's from ggml_parts; a Qwen family's shards by model_file, with the hashes setup pins for
+    them (the GSQ-RCO files have none: check_shards checks those against their own tensor directories)."""
+    if family in GGML_FAMILIES:
+        fam = GGML_FAMILIES[family]
+        return [(fam["hf"] + path, name, size, sha) for path, name, size, sha in ggml_parts(fam, q)]
+    fam = FAMILIES[family]
+    out = []
+    for i in range(1, model_shards(fam, q) + 1):
+        name = model_file(fam, q, i)
+        size, sha = fam.get("sha256", {}).get(name, (None, None))
+        out.append((fam["hf"].format(q=size_of(q)) + name, name, size, sha))
+    return out
+
+
+def momoe_sizes(family: str) -> dict:
+    """A family's sizes for momoe_setup: {size: (about, RAM in GB it wants)} (a Qwen family's MODELS entries, the
+    experimental ones last)."""
+    if family in GGML_FAMILIES:
+        return {q: (d["about"], d["ram_gb"]) for q, d in GGML_FAMILIES[family]["models"].items()}
+    names = [m for m in MODELS if family in MODELS[m].get("families", ("qwen", "swift"))]
+    names.sort(key=lambda m: bool(MODELS[m].get("experimental")))
+    return {m: (MODELS[m]["about"], MODELS[m]["ram_gb"]) for m in names}
+
+
+def momoe_size(family: str, size: str | None, ram: float) -> str:
+    """The size to install: --model's, else a ggml family's rule (ggml_size), else the main path's recommendation
+    (small_size for the 35B-A3B families, recommended_size for the Flash-Next ones)."""
+    if family in GGML_FAMILIES:
+        return ggml_size(GGML_FAMILIES[family], size, ram)
+    names = list(momoe_sizes(family))
+    if size:
+        m = model_key(family, size)
+        if m not in names:
+            fail(f"{FAMILIES[family]['title']} has no size {size}", "sizes: " + ", ".join(map(size_of, names)))
+        return m
+    return small_size(family, ram) if small_family(family) else recommended_size(family, names, ram)
+
+
+def momoe_title(family: str) -> str:
+    return (GGML_FAMILIES.get(family) or FAMILIES[family])["title"]
+
+
+# the families momoe_setup offers, in its menu's order (NVFP4's packs are Strata's own format: its engine only)
+MOMOE_MENU = ("ornith", "qwen36", "qwen36-bartowski", "kat-coder", "qwen", "swift", "coder", "unsloth", "bolt", "glm53",
+              "lfm25", "lfm25-8b")
+
+
+def momoe_menu(a, ram: float) -> str:
+    """--family, else a menu of every family momoe_setup installs, the first whose suggested size fits the memory
+    pre-selected (Ornith-1.5 where it fits: the one tested most on Macs)."""
+    if a.family:
+        if a.family not in MOMOE_MENU:
+            fail(f"--family {a.family}: not on this machine (Strata's engine on a PC with its own graphics card only)",
+                 "families here: " + ", ".join(MOMOE_MENU))
+        return a.family
+    fits = [f for f in MOMOE_MENU if momoe_sizes(f)[momoe_size(f, None, ram)][1] <= ram]
+    rec = next((f for f in ("ornith", "lfm25", "lfm25-8b") if f in fits), MOMOE_MENU[0])
+    say()
+    for i, f in enumerate(MOMOE_MENU, 1):
+        q = momoe_size(f, None, ram)
+        need = momoe_sizes(f)[q][1]
+        say(f"  {i}) {momoe_title(f):28s} {size_of(q):11s} needs ~{need} GB" + ("" if f in fits else
+            f"   <- this machine has {ram:.0f} GB: experts read from the SSD (slower)"))
+    pick = int(ask("Which model?", [str(i) for i in range(1, len(MOMOE_MENU) + 1)], str(MOMOE_MENU.index(rec) + 1), a.yes))
+    return MOMOE_MENU[pick - 1]
+
+
+def kv_bytes_per_token(files: list) -> int:
+    """The KV cache a token takes (keys and values, f16) in the model's attention layers, from its metadata: the
+    layers with KV heads (a per-layer list), else one in full_attention_interval, else every block; 0 when unknown."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    from gguf_reader import GGUFFile
+    md = GGUFFile(files[0]).metadata
+    a = md.get("general.architecture", "")
+    kv = md.get(f"{a}.attention.head_count_kv")
+    blocks = int(md.get(f"{a}.block_count", 0) or 0)
+    head = int(md.get(f"{a}.attention.key_length") or 0) or (
+        int(md.get(f"{a}.embedding_length", 0) or 0) // max(1, int(md.get(f"{a}.attention.head_count", 1) or 1)))
+    if isinstance(kv, list):
+        return sum(int(x) for x in kv) * head * 2 * 2
+    every = int(md.get(f"{a}.full_attention_interval", 0) or 0)
+    layers = blocks // every if every else blocks
+    return layers * int(kv or 0) * head * 2 * 2
+
+
+def weights_gib(files: list) -> tuple:
+    """A model's routed experts (the tensors named *_exps) and its other weights the GPU holds, GiB: not the PLE table,
+    whose rows the CPU reads from the file; the MTP layer's experts with the others (the engine loads that layer
+    whole: GLM-5.3-Flash's 2.4 GiB, measured as its 9.8 GiB of dense weights)."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    from gguf_reader import GGUFFile
+    first = GGUFFile(files[0])
+    arch = first.metadata.get("general.architecture", "")
+    n_blocks = int(first.metadata.get(f"{arch}.block_count", 0) or 0)
+    mtp0 = n_blocks - int(first.metadata.get(f"{arch}.nextn_predict_layers", 0) or 0)
+    exps = rest = 0
+    for f in files:
+        for t in (first if f == files[0] else GGUFFile(f)).tensors:
+            m = re.match(r"blk\.(\d+)\.", t.name)
+            mtp = m is not None and int(m.group(1)) >= mtp0
+            if "_exps" in t.name and not mtp:
+                exps += t.expected_bytes() or 0
+            elif t.name != "per_layer_token_embd.weight":
+                rest += t.expected_bytes() or 0
+    return exps / 2**30, rest / 2**30
+
+
+def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
+    """A model on Momoe's ggml engine: momoe-metal on an Apple Silicon Mac, momoe-cuda on Linux with an NVIDIA card.
+    Every GGUF family: the ggml families (Bolt, GLM-5.3-Flash, LFM2.5) everywhere, the Qwen families on a Mac and on a
+    GPU that shares the system's memory (the DGX Spark, a Jetson: Strata's engine is not built there).  The machine,
+    the size, the engine compiled here, the files (pinned sizes and SHA-256 where setup has them), the tokenizer, the
+    config (the model card's sampling), then the start.  On CUDA the engine sizes its expert pool itself; on a Mac
+    the experts that do not fit beside macOS (MAC_KEEP_GIB) are read from the SSD (--pool-gib, --nocache)."""
+    mac = sys.platform == "darwin"
+    step(1, "checking your " + ("Mac" if mac else "PC"))
+    if WIN:
+        fail("Momoe's ggml engine runs on Linux with an NVIDIA card and on Apple Silicon Macs for now")
+    if mac:
+        chip = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
+        ram = mac_memory_gib()
+        say(f"  {chip or 'unknown chip'}, {ram:.0f} GB of memory")
+        if platform.machine() != "arm64":
+            fail("Momoe on a Mac needs Apple Silicon (M1 or later)")
+        if subprocess.run(["xcode-select", "-p"], capture_output=True).returncode != 0:
+            fail("Xcode's command line tools are not installed (the engine is compiled here)",
+                 "install them with:  xcode-select --install   then run momoe setup again")
+        for opt in ("gpu", "gpus", "backend", "vision", "kv"):
+            if getattr(a, opt, None):
+                warn(f"--{opt.replace('_', '-')}: not used on a Mac")
+        gpu, unified = None, True
     else:
-        gpu = max(found, key=lambda g: (round(g["vram_gb"]), -g["index"]))
-    if a.gpus:
-        warn(f"{fam['title']} runs on one card: using GPU {gpu['index']} ({gpu_name(gpu)})")
-    ram = ram_gb()
-    unified = gpu.get("unified", False)
-    say(f"  {gpu_name(gpu)}; {ram:.0f} GB of RAM" + (" shared with the GPU" if unified else ""))
-    if fam.get("unified_only") and not unified:
-        warn(f"{fam['title']} is set up for a GPU that shares the system's memory (the DGX Spark): with a separate "
-             "card the whole model has to stay in the file cache (its size in RAM, and more), or the OS reads experts "
-             "from the SSD a page at a time (measured: llama.cpp, 2.3 tok/s on the Spark that way)")
-    if not unified and gpu["vram_gb"] < fam["min_vram_gb"]:
-        warn(f"{fam['title']} was measured on a 12 GB card: on {gpu['vram_gb']:.0f} GB the dense weights (~5 GB), the "
-             "compute buffers and the prompt staging leave little room for experts on the GPU (slower)")
-    q = ggml_size(fam, a.model, ram)
-    need = fam["models"][q]["ram_gb"]
+        found = [g for g in gpus() if gpu_problem(g) is None]
+        if not found:
+            fail("no NVIDIA card Momoe can use: Momoe's ggml engine needs one (nvidia-smi lists none, or none is new "
+                 "enough)")
+        if a.gpu is not None:
+            gpu = next((g for g in found if g["index"] == a.gpu), None)
+            if gpu is None:
+                fail(f"--gpu {a.gpu}: no such NVIDIA card here", "cards: " + ", ".join(str(g["index"]) for g in found))
+        else:                                        # the most memory; of equal ones the newer card (an RTX 4070
+            gpu = max(found, key=lambda g: (round(g["vram_gb"]), int(g["arch"]) if str(g.get("arch", "")).isdigit()
+                                            else 0, -g["index"]))   # Ti before an RTX 3060, both 12 GB)
+        ram = ram_gb()
+        unified = gpu.get("unified", False)
+        say(f"  {gpu_name(gpu)}; {ram:.0f} GB of RAM" + (" shared with the GPU" if unified else ""))
+    family = family or momoe_menu(a, ram)
+    if family in FAMILIES and FAMILIES[family].get("ready"):
+        fail(f"{FAMILIES[family]['title']}'s packs are Strata's own format: its engine runs them, on a PC with its own "
+             "NVIDIA card", "UD-IQ4_XS is about the same size: --family unsloth --model UD-IQ4_XS")
+    fam = GGML_FAMILIES.get(family) or FAMILIES[family]
+    cards = []                                         # several cards: a layer split, or the helper tier
+    if a.gpus and not mac:
+        sel = [g["index"] for g in found] if str(a.gpus).strip().lower() == "all" else named_gpus(None, a.gpus)
+        cards = [g for i in sel for g in found if g["index"] == i]
+        if len(cards) != len(sel) or len(cards) < 2:
+            fail(f"--gpus {a.gpus}: name two or more of the cards Momoe can use", "cards: " +
+                 ", ".join(f"{g['index']} ({gpu_name(g)})" for g in found))
+    elif not mac and not unified and family in GGML_FAMILIES and gpu["vram_gb"] < fam["min_vram_gb"] and len(found) > 1:
+        # (GLM-5.3-Flash on a 12 GB card: its dense weights, a pool and the prompt staging do not fit; two cards
+        # share its layers - measured on an RTX 4070 Ti + RTX 3060)
+        cards = sorted(found, key=lambda g: g["index"])     # (the server stages the faster card last: "auto")
+        say(f"  {fam['title']} needs a card of about {fam['min_vram_gb']} GB: its layers are split across "
+            + " + ".join(gpu_name(g) for g in cards) + " (--gpus to choose)")
+    if a.helper_tier and len(cards) != 2:
+        fail("--helper-tier takes two cards: --gpus MAIN,HELPER")
+    q = momoe_size(family, a.model, ram)
+    need = momoe_sizes(family)[q][1]
+    files = momoe_files(family, q)
     if ram < need:
-        warn(f"{q} wants about {need} GB of RAM and this PC has {ram:.0f} GB: the OS will read experts from the SSD "
-             "(much slower); close other programs")
-    for opt in ("backend", "vision", "kv", "draft_vocab"):
+        warn(f"{size_of(q)} wants about {need} GB of memory and this machine has {ram:.0f} GB: the experts that do not "
+             "fit are read from the SSD (slower); close other programs")
+    if not mac and not unified and family == "glm53":
+        warn(f"{fam['title']} is {sum(f[2] or 0 for f in files) / 1e9:.0f} GB: with a separate card the experts the "
+             "card cannot hold come from the file cache, and what the RAM cannot hold from the SSD (slower)")
+    if not mac and not unified and family in GGML_FAMILIES and gpu["vram_gb"] < fam["min_vram_gb"] and not cards:
+        warn(f"{fam['title']} wants a card of about {fam['min_vram_gb']} GB: on {gpu['vram_gb']:.0f} GB the dense weights, "
+             "the compute buffers and the prompt staging leave little room for experts on the GPU (slower, or it does "
+             "not start)")
+    for opt in ("backend", "vision", "kv") if not mac else ():
         if getattr(a, opt, None):
-            warn(f"--{opt.replace('_', '-')}: not used for {fam['title']}")
-    nvcc, ver = find_nvcc()
-    if not nvcc:
-        fail("no CUDA toolkit (nvcc) was found: the engine is compiled here",
-             "install NVIDIA's CUDA toolkit (12.4 or newer), or set STRATA_NVCC=/path/to/nvcc, and run setup again")
-    ctx = a.context or fam["context"]
-    if unified and ram < 16 and not a.context:          # (a Jetson: the KV cache comes out of the file cache's memory)
-        ctx = min(ctx, 16384)
-    ok(f"model: {fam['title']} {q} on GPU {gpu['index']}, {ctx // 1024}K context")
+            warn(f"--{opt.replace('_', '-')}: not used for {fam['title']} on Momoe's ggml engine")
+    own_mtp = bool(fam.get("own_mtp"))
+    if not mac:
+        nvcc, ver = find_nvcc()
+        if not nvcc:
+            fail("no CUDA toolkit (nvcc) was found: the engine is compiled here",
+                 "install NVIDIA's CUDA toolkit (12.4 or newer), or set STRATA_NVCC=/path/to/nvcc, and run setup again")
+    ok(f"model: {fam['title']} {size_of(q)}" + ("" if mac else f" on GPU {gpu['index']}"))
     if fam.get("license"):
         say(f"  Its license: {fam['license']}")
 
-    step(2, "building the engine (momoe-cuda; the first build takes 10-20 minutes)")
-    pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES, "Python packages (cmake, the server's)")
-    exe = ROOT / "build-cuda" / "momoe-cuda"
-    archs = ";".join(sorted({g["arch"] for g in found}))
-    env = dict(os.environ, NVCC=nvcc, CUDA_ARCHS=archs, PATH=str(Path(nvcc).parent) + os.pathsep + os.environ.get("PATH", ""))
-    run(["sh", str(ROOT / "src" / "metal" / "build_cuda.sh")], env=env)
-    if not exe.exists():
-        fail("the engine did not build", f"see {ROOT / 'build-cuda' / 'cmake.build.log'}")
-    ok(f"{exe} (CUDA {ver[0]}.{ver[1]}, sm {archs.replace(';', ', ')})")
+    if mac:
+        step(2, "building the engine (momoe-metal)")
+        pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES, "Python packages (cmake, the server's)")
+        exe = ROOT / "build-metal" / "momoe-metal"
+        run(["sh", str(ROOT / "src" / "metal" / "build.sh")])
+        if not exe.exists():
+            fail("the engine did not build", f"see {ROOT / 'build-metal' / 'cmake.build.log'}")
+        ok(str(exe))
+    else:
+        step(2, "building the engine (momoe-cuda; the first build takes 10-20 minutes)")
+        pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES, "Python packages (cmake, the server's)")
+        exe = ROOT / "build-cuda" / "momoe-cuda"
+        archs = ";".join(sorted({g["arch"] for g in found}))
+        env = dict(os.environ, NVCC=nvcc, CUDA_ARCHS=archs,
+                   PATH=str(Path(nvcc).parent) + os.pathsep + os.environ.get("PATH", ""))
+        run(["sh", str(ROOT / "src" / "metal" / "build_cuda.sh")], env=env)
+        if not exe.exists():
+            fail("the engine did not build", f"see {ROOT / 'build-cuda' / 'cmake.build.log'}")
+        ok(f"{exe} (CUDA {ver[0]}.{ver[1]}, sm {archs.replace(';', ', ')})")
 
-    tag = fam["tag"] + q
-    parts = ggml_parts(fam, q)
-    gguf = Path(a.models_dir) / tag / parts[0][1]
-    step(3, f"downloading {fam['title']} {q} ({sum(p[2] for p in parts) / 1e9:.1f} GB"
-            + (f", {len(parts)} files)" if len(parts) > 1 else ")"))
-    say(f"  The model goes in {gguf.parent}")
-    for path, name, size, sha in parts:                # (a split model: every file, each checked)
-        f = gguf.parent / name
+    tag = fam["tag"] + size_of(q)
+    folder = Path(a.models_dir) / tag
+    paths = [folder / f[1] for f in files]
+    known = sum(f[2] or 0 for f in files)
+    step(3, f"downloading {fam['title']} {size_of(q)}"
+            + (f" ({known / 1e9:.1f} GB" + (f", {len(files)} files)" if len(files) > 1 else ")") if known else ""))
+    say(f"  The model goes in {folder}")
+    for (url, name, size, sha), f in zip(files, paths):
         if not (f.exists() and done(f)):
-            download(fam["hf"] + path, f)
-        verify_sha256(f, size, sha)
-    ok("model file present" if len(parts) == 1 else f"model files present ({len(parts)})")
+            # the original Flash-Next's shard 2 is the same file for all its sizes and the Coder's: one already here
+            other = [p for p in Path(a.models_dir).glob("*/Qwen3.8-Flash-Next-GSQ-RCO-*-00002-of-00002.gguf") if done(p)]
+            if family in ("qwen", "coder") and name.endswith("00002-of-00002.gguf") and other and not f.exists():
+                try:
+                    f.parent.mkdir(parents=True, exist_ok=True)
+                    os.link(other[0], f)
+                    mark(f)
+                    ok(f"{name} shared with {other[0].parent.name} (identical file)")
+                    continue
+                except OSError:
+                    pass
+            download(url, f)
+        if sha:
+            verify_sha256(f, size, sha)
+    check_shards(paths)
+    ok("model file present" if len(paths) == 1 else f"model files present ({len(paths)})")
 
     step(4, "the tokenizer")
     pack = data / "packs" / tag.lower()
     if not (pack / "tokenizer" / "vocab.json").exists():
-        run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(gguf), "--out", str(pack)],
+        run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(paths[0]), "--out", str(pack)],
             quiet=True)
     ok(str(pack / "tokenizer"))
 
     step(5, "the config")
+    # the context: --context, the family's, else on a Mac 64K when every expert fits beside its KV cache, else 32K; at
+    # most 16K where the memory is under 16 GB (a Jetson, an 8 GB Mac: the KV cache takes the experts' memory)
+    pool, ctx = None, a.context or fam.get("context") or 32768
+    if mac:
+        w, kvt, avail = weights_gib(paths), kv_bytes_per_token(paths), mac_available_gib()
+        fixed = a.context or fam.get("context")
+        for c in ((fixed,) if fixed else (65536, 32768)):
+            c = min(c, 16384) if ram < 16 and not a.context else c
+            pool, ctx = mac_pool_gib(ram, *w, avail, kvt * c / 2**30), c
+            if pool is None:
+                break
+    if unified and ram < 16 and not a.context:
+        ctx = min(ctx, 16384)
+    args = ["-m", str(paths[0]), "--ctx", str(ctx)]
+    if mac:
+        if pool is not None:
+            args += ["--pool-gib", str(pool), "--nocache"]
+        ok(("every expert fits in memory" if pool is None else
+            f"a {pool} GiB expert pool (the rest of the experts are read from the SSD as needed)") + f", {ctx // 1024}K context")
+    else:
+        args += ["--chunk", "1024"]
+        ok(f"{ctx // 1024}K context")
+    if own_mtp:                                          # the 35B-A3B families draft with the file's own MTP layer
+        args += ["--mtp", "4", "--draft-vocab", str(ROOT / "data" / DRAFT_VOCABS[a.draft_vocab or "en"])]
+    args += fam.get("engine_args", [])
+    cfg_name = "ornith-mac" if mac and q == MAC_MODEL else tag   # (Ornith's Mac config keeps its first name)
     cfg_path = name_config(config_path_for(a.config_name, tag) if a.config_name else
-                           config_dir() / f"{tag.lower()}.json", a)
-    cfg = {"exe": str(exe), "args": ["-m", str(gguf), "--ctx", str(ctx), "--chunk", "1024", *fam.get("engine_args", [])],
-           "cwd": str(ROOT),
-           "tokenizer": str(pack / "tokenizer"), "model_name": f"{fam['name']}-{q.lower()}",
-           "log": str(ROOT / "logs" / (cfg_path.stem + ".log")), "port": port, "gpu": gpu["index"], "setup_tag": tag,
-           "fit_max_tokens": True}                    # (the model card's sampling: write_setup_config)
+                           config_dir() / f"{cfg_name.lower()}.json", a)
+    cfg = {"exe": str(exe), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
+           "model_name": f"{fam['name']}-{size_of(q).lower()}", "log": str(ROOT / "logs" / (cfg_path.stem + ".log")),
+           "port": port, "setup_tag": tag, "fit_max_tokens": True}   # (the model card's sampling: write_setup_config)
+    if not mac:
+        cfg["gpu"] = [g["index"] for g in cards] if cards else gpu["index"]
+        if cards and a.helper_tier:                     # the first card runs the model, the second is its helper
+            cfg["args"].append("--helper-tier")
+        elif cards and a.layer_split:
+            cfg["layer_split"] = a.layer_split
     if a.host:
         cfg["host"] = a.host
     if a.api_key:
@@ -6444,7 +6594,7 @@ def preview_family(a) -> int:
 
 
 def main() -> int:
-    # Momoe: a Mac is set up by mac_setup below (momoe-metal); upstream's metal/setup_mac.py (its Metal engine, Flash-Next)
+    # Momoe: a Mac is set up by momoe_setup below (momoe-metal); upstream's metal/setup_mac.py (its Metal engine, Flash-Next)
     # is not called - upstream_mac_setup runs it
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--family", choices=[f for f in FAMILIES if not FAMILIES[f].get("ready")] + list(GGML_FAMILIES), help="qwen = Qwen3.8-Flash-Next, swift = Swift 1.5, coder = its "
@@ -6687,10 +6837,13 @@ def main() -> int:
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
 
-    if a.family in GGML_FAMILIES:                    # Momoe's ggml engine (Nemotron 3.5 Bolt)
-        return ggml_setup(a, data, port, a.family)
-    if sys.platform == "darwin":                     # an Apple Silicon Mac: the Metal engine
-        return mac_setup(a, data, port)
+    if a.family in GGML_FAMILIES:                    # Momoe's ggml engine (Bolt, GLM-5.3-Flash, LFM2.5)
+        return momoe_setup(a, data, port, a.family)
+    if sys.platform == "darwin":                     # an Apple Silicon Mac: momoe-metal, every GGUF family
+        return momoe_setup(a, data, port)
+    if not WIN and a.backend != "hip" and any(g.get("unified") and gpu_problem(g) is None for g in gpus()):
+        return momoe_setup(a, data, port)            # a GPU sharing the RAM (the Spark, a Jetson): momoe-cuda for every
+                                                     # family (Strata's engine is not built there)
     # ---- 1. the PC
     step(1, "checking your PC")
     found = gpus()
@@ -6931,7 +7084,7 @@ def main() -> int:
         pick = int(ask("Which model?", [str(i) for i in range(1, len(fams) + len(extra) + 1)],
                        str(fams.index(rec_fam) + 1), a.yes))
         if pick > len(fams):
-            return ggml_setup(a, data, port, extra[pick - len(fams) - 1])
+            return momoe_setup(a, data, port, extra[pick - len(fams) - 1])
         family = fams[pick - 1]
     fam = FAMILIES[family]
     if fam.get("ready") and hip:

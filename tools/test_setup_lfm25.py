@@ -1,5 +1,5 @@
 """tools/test_setup_lfm25.py - Momoe: LFM2.5-24B-A2B and LFM2.5-8B-A1B on the ggml engine (GGML_FAMILIES["lfm25"],
-["lfm25-8b"], ggml_setup): the size chosen by RAM, every offered size's file pinned with its size and SHA-256, each model
+["lfm25-8b"], momoe_setup): the size chosen by RAM, every offered size's file pinned with its size and SHA-256, each model
 card's sampling, and the tokenizer's `lfm2` pre-tokenizer (llama.cpp's llama3 pattern, ignore_merges, the bos token
 named in the pack)."""
 from __future__ import annotations
@@ -56,7 +56,8 @@ class LfmFiles(unittest.TestCase):
 class LfmSampling(unittest.TestCase):
     def test_the_cards(self):
         self.assertEqual(setup.recommended_sampling(LFM["name"] + "-ud-iq3_xxs"), {"temperature": 0.1, "top_k": 50})
-        self.assertEqual(setup.recommended_sampling(LFM8["name"] + "-ud-q4_k_xl"), {"temperature": 0.2, "top_k": 80})
+        # the 8B's card says top_k 80; the server's sampler takes 1..64 (a config above it does not start)
+        self.assertEqual(setup.recommended_sampling(LFM8["name"] + "-ud-q4_k_xl"), {"temperature": 0.2, "top_k": 64})
 
 
 class LfmTokenizer(unittest.TestCase):

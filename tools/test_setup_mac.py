@@ -17,8 +17,9 @@ import setup  # noqa: E402
 
 class Pool(unittest.TestCase):
     def test_pool_by_memory(self):
-        # 16 GB: 5 GiB (measured: an 8.6 GB server); every expert in memory from ~28 GB
-        for mem, pool in ((16, 5), (18, 7), (24, 13), (27, 16), (28, None), (32, None), (64, None)):
+        # 16 GB: 5 GiB (measured: an 8.6 GB server); every expert (15.9 GiB; the MTP layer's with the other weights)
+        # in memory from ~28 GB (Metal's working set, 75%, less the other weights and 3 GiB for the compute buffers)
+        for mem, pool in ((16, 5), (18, 7), (24, 13), (26, 14), (27, 15), (28, None), (32, None), (64, None)):
             self.assertEqual(setup.mac_pool_gib(mem), pool, mem)
 
     def test_never_below_3(self):

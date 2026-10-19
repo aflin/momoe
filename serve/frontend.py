@@ -700,7 +700,7 @@ class Event:
     call: ToolCall | None = None
 
 
-THINK_END = "</think>"
+THINK_START, THINK_END = "<think>", "</think>"
 CALL_START = "<tool_call>"
 CALL_END = "</tool_call>"
 
@@ -1133,10 +1133,13 @@ class OutputParser:
     until it is complete, so clients never see `<tool_` or `</thi`."""
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
-                 recover: bool = False, glm: bool = False, lfm: bool = False):
+                 recover: bool = False, glm: bool = False, lfm: bool = False, opened: bool = True):
         # GLM-5's or LFM2's call format, rewritten into this one as it arrives
         self.glm = GlmCallRewriter() if glm else LfmCallRewriter() if lfm else None
-        self.state = "reasoning" if thinking else "content"
+        # opened: the prompt ends inside the thinking (its template wrote <think>); a template that leaves it to the
+        # model (LFM2.5-8B-A1B) starts in "opening": the reply's own <think> opens the reasoning, anything else is the
+        # answer
+        self.state = ("reasoning" if opened else "opening") if thinking else "content"
         self.buf = ""
         self.lead = False
         self.schemas = {t.get("name"): t for t in tools or []}
@@ -1451,6 +1454,15 @@ class OutputParser:
         self.buf += delta
         out: list[Event] = []
         while True:
+            if self.state == "opening":
+                s = self.buf.lstrip()
+                if not s or (THINK_START.startswith(s) and s != THINK_START):
+                    return out                       # (held: whitespace so far, or a part of the tag)
+                if s.startswith(THINK_START):
+                    self.buf, self.state = s[len(THINK_START):], "reasoning"
+                else:
+                    self.buf, self.state = s, "content"
+                continue
             if self.state == "rcall":
                 # #804: a `<tool_call>` inside the reasoning, with tools declared.  It is held whole (never streamed
                 # as a call) until it ends: a declared name is then a tool call, anything else stays reasoning text.
@@ -1698,6 +1710,8 @@ class OutputParser:
             return out
         if self.state == "reasoning" and self.buf == THINK_END:   # the output ends on a held `</think>`: its end
             self.buf, self.state = "", "content"
+        if self.state == "opening":
+            self.buf = self.buf.strip()           # (a reply of whitespace, or a lone part of <think>: the answer)
         if self.buf:
             # an unfinished call inside the reasoning (#804) is reasoning text, never a call
             kind = {"reasoning": "reasoning", "rcall": "reasoning", "content": "content"}.get(self.state, "content")
