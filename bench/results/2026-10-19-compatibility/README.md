@@ -62,7 +62,8 @@ helper: 300 of 300; Bolt with the helper: 200 of 200, the split at a near-tie).
 | KAT-Coder i-quality-v2 | M1 Ultra | 82.5 (drafting) | 87.5 |
 | Bolt UD-Q3_K_XL | M1 Ultra | 33.7 | 38.5 (it cannot read prompts there: no Metal kernel for 9 experts a token) |
 | Bolt UD-IQ3_XXS | PC | 30.0 / 30.6 (server, earlier) | 26.2 / 26.1 |
-| GLM-5.3 UD-IQ4_XS | Spark | 11.7 / 10.4 (server, earlier) | 2.3 / 2.5 |
+| GLM-5.3 UD-IQ3_XXS | Spark | 18.0 (drafting) / 15.0 / 14.6 (server, 10-17); 13.3 (no drafting, 10-17) | 1.3 (10-17, a 48-token check with every expert on the CPU, cold; not a speed test) |
+| GLM-5.3 UD-IQ4_XS | Spark | 11.7 / 10.4 (server, 10-17); 9.3 (no drafting, 10-17) | 2.3 / 2.5 |
 
 llama.cpp: `llama-bench` tg128 (b11724; b11699 on the PC, pinned to the 4070 Ti), or `llama-server` where marked. The
 files larger than Metal's working set (48 GiB on the M1 Ultra) were not run in llama.cpp there.

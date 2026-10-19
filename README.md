@@ -124,7 +124,8 @@ and the Jetson; `momoe-metal` on the Macs.
 | KAT-Coder-V2.5-Dev i-quality-v2 | M1 Ultra | 82.5 (drafting) | 87.5 |
 | Nemotron 3.5 Bolt UD-Q3_K_XL | M1 Ultra | 33.7 | 38.5 (it cannot read a prompt: its Metal build has no kernel for 9 experts a token) |
 | Nemotron 3.5 Bolt UD-IQ3_XXS | PC | 30.0 / 30.6 (server, greedy / sampled) | 26.2 / 26.1 |
-| GLM-5.3-Flash UD-IQ4_XS | Spark | 11.7 / 10.4 (server, drafting) | 2.3 / 2.5 |
+| GLM-5.3-Flash UD-IQ3_XXS | Spark | 18.0 (drafting) / 15.0 / 14.6 (server, greedy / sampled); 13.3 (no drafting) | 1.3 (a 48-token check: every expert on the CPU, cold, not a speed test) |
+| GLM-5.3-Flash UD-IQ4_XS | Spark | 11.7 / 10.4 (server, drafting); 9.3 (no drafting) | 2.3 / 2.5 |
 
 Where every expert fits on the GPU (the 8B on the PC; most models on the M1 Ultra), llama.cpp is ahead: MoMoE builds
 its graph again for every token (up to a fifth of a token's time on the M1 Ultra) and adds a few small kernels a
@@ -137,8 +138,10 @@ How these were measured (2026-10-19 unless named; build `momoe-cuda` / `momoe-me
 - **Strata's engine on the PC:** `tools/strata_bench.py`, three runs, medians: "chat decode" in the table.
 - **`momoe-cuda` and `momoe-metal`:** the engine on its own, greedy, the second half of a 300-400-token answer, with
   the arguments setup wrote (drafting where they have it); "server" rows: the server's own speed over a long chat.
-- **The Spark:** one model at a time under a watchdog. GLM-5.3-Flash with `--mtp 3`; its server, 2026-10-17: 15.0 / 14.6
-  tok/s (UD-IQ3_XXS, greedy / sampled).
+- **The Spark:** one model at a time under a watchdog. GLM-5.3-Flash with `--mtp 3`; its server and the runs without
+  drafting, 2026-10-17. UD-IQ3_XXS (113 GiB, setup's choice on the Spark) is a quarter smaller than UD-IQ4_XS (146
+  GiB): nearly all its experts fit in memory (97.6% of expert reads from the pool) and it writes 1.3-1.4 times as
+  fast, more with drafting.
 - **The Jetson:** 16K context. llama.cpp b11724, `llama-bench` tg128.
 - **The Macs:** setup's configs: every expert in memory where it fits beside the KV cache (Flash-Next IQ3_XXS and Swift
   at 32K context, the others at 64K), else an expert pool and the rest from the SSD (Unsloth's Flash-Next: 39 GiB on the
