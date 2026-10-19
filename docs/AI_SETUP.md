@@ -161,7 +161,7 @@ curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/jso
 ```
 
 With an API key, add `-H "Authorization: Bearer <key>"`. The server window prints a `ready: http://127.0.0.1:8080/v1`
-line when it is ready; the engine log is `strata-<model>.log` in the Strata folder.
+line when it is ready; the engine log is `logs/strata-<model>.log` in the Strata folder.
 
 ## 8. Connect the user's apps
 
@@ -191,7 +191,7 @@ line when it is ready; the engine log is `strata-<model>.log` in the Strata fold
 | Python or build tools could not be installed | Install what the message names (links are printed), then rerun. |
 
 More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md) and the [full table](DETAILS.md#troubleshooting). If it still fails,
-collect `strata-<model>.log` and the setup output, and suggest an issue at https://github.com/Niko1221/Strata/issues.
+collect `logs/strata-<model>.log` and the setup output, and suggest an issue at https://github.com/Niko1221/Strata/issues.
 
 ## Alternative: the MCP server
 

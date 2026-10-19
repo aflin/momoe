@@ -145,6 +145,7 @@ Setup asks for a name for the model's config (for example `ornith-8gb`) and star
 momoe list                            # the configs in config/
 momoe start ornith-8gb                # start one (.json can be left off)
 momoe status                          # what is running, and where
+momoe log                             # follow the server's and the engine's logs (Ctrl+C ends)
 momoe run claude                      # Claude Code, connected to it (also: codex, opencode)
 momoe run unsloth                     # Unsloth Studio with a "MoMoE" provider
 momoe run lmstudio                    # LM Studio, with the plugin it needs installed and set up
@@ -160,6 +161,23 @@ in the config, and `momoe status` shows it. The server listens on 127.0.0.1 only
 `--host` together with `--api-key`, for example `momoe start ornith-8gb --host 0.0.0.0 --api-key KEY`. Given to
 `momoe start`, they apply to that start only; add `--save` to keep them in the config.
 
+### Logs
+
+Every log is in `logs/`. Each config has its engine's log (`logs/<config>.log`: loading, the expert cache, one block of
+numbers per request). The server writes `logs/server.log`: a line a second while it answers, with its speed, and a
+`done:` line per answer with the expert cache's hit rate. `logs/server.log` is started again with each `momoe start`.
+The engine logs keep growing.
+
+```sh
+momoe log                             # the last 20 lines of the server's and the engine's logs, then follow them
+momoe log server                      # one log: server, engine, unsloth or lmstudio (all: the four)
+momoe log -n 100                      # start from the last 100 lines
+momoe log --no-follow                 # print the last lines and stop
+```
+
+With two logs or more, each line starts with `[server]`, `[engine]`, ... The engine log is the running config's
+(when none runs, the last one started). Ctrl+C stops following; the server keeps running.
+
 ## Where things are
 
 | Folder | What |
@@ -167,7 +185,8 @@ in the config, and `momoe status` shows it. The server listens on 127.0.0.1 only
 | `config/` | the model configs setup writes (yours; not in git) |
 | `models/`, `packs/`, `mtp/` | the downloaded models and what setup prepares from them (not in git) |
 | `engine/` | the compiled engine (`momoe`, `momoe-vision`) |
-| `.momoe/` | the server's state and log |
+| `logs/` | every log: the engine's (`<config>.log`), the server's (`server.log`: its speed and cache hit lines), Unsloth Studio's and LM Studio's |
+| `.momoe/` | the server's state (which config runs) |
 | `design/` | MoMoE's design notes: what was measured, chosen or rejected |
 | `docs/` | Strata's documentation. Most of it applies; it says "Strata" where MoMoE has its own name |
 

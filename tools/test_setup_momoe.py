@@ -48,7 +48,7 @@ class Setup(q36.Base):
         self.assertEqual(code, 0, out)
         cfg = self.written("ornith-8gb.json")
         self.assertEqual(cfg["setup_tag"], "ornith15-IQ4_XS")
-        self.assertEqual(cfg["log"], str(self.t / "ornith-8gb.log"))     # logs stay in the top level
+        self.assertEqual(cfg["log"], str(self.t / "logs" / "ornith-8gb.log"))   # every log in logs/
         self.assertIn("momoe start ornith-8gb.json", out)
         p = self.t / "config" / "ornith-8gb.json"
         self.assertEqual(setup.config_tag(p), "ornith15-IQ4_XS")
@@ -183,6 +183,54 @@ class Momoe(unittest.TestCase):
                          (None, ["codex", "-m", "x", "--config", "k=v"]))
         with self.assertRaises(SystemExit):
             momoe.run_config(["claude", "--config", "missing"])
+
+    def test_move_log(self):
+        self.three()
+        c = self.t / "config"
+        old = self.t / "a.log"
+        old.write_text("engine line\n")
+        (c / "a.json").write_text(json.dumps({"exe": "x", "log": str(old)}))
+        (c / "b.json").write_text(json.dumps({"exe": "x", "log": "/elsewhere/b.log"}))
+        with mock.patch.object(momoe, "say"):
+            momoe.move_log(c / "a.json")                                     # in the top level: moved
+            momoe.move_log(c / "b.json")                                     # anywhere else: left alone
+            momoe.move_log(c / "c.json")                                     # no log: nothing
+        self.assertFalse(old.exists())
+        self.assertEqual((self.t / "logs" / "a.log").read_text(), "engine line\n")
+        self.assertEqual(json.loads((c / "a.json").read_text())["log"], str(self.t / "logs" / "a.log"))
+        self.assertEqual(json.loads((c / "b.json").read_text())["log"], "/elsewhere/b.log")
+        self.assertNotIn("log", json.loads((c / "c.json").read_text()))
+
+    def test_log_follows(self):
+        logs = self.t / "logs"
+        logs.mkdir()
+        server, engine = logs / "server.log", logs / "a.log"
+        server.write_text("s1\ns2\n")
+        engine.write_text("e1\n")
+        (self.t / ".momoe").mkdir()
+        (self.t / ".momoe" / "last.json").write_text(json.dumps({"config": str(self.t / "a.json")}))
+        (self.t / "a.json").write_text(json.dumps({"exe": "x", "log": str(engine)}))
+        out, ticks = [], []
+
+        def tick(_):                       # each poll: the logs grow, then the second poll ends it
+            ticks.append(1)
+            if len(ticks) == 1:
+                with open(engine, "a") as f:
+                    f.write("e2\npart")
+                server.write_text("new\n")             # shorter: the server started again
+            elif len(ticks) == 2:
+                with open(engine, "a") as f:
+                    f.write("ial\n")
+            else:
+                raise KeyboardInterrupt
+        with mock.patch.object(momoe, "say", out.append), mock.patch.object(momoe.time, "sleep", tick):
+            self.assertEqual(momoe.cmd_log(["-n", "1"]), 0)
+        lines = [x for x in out if not x.startswith(("==>", "---"))]
+        self.assertEqual(lines, ["[server] s2", "[engine] e1", "[server] new", "[engine] e2", "[engine] partial"])
+        out.clear()
+        with mock.patch.object(momoe, "say", out.append):
+            self.assertEqual(momoe.cmd_log(["engine", "--no-follow"]), 0)
+        self.assertEqual(out[1:], ["e1", "e2", "partial"])          # one log: no tags
 
     def test_pick_config(self):
         self.three()

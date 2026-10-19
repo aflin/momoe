@@ -65,7 +65,7 @@ build-vision-cuda12.bat
 /.ccache/
 /.rocm-win/
 
-# momoe: its state (the running server, its log) and configs named at setup
+# momoe: its state (the running server) and configs named at setup (the logs: logs/)
 /.momoe/
 /*.json
 # local Windows HIP packaging output

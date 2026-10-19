@@ -114,7 +114,7 @@ engine\strata-device.exe --list-devices
 engine\strata-device.exe --selftest
 ```
 
-(from the Strata folder, after `set PATH=%CD%\engine\rocm\bin;%PATH%`), the end of `strata-<model>.log`, and the
+(from the Strata folder, after `set PATH=%CD%\engine\rocm\bin;%PATH%`), the end of `logs/strata-<model>.log`, and the
 speed lines the server window prints for a first answer.
 
 **Building it yourself:** `tools\hip\build_windows.bat` (Visual Studio 2022 Build Tools with the C++ workload, Python,

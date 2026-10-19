@@ -220,5 +220,5 @@ Setup does not build these; build by hand and run `serve/server.py` with a confi
 ## Reports welcome
 
 These paths stay experimental until more people run them. A report with the card, the driver / ROCm version, the
-model and the engine log (`strata-<model>.log`) in an issue helps; [COMMUNITY_BENCHMARKS.md](COMMUNITY_BENCHMARKS.md)
+model and the engine log (`logs/strata-<model>.log`) in an issue helps; [COMMUNITY_BENCHMARKS.md](COMMUNITY_BENCHMARKS.md)
 has the format for measurements.

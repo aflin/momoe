@@ -194,7 +194,7 @@ says so and starts the engine you had.
   in the browser's local storage (`strata.*` keys) - not on the server and not in the Strata folder. Pictures are not
   kept, only their names. Another browser or a private window starts empty; clearing the site's data deletes them.
 - **How the model starts:** `strata-<model>.json` in the Strata folder (context, GPUs, host, API key, ...), written
-  by setup; next to it `run-<model>.bat` / `.sh`, the log `strata-<model>.log` and, when you use "Use for other
+  by setup; next to it `run-<model>.bat` / `.sh`, the log `logs/strata-<model>.log` and, when you use "Use for other
   apps too", `strata-<model>.shared-settings.json`. Running setup again for the same model (another context, say)
   rewrites the keys setup writes (`exe`, `args`, `port`, `gpu`, `host`, `api_key`, `vision`, ...) and keeps the
   ones you added (`sampling`, `mcp_servers`, `mcp`, `cors_origins`, ...); the earlier file is kept as

@@ -7,6 +7,9 @@
     momoe stop                           stop it
     momoe status                         is it running, which model, where
     momoe list                           the configs in config/
+    momoe log [server|engine|unsloth|lmstudio|all] [-n N] [--no-follow]
+                                         show the last N lines (20) of the logs in logs/ and follow them as they grow;
+                                         by default the server's and the running (or last) config's engine log
     momoe run claude|codex|opencode [--config CONFIG] [their arguments]
                                          start that agent, talking to this server (started first if needed)
     momoe run unsloth|lmstudio [--config CONFIG]
@@ -35,6 +38,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 STATE_DIR = ROOT / ".momoe"
+# every log is in ROOT / "logs": the engines' (each config's "log"), the server's, the apps' (unsloth.log, ...)
 STATE = STATE_DIR / "server.json"
 WIN = os.name == "nt"
 PY = ROOT / (".venv/Scripts/python.exe" if WIN else ".venv/bin/python")
@@ -199,8 +203,29 @@ def start_config(cfg: Path, extra=(), foreground=False) -> int:
             say(f"{s.get('model') or cfg.name} is already running: {base_url(s)}/v1 (momoe stop ends it)")
             return 0
         die(f"{s.get('model') or Path(s['config']).name} is running ({Path(s['config']).name}): momoe stop first")
+    move_log(cfg)
     return subprocess.call(setup_cmd(["--config", str(cfg), *([] if foreground else ["--detach"]), *extra]),
                            cwd=str(ROOT))
+
+
+def move_log(cfg: Path) -> None:
+    """A config from before logs/ keeps its engine log in the MoMoE folder itself: the log moves to logs/ and the
+    config says so (once; anything else is left alone)."""
+    c = read_json(cfg)
+    old = Path(c["log"]) if isinstance(c, dict) and c.get("log") else None
+    if old is None or old.parent.resolve() != ROOT.resolve():
+        return
+    new = ROOT / "logs" / old.name
+    try:
+        (ROOT / "logs").mkdir(exist_ok=True)
+        if old.exists() and not new.exists():
+            old.replace(new)
+        c["log"] = str(new)
+        cfg.write_text(json.dumps(c, indent=1), encoding="utf-8")
+    except OSError as e:
+        say(f"  the log stays at {old} ({e})")
+        return
+    say(f"  the engine log is now {new}")
 
 
 def cmd_start(args) -> int:
@@ -280,6 +305,96 @@ def cmd_status(args) -> int:
             f"{', API key required' if h.get('api_key') else ''}")
     say(f"Log:     {s.get('log')}")
     return 0
+
+
+LOG_NAMES = ("server", "engine", "unsloth", "lmstudio")
+
+
+def log_files(names) -> list:
+    """(tag, path) of the logs `momoe log` follows: the server's, the running (else the last started) config's engine
+    log, Unsloth Studio's, LM Studio's."""
+    out = []
+    for n in names:
+        if n == "engine":
+            s = running()
+            cfg = s["config"] if s else state_last()
+            c = read_json(cfg) if cfg else None
+            if isinstance(c, dict) and c.get("log"):
+                out.append(("engine", Path(c["log"])))
+        else:
+            out.append((n, ROOT / "logs" / f"{n}.log"))
+    return out
+
+
+def tail_lines(path: Path, n: int) -> tuple:
+    """The last n lines of path and its size (the end is read, not the whole file)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max(n, 1) * 400))
+            data = f.read()
+    except OSError:
+        return [], 0
+    lines = data.decode("utf-8", "replace").splitlines()
+    return (lines[-n:] if n > 0 else []), size
+
+
+def cmd_log(args) -> int:
+    n, follow, names = 20, True, []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-n", "--lines") and i + 1 < len(args) and args[i + 1].isdigit():
+            n, i = int(args[i + 1]), i + 1
+        elif a.startswith("-n") and a[2:].isdigit():
+            n = int(a[2:])
+        elif a == "--no-follow":
+            follow = False
+        elif a == "all":
+            names += list(LOG_NAMES)
+        elif a in LOG_NAMES:
+            names.append(a)
+        else:
+            die(f"log: unknown {a!r} (server, engine, unsloth, lmstudio, all; -n N; --no-follow)")
+        i += 1
+    files = log_files(list(dict.fromkeys(names or ["server", "engine"])))
+    if not files:
+        die("no log to show: no config has been started yet (momoe start CONFIG)")
+    tag = len(files) > 1
+    pos = {}
+    for t, path in files:
+        lines, pos[path] = tail_lines(path, n)
+        say(f"==> {path}{'' if path.exists() else ' (not there yet)'} <==")
+        for line in lines:
+            say(f"[{t}] {line}" if tag else line)
+    if not follow:
+        return 0
+    say(f"--- following {len(files)} log{'s' if len(files) > 1 else ''} (Ctrl+C ends) ---")
+    part = {path: b"" for _, path in files}
+    try:
+        while True:
+            for t, path in files:
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                if size < pos[path]:            # started again (server.log is rewritten at each start)
+                    pos[path], part[path] = 0, b""
+                    say(f"==> {path} started again <==")
+                if size == pos[path]:
+                    continue
+                with open(path, "rb") as f:
+                    f.seek(pos[path])
+                    data = part[path] + f.read(size - pos[path])
+                pos[path] = size
+                *done, part[path] = data.split(b"\n")
+                for line in done:
+                    line = line.decode("utf-8", "replace").rstrip("\r")
+                    say(f"[{t}] {line}" if tag else line)
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        return 0
 
 
 def cmd_list(args) -> int:
@@ -385,7 +500,7 @@ def launch(cmd, env) -> int:
 
 
 def detached(cmd, log: Path, env=None):
-    STATE_DIR.mkdir(exist_ok=True)
+    log.parent.mkdir(parents=True, exist_ok=True)
     kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS} if WIN \
         else {"start_new_session": True}
     with open(log, "ab") as out:
@@ -530,7 +645,7 @@ def run_unsloth(s, h, args) -> int:
         return missing("Unsloth Studio", INSTALL["unsloth"])
     started, url = False, unsloth_url(args)
     if not unsloth_up(url):
-        log = STATE_DIR / "unsloth.log"
+        log = ROOT / "logs" / "unsloth.log"
         say(f"Starting Unsloth Studio in the background (its output: {log}) ...")
         start = log.stat().st_size if log.exists() else 0
         proc = detached([exe, "studio", *args], log)
@@ -697,8 +812,8 @@ def run_lmstudio(s, h, args) -> int:
         return missing("LM Studio", INSTALL["lmstudio"])
     if not lmstudio_prepare(s, h, lms):
         return 1
-    log = STATE_DIR / "lmstudio.log"
-    STATE_DIR.mkdir(exist_ok=True)
+    log = ROOT / "logs" / "lmstudio.log"
+    (ROOT / "logs").mkdir(exist_ok=True)
     seen = log.stat().st_size if log.exists() else 0
     if sys.platform == "darwin":
         detached(["open", "-a", app], log)
@@ -771,7 +886,7 @@ def main(argv) -> int:
         say(__doc__.strip())
         return 0
     cmds = {"setup": cmd_setup, "start": cmd_start, "stop": cmd_stop, "status": cmd_status, "list": cmd_list,
-            "run": cmd_run}
+            "log": cmd_log, "run": cmd_run}
     if argv[0] not in cmds:
         die(f"unknown command {argv[0]!r}: momoe " + "|".join(cmds) + " (momoe help)")
     return cmds[argv[0]](argv[1:])

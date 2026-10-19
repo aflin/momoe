@@ -276,7 +276,7 @@ class Install(Base):
             "--max-context", "32768", "--kv", "int8"])
         self.assertEqual(cfg["model_name"], "qwen3.6-35b-a3b-ud-iq4_xs")
         self.assertEqual(cfg["tokenizer"], str(pack / "tokenizer"))
-        self.assertEqual(cfg["log"], str(self.t / "strata-qwen36-ud-iq4_xs.log"))
+        self.assertEqual(cfg["log"], str(self.t / "logs" / "strata-qwen36-ud-iq4_xs.log"))
         self.assertNotIn("vision", cfg)
         self.assertIn("MTP draft layer: the model file's own", out)
         self.assertIn("Apache 2.0", out)

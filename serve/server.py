@@ -817,6 +817,8 @@ class StrataEngine:
         if lazy:
             return
         self.unloaded = False            # `ended` stays True until READY (below): not alive while starting (#344)
+        if log:                                          # Momoe: logs/ (made when it is missing)
+            Path(log).parent.mkdir(parents=True, exist_ok=True)
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
         loading = threading.Event()                     # set once READY: the narrator below stops
         log_start = os.path.getsize(log) if log else 0  # where this start's lines begin (start_failure_hint)
@@ -6907,6 +6909,8 @@ def main() -> int:
         if not cfg:
             ap.error("--engine strata needs --config")
         vision = None
+        if cfg.get("log"):                             # Momoe: logs/ (made here when it is missing)
+            Path(cfg["log"]).parent.mkdir(parents=True, exist_ok=True)
         env = child_env(cfg)
         sampling_defaults = sampling_defaults_from_config(cfg)
         if sampling_defaults:

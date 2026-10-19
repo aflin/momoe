@@ -5258,15 +5258,17 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
 
 
 DETACH = False                                         # momoe: --detach starts the server in the background
-MOMOE_DIR = ROOT / ".momoe"                            # momoe's state: server.json (the running server), its log
+MOMOE_DIR = ROOT / ".momoe"                            # momoe's state: server.json (the running server)
+# Momoe: every log is in ROOT / "logs": the engines' (each config's "log"), the server's (server.log)
 
 
 def start_detached(cmd, cfg_path: Path, cfg: dict, port, once_key=False) -> int:
     """Momoe: the server in the background (its own session / process group, no window), its output in
-    .momoe/server.log; .momoe/server.json says which one runs.  Returns when the server says it is ready (0), or
+    logs/server.log; .momoe/server.json says which one runs.  Returns when the server says it is ready (0), or
     when it ends first (1).  Ctrl+C while waiting leaves it starting."""
     MOMOE_DIR.mkdir(exist_ok=True)
-    log = MOMOE_DIR / "server.log"
+    (ROOT / "logs").mkdir(exist_ok=True)
+    log = ROOT / "logs" / "server.log"
     kw = {}
     if WIN:
         kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
@@ -5881,7 +5883,7 @@ def mac_setup(a, data: Path, port: int) -> int:
     cfg_path = name_config(config_path_for(a.config_name, tag + "-mac") if a.config_name else
                            config_dir() / "ornith-mac.json", a)
     cfg = {"exe": str(exe), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
-           "model_name": f"{fam['name']}-{size_of(MAC_MODEL).lower()}", "log": str(ROOT / (cfg_path.stem + ".log")),
+           "model_name": f"{fam['name']}-{size_of(MAC_MODEL).lower()}", "log": str(ROOT / "logs" / (cfg_path.stem + ".log")),
            "port": port, "setup_tag": tag, "fit_max_tokens": True}
     if a.host:
         cfg["host"] = a.host
@@ -6000,7 +6002,7 @@ def ggml_setup(a, data: Path, port: int, family: str) -> int:
     cfg = {"exe": str(exe), "args": ["-m", str(gguf), "--ctx", str(ctx), "--chunk", "1024", *fam.get("engine_args", [])],
            "cwd": str(ROOT),
            "tokenizer": str(pack / "tokenizer"), "model_name": f"{fam['name']}-{q.lower()}",
-           "log": str(ROOT / (cfg_path.stem + ".log")), "port": port, "gpu": gpu["index"], "setup_tag": tag,
+           "log": str(ROOT / "logs" / (cfg_path.stem + ".log")), "port": port, "gpu": gpu["index"], "setup_tag": tag,
            "fit_max_tokens": True}                    # (the model card's sampling: write_setup_config)
     if a.host:
         cfg["host"] = a.host
@@ -6292,7 +6294,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         ok(f"VRAM kept free for other programs: about {a.vram_reserve_mib} MiB (the experts' share is set lower)")
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{model.lower()}", "arch": fam["arch"],
-           "log": str(ROOT / f"strata-{tag.lower()}.log"), "lib_dirs": lib_dirs, "port": port}
+           "log": str(ROOT / "logs" / f"strata-{tag.lower()}.log"), "lib_dirs": lib_dirs, "port": port}
     if cuda_tk == 12:
         cfg["cuda"] = 12
     if hip:
@@ -6464,7 +6466,7 @@ def main() -> int:
                     help="the file name of the config this setup writes (default: asked; strata-<model>.json)")
     ap.add_argument("--config", metavar="FILE", help="start this config (momoe start FILE)")
     ap.add_argument("--detach", action="store_true",
-                    help="start the server in the background and return once it is ready (momoe; log: .momoe/server.log)")
+                    help="start the server in the background and return once it is ready (momoe; log: logs/server.log)")
     ap.add_argument("--setup", action="store_true", help="install another model or change settings")
     ap.add_argument("--no-start", action="store_true", help="install only, do not start the model")
     ap.add_argument("--update", action="store_true",
@@ -7578,7 +7580,7 @@ def main() -> int:
         args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
                  "--cvec-mode", "project", "--cvec-dir", "per-layer"]
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
-           "model_name": f"{fam['name']}-{size_of(model).lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),   # logs: the top level
+           "model_name": f"{fam['name']}-{size_of(model).lower()}", "log": str(ROOT / "logs" / f"strata-{tag.lower()}.log"),
            "lib_dirs": lib_dirs, "port": port}
     if cuda_tk == 12:                                  # the experimental CUDA 12 engine (engine-cuda12/)
         cfg["cuda"] = 12
@@ -7676,7 +7678,7 @@ def main() -> int:
     cfg_path = name_config(own_cfg, a)               # Momoe: the file's name is asked (the default: this model's)
     if cfg_path.name != f"strata-{tag.lower()}.json":
         cfg["setup_tag"] = tag                         # setup reads the model from it (not from the name)
-        cfg["log"] = str(ROOT / (cfg_path.stem + ".log"))
+        cfg["log"] = str(ROOT / "logs" / (cfg_path.stem + ".log"))
     cal = setup_calibration(cfg, hip)                  # #566: Linux HIP too; the tuning is offered on NVIDIA only
     if cal is not None:
         sys.path.insert(0, str(ROOT / "tools"))

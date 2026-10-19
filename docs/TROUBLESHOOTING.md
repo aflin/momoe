@@ -158,7 +158,7 @@ flickers, the engine dies, and the Event Viewer shows `VIDEO_ENGINE_TIMEOUT_DETE
 Linux). Strata 0.1.39 and newer say "the GPU stopped responding" in the log. It was seen with KV streaming on
 (`--kv-resident 32768`, which setup turns on from 64K context) while reading a long prompt on a gfx1201 card. Try these
 in order, one at a time, and tell us what changed:
-1. **Send us the evidence.** The last ~80 lines of `strata-<model>.log` in the Strata folder (the server window shows
+1. **Send us the evidence.** The last ~80 lines of `logs/strata-<model>.log` in the Strata folder (the server window shows
    the same lines), your AMD driver version (AMD Software > System), your card and Windows version, the Strata
    version, and the exact steps (context size, how long the prompt was, which app sent it). If Windows wrote a
    dump, the newest `.dmp` in `C:\Windows\LiveKernelReports\WATCHDOG` (or `C:\Windows\Minidump`) helps; it holds no
@@ -192,4 +192,4 @@ R9700) in the `env` block of the server JSON, then a restart. Experimental, one 
 ## Still stuck?
 
 Look in the [full troubleshooting table](DETAILS.md#troubleshooting), or open an
-[issue](https://github.com/Niko1221/Strata/issues) and attach `strata-<model>.log` from the Strata folder.
+[issue](https://github.com/Niko1221/Strata/issues) and attach `logs/strata-<model>.log` from the Strata folder.
