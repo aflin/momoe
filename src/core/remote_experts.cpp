@@ -113,10 +113,14 @@ void RemoteExperts::close() {
         if (h_meta_) cudaFreeHost(h_meta_);
         if (stream_) cudaStreamDestroy(stream_);
         if (read_stream_) cudaStreamDestroy(read_stream_);
+        if (swap_read_ev_) cudaEventDestroy(swap_read_ev_);
+        if (swap_done_ev_) cudaEventDestroy(swap_done_ev_);
     }
     device_ = -1;
     stream_ = nullptr;
     read_stream_ = nullptr;
+    swap_read_ev_ = nullptr;
+    swap_done_ev_ = nullptr;
     h_x_ = h_out_ = d_x_ = d_out_ = nullptr;
     h_meta_ = d_meta_ = nullptr;
     d_q8_ = nullptr;
@@ -157,7 +161,8 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
         const size_t index = (size_t) pair.first * (size_t) experts + (size_t) pair.second;
         if (primary.slot_of(pair.first, pair.second) < 0 && !claimed[index] && !picked[index]) {
             const uint64_t bytes = lay.native ? (lay.blob_bytes(pair.first) + 255) / 256 * 256 : lay.max_blob;
-            if (auto_size && needed + bytes + (512ull << 20) > free_bytes) break;
+            if (auto_size && needed + bytes + reserve_bytes_ > free_bytes) break;
+            if (max_bytes_ > 0 && needed + bytes > max_bytes_) break;   // --helper-gib
             selected.push_back(pair);
             needed += bytes;
             picked[index] = 1;
@@ -165,7 +170,7 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
         }
     }
     if (selected.empty()) {
-        err = "CUDA" + std::to_string(device) + (auto_size ? " experts: no unclaimed expert fits with 512 MiB free"
+        err = "CUDA" + std::to_string(device) + (auto_size ? " experts: no unclaimed expert fits beside the VRAM it keeps free"
                                                           : " experts: no unclaimed experts remain");
         close(); return false;
     }
@@ -183,6 +188,7 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
                                      : cache_.open((int64_t) selected.size(), layers, experts,
                                                    (int64_t) lay.max_blob, err);
     if (!cache_ok) { err = "CUDA" + std::to_string(device) + " experts: " + err; close(); return false; }
+    const ReadCauseScope read_cause(kReadHelperFill);
     for (const auto& pair : selected) {
         const int32_t slot = cache_.admit(pair.first, pair.second);
         const uint8_t* blob = source.blob(pair.first, pair.second);
@@ -381,6 +387,9 @@ bool RemoteExperts::copy_cached_blobs(const int32_t* layers, const int32_t* expe
     DeviceScope scope(device_);
     if (!scope.ok) { err = scope.error(device_); return false; }
     std::lock_guard<std::mutex> lock(read_mu_);
+    // STRATA_HELPER_PROMOTE / STRATA_HELPER_ASYNC: a slot may still be being written on stream_
+    if (swap_done_ev_ != nullptr && !check(cudaStreamWaitEvent(read_stream_, swap_done_ev_, 0), "swap wait", err, device_))
+        return false;
     bool queued = false;
     for (size_t i = 0; i < n; ++i) {
         if (dst[i] == nullptr) continue;
@@ -403,6 +412,77 @@ bool RemoteExperts::copy_cached_blobs(const int32_t* layers, const int32_t* expe
         return false;
     }
     return true;
+}
+
+bool RemoteExperts::swap_slot(int32_t layer, int32_t held, int32_t incoming, uint8_t* held_bytes,
+                              const uint8_t* incoming_bytes, std::string& err) {
+    const int32_t slot = cache_.slot_of(layer, held);
+    if (slot < 0 || cache_.slot_of(layer, incoming) >= 0 || incoming_bytes == nullptr) {
+        err = "CUDA" + std::to_string(device_) + " experts: swap_slot: (" + std::to_string(layer) + ", " +
+              std::to_string(held) + ") is not held here, or " + std::to_string(incoming) + " already is";
+        return false;
+    }
+    const auto& lay = strata::kernels::cpu::expert_layout();
+    const size_t bytes = (size_t) lay.blob_bytes(layer);
+    DeviceScope scope(device_);
+    if (!scope.ok) { err = scope.error(device_); return false; }
+    std::lock_guard<std::mutex> lock(read_mu_);
+    if (held_bytes != nullptr &&
+        (!check(cudaMemcpyAsync(held_bytes, cache_.device_slot(slot), bytes, cudaMemcpyDeviceToHost, stream_),
+                "swap read", err, device_) ||
+         !check(cudaStreamSynchronize(stream_), "swap read wait", err, device_)))
+        return false;
+    if (!cache_.fill_slot(slot, incoming_bytes, stream_, err, (int64_t) bytes) ||
+        !check(cudaStreamSynchronize(stream_), "swap write wait", err, device_))
+        return false;
+    cache_.replace(layer, held, incoming);
+    return true;
+}
+
+bool RemoteExperts::swap_slot_async(int32_t layer, int32_t held, int32_t incoming, uint8_t* held_bytes,
+                                    const uint8_t* incoming_bytes, cudaEvent_t write_after, std::string& err) {
+    const int32_t slot = cache_.slot_of(layer, held);
+    if (slot < 0 || cache_.slot_of(layer, incoming) >= 0 || incoming_bytes == nullptr || held_bytes == nullptr) {
+        err = "CUDA" + std::to_string(device_) + " experts: swap_slot_async: (" + std::to_string(layer) + ", " +
+              std::to_string(held) + ") is not held here, or " + std::to_string(incoming) + " already is";
+        return false;
+    }
+    const size_t bytes = (size_t) strata::kernels::cpu::expert_layout().blob_bytes(layer);
+    DeviceScope scope(device_);
+    if (!scope.ok) { err = scope.error(device_); return false; }
+    if (swap_read_ev_ == nullptr &&
+        (!check(cudaEventCreateWithFlags(&swap_read_ev_, cudaEventDisableTiming), "swap event", err, device_) ||
+         !check(cudaEventCreateWithFlags(&swap_done_ev_, cudaEventDisableTiming), "swap event", err, device_)))
+        return false;
+    if (!check(cudaMemcpyAsync(held_bytes, cache_.device_slot(slot), bytes, cudaMemcpyDeviceToHost, stream_),
+               "swap read", err, device_) ||
+        !check(cudaEventRecord(swap_read_ev_, stream_), "swap read event", err, device_) ||
+        (write_after != nullptr && !check(cudaStreamWaitEvent(stream_, write_after, 0), "swap wait", err, device_)) ||
+        !check(cudaMemcpyAsync(cache_.device_slot(slot), incoming_bytes, bytes, cudaMemcpyHostToDevice, stream_),
+               "swap write", err, device_))
+        return false;
+    cache_.replace(layer, held, incoming);
+    return true;
+}
+
+bool RemoteExperts::mark_swaps(std::string& err) {
+    DeviceScope scope(device_);
+    if (!scope.ok) { err = scope.error(device_); return false; }
+    if (swap_read_ev_ == nullptr &&
+        (!check(cudaEventCreateWithFlags(&swap_read_ev_, cudaEventDisableTiming), "swap event", err, device_) ||
+         !check(cudaEventCreateWithFlags(&swap_done_ev_, cudaEventDisableTiming), "swap event", err, device_)))
+        return false;
+    return check(cudaEventRecord(swap_done_ev_, stream_), "swap done event", err, device_);
+}
+
+bool RemoteExperts::swaps_landed(bool wait) {
+    if (swap_done_ev_ == nullptr) return true;
+    DeviceScope scope(device_);
+    if (!scope.ok) return false;
+    if (wait) return cudaEventSynchronize(swap_done_ev_) == cudaSuccess;
+    const cudaError_t q = cudaEventQuery(swap_done_ev_);
+    if (q == cudaErrorNotReady) { (void) cudaGetLastError(); return false; }
+    return q == cudaSuccess;
 }
 
 bool RemotePrefillSource::copy_blob(int64_t layer, int64_t expert, uint8_t* dst) {

@@ -555,6 +555,9 @@ struct Options {
     std::array<int, 3> expert_cache_remote{}; ///< CUDA1..3 slots; CUDA0 keeps dense/state/MTP
     std::array<bool, 3> expert_cache_remote_auto{};
     bool remote_expert_opt = false; ///< optional optimization of the existing remote-expert decode path
+    bool helper_tier = false;       ///< --helper-tier: CUDA1 as the second expert tier (docs/SECOND_GPU.md)
+    double helper_gib = 0.0;        ///< --helper-gib: at most this much of CUDA1's VRAM for its experts (0: no cap)
+    int helper_reserve_mib = -1;    ///< --helper-reserve-mib: VRAM CUDA1 keeps free (-1: 512, or 1600 with --helper-tier)
     std::string expert_cache_remote_placement = "stripe"; ///< stripe experts or assign complete layers to CUDA1..3
     bool expert_cache_cpu_order = false;
     /// **R4.2g.  ROUND 328 MEASURED THAT THE GLOBAL ADMISSION POLICY CANNOT WORK, AND THIS IS THE FIX.**
@@ -987,6 +990,13 @@ void usage() {
                  "  --expert-cache-device2 N|auto  fill CUDA2 with more experts\n"
                  "  --expert-cache-device3 N|auto  fill CUDA3 with more experts\n"
                  "  --remote-expert-opt   enable remote-expert decode optimizations (serve mode)\n"
+                 "  --helper-tier        CUDA1 as the second expert tier under CUDA0's cache (serve mode; for two\n"
+                 "                       unequal cards): --expert-cache-device1 auto --remote-expert-opt, the\n"
+                 "                       resident RAM mode, and the STRATA_HELPER_* settings measured best (each\n"
+                 "                       variable set in the environment wins).  docs/SECOND_GPU.md\n"
+                 "  --helper-gib G       at most G GiB of CUDA1's VRAM for its experts (default: what fits)\n"
+                 "  --helper-reserve-mib N  VRAM CUDA1's expert cache leaves free (default 512; 1600 with\n"
+                 "                       --helper-tier: its prompt buffers)\n"
                  "  --expert-cache-remote-placement stripe|layer  distribute expert ranks or whole\n"
                  "                       layers across CUDA1..3 (default: stripe)\n"
                  "  --peer-device N      a second GPU as an adaptive expert-cache tier (rows over P2P; it also\n"
@@ -2434,6 +2444,9 @@ int main(int argc, char** argv) {
             o.expert_cache_remote[r] = v == "auto" ? std::numeric_limits<int>::max() : std::atoi(v.c_str());
         }
         else if (a == "--remote-expert-opt") o.remote_expert_opt = true;
+        else if (a == "--helper-tier") o.helper_tier = true;
+        else if (a == "--helper-gib") o.helper_gib = std::atof(next("--helper-gib"));
+        else if (a == "--helper-reserve-mib") o.helper_reserve_mib = std::atoi(next("--helper-reserve-mib"));
         else if (a == "--expert-cache-remote-placement")
             o.expert_cache_remote_placement = next("--expert-cache-remote-placement");
         else if (a == "--vram-reserve-mib") { o.vram_reserve_mib = std::atoi(next("--vram-reserve-mib")); o.vram_reserve_given = true; }
@@ -2829,6 +2842,42 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "momoe generate: STRATA_PRIMARY_DEVICE %d is not supported with a layer split yet\n",
                      primary_device);
         return 2;
+    }
+    // --helper-tier: CUDA1 is the second expert tier (docs/SECOND_GPU.md, "The helper tier").  The settings below were
+    // measured best on an RTX 4070 Ti + RTX 3060 (Flash-Next IQ3_XXS); a variable the environment already sets wins,
+    // so each can be tuned on its own (a server config's "env").
+    if (o.helper_tier) {
+        o.remote_expert_opt = true;
+        if (o.expert_cache_remote[0] <= 0) {
+            o.expert_cache_remote[0] = std::numeric_limits<int>::max();
+            o.expert_cache_remote_auto[0] = true;
+        }
+        if (!o.mmap_experts && o.resident_budget == 0) {   // the resident RAM mode, as --resident-experts sets it
+            o.mmap_experts = o.resident_cpu_experts = o.resident_pin = o.resident_soft = true;
+            o.resident_headroom = 4ull << 30;
+            if (const char* v = std::getenv("STRATA_RESIDENT_PIN"); v != nullptr && std::string(v) == "0")
+                o.resident_pin = false;
+            if (const char* v = std::getenv("STRATA_RESIDENT_HEADROOM_GIB"); v != nullptr && std::atof(v) >= 0.0)
+                o.resident_headroom = (uint64_t) (std::atof(v) * 1073741824.0);
+        }
+        static const char* const tier_env[][2] = {
+            {"STRATA_HELPER_EXCHANGE", "1"},        // CUDA1's evictions take their replacements' places in RAM
+            {"STRATA_HELPER_PROMOTE", "1"},         // CUDA0 promotes from CUDA1 and evicts into it
+            {"STRATA_HELPER_ASYNC", "1"},           // CUDA1's swaps queued on its stream
+            {"STRATA_HELPER_SWAPS", "16"},          // at most 16 of them a round (96: its copies held up its rows)
+            {"STRATA_HELPER_LEND", "1"},            // the prompt path's borrowed experts kept in RAM
+            {"STRATA_PREFILL_HELPER_SOURCE", "1"},  // the prompt path copies CUDA1's experts from CUDA1
+            {"STRATA_PREFILL_HELPER_ROWS", "1"},    // CUDA1 computes the prompt rows of the experts it holds
+        };
+        for (const auto& kv : tier_env)
+            if (std::getenv(kv[0]) == nullptr) {
+#if defined(_WIN32)
+                _putenv_s(kv[0], kv[1]);
+#else
+                setenv(kv[0], kv[1], 0);
+#endif
+            }
+        if (o.helper_reserve_mib < 0) o.helper_reserve_mib = 1600;   // measured: 5,000 experts of 9.6 GiB free left 1.6
     }
     bool split_own_auto = false;   // #340: the split keeps own prompt buffers by its rule (not --no-prefill-borrow)
     if (o.mmap_experts && !o.shared_expert_arena.empty()) {
@@ -6423,6 +6472,9 @@ int main(int argc, char** argv) {
                     claimed[(size_t) pr.first * (size_t) g.n_expert + (size_t) pr.second] = 1;
         for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0) {
             if (remote_opt) remote_opt->attach(remote_experts[(size_t) r]);
+            remote_experts[(size_t) r].set_limits(o.helper_gib > 0.0 ? (uint64_t) (o.helper_gib * 1073741824.0) : 0,
+                                                  o.helper_reserve_mib >= 0 ? (uint64_t) o.helper_reserve_mib << 20
+                                                                            : 512ull << 20);
             if (!remote_experts[(size_t) r].open(remote_dev[r], o.expert_cache_remote[(size_t) r],
                      g.n_layers, g.n_expert, by_device[(size_t) r], xcache, *srcp, claimed, err,
                      o.expert_cache_remote_auto[(size_t) r])) {
@@ -7726,7 +7778,13 @@ int main(int argc, char** argv) {
         // pin_cache_complement's own path, and no regions are set.
         std::vector<std::vector<std::pair<int32_t, int32_t>>> stage_lends;
         decide_split_ring();   // the ring the prompt path really uses, BEFORE bytes_needed sizes the regions below
-        if (pf_borrow && d_res != nullptr && o.prefill_chunk > 0 && multi_gpu && !stages.empty()) {
+        // STRATA_HELPER_LEND=1 (opt-in): with a helper cache and no split, CUDA0's lend region goes the same way - the
+        // helper's experts are `additional_gpu_pairs`, which turns the single-card region off - so a prompt's
+        // borrowed experts and their refill come from RAM instead of the model files (~3.4 GiB more RAM on a 12 GB
+        // card).
+        static const bool helper_lend = [] { const char* v = std::getenv("STRATA_HELPER_LEND"); return v != nullptr && std::atoi(v) != 0; }();
+        const bool helper_region = helper_lend && !multi_gpu && stages.empty() && o.expert_cache_remote[0] > 0;
+        if (pf_borrow && d_res != nullptr && o.prefill_chunk > 0 && ((multi_gpu && !stages.empty()) || helper_region)) {
             const int64_t bound = o.prefill_auto ? auto_ceiling : o.prefill_chunk;
             static const bool own_ok = [] {
                 const char* v = std::getenv("STRATA_SPLIT_OWN_BUFFERS");
@@ -7737,7 +7795,7 @@ int main(int argc, char** argv) {
                 const strata::core::SessionState& ses = i == 0 ? ss : stages[i - 1]->ss;
                 const int64_t dev = i == 0 ? -1 : stages[i - 1]->dev;
                 const int64_t lb = i == 0 ? 0 : stages[i - 1]->lb;
-                const int64_t le = i == 0 ? split_at[0] : stages[i - 1]->le;
+                const int64_t le = i == 0 ? (split_at.empty() ? g.n_layers : split_at[0]) : stages[i - 1]->le;
                 if (xc.slots() <= 0 || le <= lb) continue;
                 const uint64_t need = strata::prefill::Prefill::bytes_needed(g, ses, bound);
                 if (own_ok) {   // the card funds its buffers at any chunk the scan can pick: nothing is lent
@@ -8379,11 +8437,30 @@ int main(int argc, char** argv) {
                                      "context, or read prompts in smaller chunks (--prefill 512)\n");
             return 1;
         }
+        bool helper_rows_on = false;   // STRATA_PREFILL_HELPER_ROWS (below)
         if (peer.valid() && o.peer_prefill_rows != 0) {
             const int64_t rows = o.peer_prefill_rows > 0 ? o.peer_prefill_rows : o.prefill_chunk * K / 2;
             if (!sp.set_peer(&peer, rows, err)) {
                 std::fprintf(stderr, "momoe serve: %s - the prompt path stays on the primary GPU\n", err.c_str());
                 err.clear();
+            }
+        }
+        // STRATA_PREFILL_HELPER_ROWS=1 (opt-in): one helper cache, no peer, no split - the helper computes the prompt
+        // rows of the experts it holds, as the --peer-device tier does (Prefill::set_peer, the host route: no P2P
+        // needed), instead of the primary streaming them.  Its prompt buffers come out of the helper card's free VRAM
+        // (~1 GB at 8K-token chunks: size its cache with an explicit --expert-cache-device1).  Not bit-identical to the
+        // primary's rows (another MMQ grouping).
+        static const bool helper_rows = [] { const char* v = std::getenv("STRATA_PREFILL_HELPER_ROWS"); return v != nullptr && std::atoi(v) != 0; }();
+        if (helper_rows && !peer.valid() && drive.d.remote_count == 1 && !multi_gpu && stages.empty() && o.batch <= 0) {
+            const int64_t rows = o.peer_prefill_rows > 0 ? o.peer_prefill_rows : o.prefill_chunk * K / 2;
+            if (!sp.set_peer(drive.d.remote[0], rows, err)) {
+                std::fprintf(stderr, "momoe serve: STRATA_PREFILL_HELPER_ROWS: %s - the prompt path stays on the primary GPU\n",
+                             err.c_str());
+                err.clear();
+            } else {
+                helper_rows_on = true;
+                std::fprintf(stderr, "momoe serve: the helper GPU computes the prompt rows of the experts it holds "
+                                     "(STRATA_PREFILL_HELPER_ROWS)\n");
             }
         }
         // a layer split: a one-chunk prompt runs the stages one after the other, so each stage's prompt path gets the
@@ -9648,6 +9725,140 @@ int main(int argc, char** argv) {
             }
             return r;
         };
+        // STRATA_HELPER_PROMOTE=1 (opt-in, with --remote-expert-opt, one helper cache, the resident RAM mode, no layer
+        // split): the helper is the second tier under this card's cache instead of a side cache.  The primary's
+        // adaptive tier may promote an expert the helper holds, and what the primary evicts goes down to the helper
+        // rather than to RAM:
+        //   promotion  `in` on the helper: the two caches trade, `in` to the primary's slot and `out` to the helper's;
+        //   rotation   `in` in RAM, the helper holds a colder expert `v` of that layer: `in` to the primary, `out` to
+        //              the helper's slot of `v`, `v` to `in`'s place in RAM (FileExpertSource::exchange_resident, once
+        //              the copies have landed);
+        //   otherwise  the usual swap (`out` to RAM).
+        // Each expert stays in exactly one tier.  The copies go through page-locked host buffers (no P2P between the
+        // cards), queued on both cards' streams like the usual swaps: the helper's table changes at once (its kernels
+        // follow the copies on its stream), the primary's when its copies land (apply_pending).  While a move is in
+        // flight `in` (and a rotation's `v`) is computed by the CPU from the model files.
+        const bool helper_promote = [&] {
+            const char* v = std::getenv("STRATA_HELPER_PROMOTE");
+            if (v == nullptr || std::atoi(v) == 0) return false;
+            const char* why = !remote_opt ? "needs --remote-expert-opt"
+                            : drive.d.remote_count != 1 ? "needs exactly one helper cache"
+                            : multi_gpu ? "not with a layer split"
+                            : !src.complement_ready() || srcp != &src ? "needs the resident RAM mode"
+                            : peer.valid() ? "not with --peer-device" : nullptr;
+            if (why != nullptr) {
+                std::fprintf(stderr, "momoe serve: STRATA_HELPER_PROMOTE ignored: %s\n", why);
+                return false;
+            }
+            std::fprintf(stderr, "momoe serve: the helper cache is the second tier: the primary promotes from it and "
+                                 "evicts into it (STRATA_HELPER_PROMOTE)\n");
+            return true;
+        }();
+        int64_t helper_promoted = 0, helper_rotated = 0;
+        // two page-locked, portable buffers per move (both cards copy through them), at most hp_cap moves a round
+        const int hp_cap = [&] {
+            const char* v = std::getenv("STRATA_HELPER_PROMOTE_MAX");
+            const int n = v != nullptr ? std::atoi(v) : 32;
+            return std::max(1, std::min(n, std::max(o.adapt_swaps, 1)));
+        }();
+        std::vector<uint8_t*> hp_pool;
+        cudaEvent_t hp_ev = nullptr;   // the primary's copy back of one move has landed
+        struct HpFree {
+            std::vector<uint8_t*>& b; cudaEvent_t& ev;
+            ~HpFree() { for (uint8_t* p : b) if (p) cudaFreeHost(p); if (ev) cudaEventDestroy(ev); }
+        } hp_free{hp_pool, hp_ev};
+        struct HpRot { int32_t layer, in, victim; uint8_t* bytes; };
+        std::vector<HpRot> hp_rot;     // rotations whose RAM exchange waits for the copies to land
+        bool hp_live = false;          // moves in flight (apply_pending waits for the helper's copies too)
+        // Takes the promotions and rotations out of `swaps` and queues them; the rest stays for the usual path.
+        auto helper_move = [&](auto& swaps) -> bool {
+            strata::core::RemoteExperts& h = *drive.d.remote[0];
+            const auto& lay = strata::kernels::cpu::expert_layout();
+            if (hp_pool.empty()) {
+                hp_pool.assign((size_t) 2 * hp_cap, nullptr);
+                for (auto& p : hp_pool)
+                    if (cudaHostAlloc((void**) &p, (size_t) lay.max_blob, cudaHostAllocPortable) != cudaSuccess) {
+                        (void) cudaGetLastError();
+                        std::fprintf(stderr, "momoe serve: STRATA_HELPER_PROMOTE: page-locked buffers failed\n");
+                        return false;
+                    }
+                if (cudaEventCreateWithFlags(&hp_ev, cudaEventDisableTiming) != cudaSuccess) return false;
+            }
+            // the helper's coldest experts per layer, for the rotations (taken coldest first, each at most once)
+            std::vector<std::vector<std::pair<float, int32_t>>> cold((size_t) g.n_layers);
+            std::vector<size_t> next_cold((size_t) g.n_layers, 0);
+            std::vector<uint8_t> cold_done((size_t) g.n_layers, 0);
+            std::string e;
+            int used = 0;
+            auto keep = swaps.begin();
+            for (auto it = swaps.begin(); it != swaps.end(); ++it) {
+                const auto sw = *it;
+                const size_t in = (size_t) sw.layer * g.n_expert + sw.in, out = (size_t) sw.layer * g.n_expert + sw.out;
+                const int32_t slot = host_res[out];
+                const size_t nb = (size_t) lay.blob_bytes(sw.layer);
+                const float* u = drive.d.usage.data() + (size_t) sw.layer * g.n_expert;
+                const bool promote = h.holds(sw.layer, sw.in);
+                if (promote && (used >= hp_cap || slot < 0)) continue;   // not now (its bytes are on the helper only)
+                int32_t victim = -1;
+                if (!promote && used < hp_cap && src.has_resident(sw.layer, sw.in)) {
+                    auto& c = cold[(size_t) sw.layer];
+                    if (!cold_done[(size_t) sw.layer]) {
+                        cold_done[(size_t) sw.layer] = 1;
+                        for (int32_t x = 0; x < (int32_t) g.n_expert; ++x)
+                            if (h.holds(sw.layer, x)) c.emplace_back(u[x], x);
+                        std::sort(c.begin(), c.end());
+                    }
+                    size_t& k = next_cold[(size_t) sw.layer];
+                    while (k < c.size() && !h.holds(sw.layer, c[k].second)) ++k;   // promoted out of the helper meanwhile
+                    if (k < c.size() && c[k].first < u[sw.out]) victim = c[k++].second;
+                }
+                if (slot < 0 || (!promote && victim < 0)) { *keep++ = sw; continue; }
+                uint8_t* out_bytes = hp_pool[(size_t) 2 * used];
+                uint8_t* back_bytes = hp_pool[(size_t) 2 * used + 1];
+                ++used;
+                // this card's evicted blob back to the host, then the helper's slot: its old blob back, `out` in
+                if (cudaMemcpyAsync(out_bytes, xcache.device_slot(slot), nb, cudaMemcpyDeviceToHost, adapt_stream) != cudaSuccess ||
+                    cudaEventRecord(hp_ev, adapt_stream) != cudaSuccess) {
+                    std::fprintf(stderr, "momoe serve: STRATA_HELPER_PROMOTE: copy back failed: %s\n",
+                                 cudaGetErrorString(cudaGetLastError()));
+                    return false;
+                }
+                if (!h.swap_slot_async(sw.layer, promote ? sw.in : victim, sw.out, back_bytes, out_bytes, hp_ev, e)) {
+                    std::fprintf(stderr, "momoe serve: STRATA_HELPER_PROMOTE: %s\n", e.c_str());
+                    return false;
+                }
+                // `in` into this card's slot: from the helper's copy back (promotion) or from RAM (rotation)
+                const uint8_t* in_bytes = promote ? back_bytes : srcp->blob_stable(sw.layer, sw.in);
+                if (in_bytes == nullptr ||
+                    (promote && cudaStreamWaitEvent(adapt_stream, h.read_event(), 0) != cudaSuccess) ||
+                    adapt_copy_h2d(xcache.device_slot(slot), in_bytes, nb, adapt_stream) != cudaSuccess) {
+                    std::fprintf(stderr, "momoe serve: STRATA_HELPER_PROMOTE: copy in failed: %s\n",
+                                 cudaGetErrorString(cudaGetLastError()));
+                    return false;
+                }
+                if (promote) ++helper_promoted;
+                else {
+                    hp_rot.push_back({sw.layer, sw.in, victim, back_bytes});
+                    ++helper_rotated;
+                }
+                host_res[out] = strata::core::kNotResident;   // the helper computes it from the next window
+                pending.emplace_back((int32_t) in, slot);     // resident once the copy has landed
+                if (drive.d.evict_sync) {
+                    drive.d.res_dirty_idx.push_back((int32_t) out);
+                    drive.d.res_dirty = true;
+                }
+            }
+            swaps.erase(keep, swaps.end());
+            if (used > 0) {
+                if (!h.mark_swaps(e)) {
+                    std::fprintf(stderr, "momoe serve: STRATA_HELPER_PROMOTE: %s\n", e.c_str());
+                    return false;
+                }
+                hp_live = true;
+                if (swaps.empty()) cudaEventRecord(adapt_ev, adapt_stream);
+            }
+            return true;
+        };
         auto apply_pending = [&](bool wait) {
             if (peer.valid()) peer.apply_pending(wait);
             if (pending.empty()) return;
@@ -9658,9 +9869,18 @@ int main(int argc, char** argv) {
                     if (wait) cudaEventSynchronize(st->adapt_ev);
                     else if (cudaEventQuery(st->adapt_ev) != cudaSuccess) return;
                 }
+            if (hp_live && !drive.d.remote[0]->swaps_landed(wait)) return;   // STRATA_HELPER_PROMOTE: the helper's copies
             for (auto& st : stages) st->adapt_live = false;
             unpin_blobs(pin_live);
             src.commit_exchanges();   // the resident RAM mode: the evicted experts take their places in RAM
+            if (hp_live) {            // STRATA_HELPER_PROMOTE: a rotated-down expert takes its replacement's place in RAM
+                for (const HpRot& x : hp_rot)
+                    if (!src.exchange_resident(x.layer, x.in, x.victim, x.bytes))
+                        std::fprintf(stderr, "momoe serve: STRATA_HELPER_PROMOTE: the RAM copy refused (%d, %d <- %d)\n",
+                                     (int) x.layer, (int) x.in, (int) x.victim);
+                hp_rot.clear();
+                hp_live = false;
+            }
             for (const auto& [i, slot] : pending) {
                 host_res[(size_t) i] = slot;
                 srcp->release((int64_t) i / g.n_expert, (int64_t) i % g.n_expert);   // in VRAM now: RAM not needed
@@ -9783,6 +10003,7 @@ int main(int argc, char** argv) {
         // the VRAM tier follows the conversation (the same rule as the speculative loop below)
         auto adapt = [&]() -> bool {
             if (!pending.empty()) return true;   // the previous swaps are still in flight
+            const strata::core::ReadCauseScope read_cause(strata::core::kReadAdapt);
             if (remote_opt && !remote_opt->adapt(drive.d.usage, host_res, pending, o.adapt_swaps, *srcp)) return false;
             struct Swap { float gain; int32_t layer, in, out; };
             std::vector<Swap> swaps;
@@ -9793,7 +10014,7 @@ int main(int argc, char** argv) {
                 const float* u = drive.d.usage.data() + l * g.n_expert;
                 const int32_t* r = host_res.data() + l * g.n_expert;
                 for (int32_t e = 0; e < (int32_t) g.n_expert; ++e) {
-                    if (r[e] < 0) { if (u[e] >= 2.0f && !(peer.valid() && peer.has(l, e)) && !(remote_opt && remote_opt->owns(l, e)) && !helper_holds(l, e)) cand.emplace_back(u[e], e); }
+                    if (r[e] < 0) { if (u[e] >= 2.0f && !(peer.valid() && peer.has(l, e)) && !(remote_opt && !helper_promote && remote_opt->owns(l, e)) && !helper_holds(l, e)) cand.emplace_back(u[e], e); }
                     else vict.emplace_back(u[e], e);
                 }
                 if (cand.empty() || vict.empty()) continue;
@@ -9808,6 +10029,7 @@ int main(int argc, char** argv) {
             }
             std::sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.gain > b.gain; });
             if ((int) swaps.size() > o.adapt_swaps) swaps.resize((size_t) o.adapt_swaps);
+            if (helper_promote && !swaps.empty() && !helper_move(swaps)) return false;
             if (aov) {   // 0.1.43: the copies go in layer order and each layer's landing is told to the verify window
                 std::stable_sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.layer < b.layer; });
                 agate.landed.store(-1, std::memory_order_release);
@@ -10103,6 +10325,7 @@ int main(int argc, char** argv) {
             if (any) a_mark(h);
         };
         auto a_from = [&](const ASwap& w) -> const uint8_t* {   // step 2: where `in` is copied from (host work)
+            const strata::core::ReadCauseScope read_cause(strata::core::kReadAdapt);
             if (a_arena) {   // the arena's blob, pinned or not (a pageable one blocks the job thread, not the host)
                 const uint8_t* b = arena_src.blob_at(w.layer, w.in);   // (blob() counts reads_: not from this thread)
                 if (b == nullptr) {
@@ -12675,6 +12898,7 @@ int main(int argc, char** argv) {
             static const bool refill_parts = [] { const char* v = std::getenv("STRATA_REFILL_PARTS"); return v != nullptr && std::atoi(v) != 0; }();
             auto refill_issue = [&](PfPart& p, std::string& e) -> bool {
                 tr("refill start", (long long) p.lent.size());
+                const strata::core::ReadCauseScope read_cause(strata::core::kReadRefill);
                 const strata::core::OnDevice on(p.dev);
                 for (const auto& [i, slot] : p.lent) {   // D-4: queued, one wait (STRATA_REFILL_BLOCKING=1: each)
                     strata::core::BlobPart parts[3];
@@ -12890,6 +13114,8 @@ int main(int argc, char** argv) {
                 } seg_plan_scope{seg_plan};
                 auto run = [&](int64_t q, int64_t r) -> bool {
                     if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
+                    const strata::core::ReadPhaseScope read_phase(strata::core::kReadPrompt);
+                    if (helper_rows_on) drive.d.remote[0]->swaps_landed(true);   // its slots are read on another stream
                     return sp.run(ids.data() + q, r - q, q, e);
                 };
                 // (a layer split reads its stages as a pipeline over one run's chunks: beside slots a chunk at a time, with
@@ -13118,6 +13344,8 @@ int main(int argc, char** argv) {
                             conc_thread_cpus();
                             try {   // (an exception leaving a std::thread ends the process: a failed read instead)
                                 if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
+                                const strata::core::ReadPhaseScope read_phase(strata::core::kReadPrompt);
+                                if (helper_rows_on) drive.d.remote[0]->swaps_landed(true);
                                 read_ok = sp.run(ids.data() + q0, b0 - q0, q0, read_err);
                             } catch (const std::exception& x) {
                                 read_ok = false;
@@ -14851,6 +15079,14 @@ int main(int argc, char** argv) {
                                      "VRAM tier, %lld blob reads from the file\n",
                              (double) src.resident_bytes() / 1073741824.0, (long long) src.exchanges(),
                              (long long) src.file_reads());
+            if (remote_opt && (remote_opt->helper_exchanged() > 0 || remote_opt->helper_exchange_failed() > 0))
+                std::fprintf(stderr, "momoe serve: resident RAM: %lld helper-cache evictions moved into the RAM copy "
+                                     "(STRATA_HELPER_EXCHANGE), %lld could not be\n",
+                             (long long) remote_opt->helper_exchanged(), (long long) remote_opt->helper_exchange_failed());
+            if (helper_promote)   // cumulative
+                std::fprintf(stderr, "momoe serve: helper tier: %lld experts promoted from the helper, %lld evictions "
+                                     "rotated down through it (STRATA_HELPER_PROMOTE)\n",
+                             (long long) helper_promoted, (long long) helper_rotated);
             if (src.ram_adapts() > 0)   // STRATA_RAM_ADAPT, cumulative
                 std::fprintf(stderr, "momoe serve: resident RAM: %lld experts moved in from the file in place of "
                                      "unused ones (STRATA_RAM_ADAPT)\n", (long long) src.ram_adapts());
@@ -14875,6 +15111,21 @@ int main(int argc, char** argv) {
                                      "%.1f MB read%s\n", (long long) req_hits, (long long) src.ram_reads(),
                              (long long) src.file_reads(), (double) src.file_read_bytes() / 1e6,
                              src.gguf_mode() ? " (the GGUF in place)" : "");
+                // STRATA_READ_CAUSES=1: this request's file bytes by what they were read for
+                static const bool read_causes = [] { const char* v = std::getenv("STRATA_READ_CAUSES"); return v != nullptr && std::atoi(v) != 0; }();
+                if (read_causes) {
+                    static uint64_t cause_prev[strata::core::kReadCauses] = {};
+                    std::string line;
+                    for (int c = 0; c < strata::core::kReadCauses; ++c) {
+                        const uint64_t now = src.file_read_bytes(c);
+                        char buf[96];
+                        std::snprintf(buf, sizeof buf, "%s%s %.1f MB", c ? ", " : "", strata::core::read_cause_name(c),
+                                      (double) (now - cause_prev[c]) / 1e6);
+                        line += buf;
+                        cause_prev[c] = now;
+                    }
+                    std::fprintf(stderr, "momoe serve: file reads this request by cause: %s\n", line.c_str());
+                }
                 // what the OS did for this request (since the previous one): the drive's share of the file tier's reads
                 // against the page cache's, and what the I/O path did about it
                 static strata::platform::ProcIo io_prev;

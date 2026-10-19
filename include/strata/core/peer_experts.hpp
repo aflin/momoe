@@ -16,6 +16,7 @@
 #pragma once
 
 #include "strata/core/expert_cache.hpp"
+#include "strata/core/expert_holder.hpp"
 #include "strata/core/expert_source.hpp"
 
 #include <cuda_runtime.h>
@@ -32,7 +33,7 @@ namespace strata::core {
 void set_peer_portable(bool on);
 bool peer_portable();
 
-class PeerExperts {
+class PeerExperts : public ExpertHolder {
 public:
     PeerExperts() = default;
     ~PeerExperts();
@@ -45,19 +46,19 @@ public:
               ExpertSource& src, int64_t n_layers, int64_t n_expert, int reserve_mib, int64_t max_slots,
               std::string& err);
     void close();
-    bool valid() const { return device_ >= 0; }
-    int device() const { return device_; }
+    bool valid() const override { return device_ >= 0; }
+    int device() const override { return device_; }
 
     /// Whether the peer holds (layer, expert) right now.
-    bool has(int64_t layer, int64_t expert) const { return res_[(size_t) (layer * n_expert_ + expert)] >= 0; }
+    bool has(int64_t layer, int64_t expert) const override { return res_[(size_t) (layer * n_expert_ + expert)] >= 0; }
 
     /// The device address of (layer, expert)'s blob on the peer, or null when it is not resident.
-    const uint8_t* slot_ptr(int64_t layer, int64_t expert) {
+    const uint8_t* slot_ptr(int64_t layer, int64_t expert) override {
         const int32_t sl = res_[(size_t) (layer * n_expert_ + expert)];
         return sl >= 0 ? cache_.device_slot(sl) : nullptr;
     }
     /// Whether the primary (device 0) and the peer can read each other's memory directly (NVLink / PCIe P2P).
-    bool p2p() const { return p2p_; }
+    bool p2p() const override { return p2p_; }
 
     /// Starts the peer's share of one layer: the entries i with kind[i] == 2 (x: n_tok rows of n_embd floats).
     /// multi-GPU: with `out` (pinned, portable host rows) the peer writes its rows straight into

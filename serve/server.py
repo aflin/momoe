@@ -2637,8 +2637,16 @@ def layer_split_value(cfg: dict) -> str:
 
 def layer_split_of(cfg: dict) -> bool:
     """Several GPUs in the config are a layer split, unless the args put the later card(s) to another use: with
-    --peer-device the second card is an expert-cache tier, and the engine refuses that beside --layer-split (#665)."""
-    return len(gpu_list(cfg)) > 1 and "--peer-device" not in cfg["args"]
+    --peer-device the second card is an expert-cache tier, and the engine refuses that beside --layer-split (#665);
+    with --helper-tier it is the second expert tier under the first card's cache (docs/SECOND_GPU.md)."""
+    return len(gpu_list(cfg)) > 1 and not helper_cards(cfg)
+
+
+def helper_cards(cfg: dict) -> bool:
+    """The later GPU(s) of the config serve the first one's experts (--peer-device, --helper-tier) instead of running
+    layers of their own: no --layer-split, and the cards keep the config's order (the first is the primary)."""
+    args = cfg.get("args") or []
+    return "--peer-device" in args or "--helper-tier" in args
 
 
 def engine_args(cfg: dict) -> list[str]:
@@ -2835,7 +2843,7 @@ def ordered_gpus(cfg: dict, scores=None, vrams=None) -> list[int]:
     if len(gl) < 2 or cfg.get("gpu_order") == "as_given":
         return gl
     args = cfg.get("args") or []
-    if "--peer-device" in args or "--layer-split" in args or layer_split_value(cfg) != "auto":
+    if helper_cards(cfg) or "--layer-split" in args or layer_split_value(cfg) != "auto":
         return gl
     hip = cfg.get("backend") == "hip"
     sc = scores if scores is not None else (hip_speed_scores(gl) if hip else gpu_speed_scores(gl))
@@ -6930,8 +6938,8 @@ def main() -> int:
                 raise SystemExit(f"[momoe] config {e}")
             print(f"[momoe] layer split across GPUs {gpu_list(cfg)} ({split})", flush=True)
         elif len(gpu_list(cfg)) > 1:
-            print(f"[momoe] GPUs {gpu_list(cfg)}: the later card(s) serve as the peer expert tier (--peer-device)",
-                  flush=True)
+            tier = "the helper tier (--helper-tier)" if "--helper-tier" in cfg["args"] else "the peer expert tier (--peer-device)"
+            print(f"[momoe] GPUs {gpu_list(cfg)}: the later card(s) serve as {tier}", flush=True)
         # a relative "exe" is the config's cwd's: Windows' CreateProcess resolves "engine/strata.exe" against nothing
         # it is told about (WinError 2), so it is made absolute here
         exe = cfg["exe"] if os.path.isabs(cfg["exe"]) else os.path.abspath(os.path.join(cfg.get("cwd") or ".", cfg["exe"]))

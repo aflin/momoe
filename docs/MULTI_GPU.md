@@ -11,6 +11,10 @@ verify window (a few hundred KB through pinned RAM), not twice per layer. No NVL
 needed; cards on x4 or x1 slots work, and the PCIe share of each card is probed on its own link. A `--pcie-frac` you give
 is every card's share and skips those probes; there is no per-card setting yet.
 
+**Two different cards** (a fast one and a slower one that a split would give only a few layers): the helper tier
+keeps the model on the fast card and makes the other one a second tier of experts under its cache, which takes those
+experts out of RAM ([SECOND_GPU.md](SECOND_GPU.md), "The helper tier", `--helper-tier`; setup offers it).
+
 ## Using it
 
 **Nothing to type.** `START-HERE.bat` (Linux: `./setup.sh`) lists your NVIDIA cards and says for each one whether

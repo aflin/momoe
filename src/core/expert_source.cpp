@@ -69,6 +69,20 @@
 
 namespace strata::core {
 
+namespace {
+std::atomic<int> g_read_phase{kReadDecode};
+thread_local int t_read_cause = -1;
+}  // namespace
+
+const char* read_cause_name(int cause) {
+    static const char* const names[kReadCauses] = {"decode", "prompt", "refill", "adapt", "helper adapt", "helper fill"};
+    return cause >= 0 && cause < kReadCauses ? names[cause] : "?";
+}
+void set_read_phase(int cause) { g_read_phase.store(cause, std::memory_order_relaxed); }
+int read_cause() { return t_read_cause >= 0 ? t_read_cause : g_read_phase.load(std::memory_order_relaxed); }
+ReadCauseScope::ReadCauseScope(int cause) : prev(t_read_cause) { t_read_cause = cause; }
+ReadCauseScope::~ReadCauseScope() { t_read_cause = prev; }
+
 namespace detail {
 
 bool cgroup_available_bytes(uint64_t limit, const CgroupMemoryStat& stat, uint64_t& bytes) {
@@ -780,7 +794,7 @@ void FileExpertSource::io_worker() {
         }
         const bool ok = copy_from_files(layer, expert, dst);
         io_pf_blobs_.fetch_add(1, std::memory_order_relaxed);
-        if (ok) file_read_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
+        if (ok) note_file_bytes(layer_blob_bytes_[(size_t) layer]);
         {
             std::lock_guard<std::mutex> lk(stage_mu_);
             stage_busy_[v] = 0;
@@ -803,7 +817,7 @@ const uint8_t* FileExpertSource::io_blob(int64_t layer, int64_t expert) {
         const uint8_t* b = mapped_blob(layer, expert);
         if (b != nullptr) {
             const uint64_t total = layer_blob_bytes_[(size_t) layer];
-            file_read_bytes_.fetch_add(total, std::memory_order_relaxed);
+            note_file_bytes(total);
         }
         return b;
     }
@@ -818,7 +832,7 @@ const uint8_t* FileExpertSource::io_blob(int64_t layer, int64_t expert) {
         if (b != nullptr) {
             const uint64_t total = layer_blob_bytes_[(size_t) layer];
             io_cached_.fetch_add(total, std::memory_order_relaxed);
-            file_read_bytes_.fetch_add(total, std::memory_order_relaxed);
+            note_file_bytes(total);
             return b;
         }
     }
@@ -1081,6 +1095,7 @@ void FileExpertSource::close() {
     warm_hits_.store(0);
     warm_count_.store(0);
     file_read_bytes_.store(0);
+    for (auto& c : cause_bytes_) c.store(0);
     file_blob_bytes_.store(0);
     file_us_.store(0);
     io_cached_.store(0); io_uncached_.store(0); io_pread_bytes_.store(0); io_pread_us_.store(0); io_pread_n_.store(0);
@@ -1383,7 +1398,7 @@ bool FileExpertSource::fill_stage(size_t v, int64_t layer, int64_t expert, uint8
 void FileExpertSource::publish_stage(size_t v, int64_t layer, bool ok, double us) {
     file_us_.fetch_add((uint64_t) us, std::memory_order_relaxed);
     if (ok) {
-        file_read_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
+        note_file_bytes(layer_blob_bytes_[(size_t) layer]);
         file_blob_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
     }
     {
@@ -1480,7 +1495,7 @@ bool FileExpertSource::roles(int64_t layer, int64_t expert, const uint8_t*& gate
     gate = p[0];
     up = p[1];
     down = p[2];
-    file_read_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
+    note_file_bytes(layer_blob_bytes_[(size_t) layer]);
     file_blob_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
     if (complement_ready_) file_reads_.fetch_add(1, std::memory_order_relaxed);
     ++reads_;
@@ -2577,7 +2592,7 @@ bool FileExpertSource::copy_blob(int64_t layer, int64_t expert, uint8_t* dst) {
     if (!copy_from_files(layer, expert, dst)) return false;
     file_us_.fetch_add((uint64_t) std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
                        std::memory_order_relaxed);
-    file_read_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+    note_file_bytes(bytes);
     return true;
 }
 
@@ -2609,7 +2624,7 @@ bool FileExpertSource::copy_blobs(const int32_t* layers, const int32_t* experts,
             if (!copy_from_files(f.layer, f.e, f.dst)) return false;
     file_us_.fetch_add((uint64_t) std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
                        std::memory_order_relaxed);
-    file_read_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+    note_file_bytes(bytes);
     return true;
 }
 
@@ -3511,7 +3526,7 @@ bool FileExpertSource::replace_resident(int64_t layer, int64_t in, int64_t out) 
     if (!copy_from_files(layer, in, ram_adapt_buf_.data())) return false;
     file_us_.fetch_add((uint64_t) std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(),
                        std::memory_order_relaxed);
-    file_read_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+    note_file_bytes(bytes);
     // #2134: a Foresight slot may be copying out of `out`'s place right now; it is dropped (never served) before the place is rewritten
     ForesightSwap* fs = fs_swap_.load(std::memory_order_acquire);
     if (fs != nullptr) fs->hold(layer, (int32_t) out);
@@ -3520,6 +3535,29 @@ bool FileExpertSource::replace_resident(int64_t layer, int64_t in, int64_t out) 
     if (fs != nullptr) fs->unhold(layer, (int32_t) out);
     if (!moved) return false;
     ++ram_adapts_;
+    return true;
+}
+
+bool FileExpertSource::exchange_resident(int64_t layer, int64_t in, int64_t out, const uint8_t* out_bytes) {
+    if (!complement_ready_ || complement_host_ == nullptr || exchange_storage_.active() || !staged_.empty() ||
+        out_bytes == nullptr || layer < 0 || layer >= n_layers_ || in < 0 || out < 0 || in >= n_expert_ ||
+        out >= n_expert_ || in == out)
+        return false;
+    const size_t i_in = (size_t) layer * (size_t) n_expert_ + (size_t) in;
+    const size_t i_out = (size_t) layer * (size_t) n_expert_ + (size_t) out;
+    if (i_in >= complement_offsets_.size() || i_out >= complement_offsets_.size()) return false;
+    if (!override_.empty() && (override_[i_in] != nullptr || override_[i_out] != nullptr)) return false;
+    const uint64_t at = complement_offsets_[i_in], bytes = layer_blob_bytes_[(size_t) layer];
+    if (at == kNoComplement || complement_offsets_[i_out] != kNoComplement || at > complement_bytes_ ||
+        bytes > complement_bytes_ - at) return false;
+    // #2134: a Foresight slot may be copying out of `in`'s place right now; it is dropped before the place is rewritten
+    ForesightSwap* fs = fs_swap_.load(std::memory_order_acquire);
+    if (fs != nullptr) fs->hold(layer, (int32_t) in);
+    std::memcpy((uint8_t*) complement_host_ + (size_t) at, out_bytes, (size_t) bytes);
+    const bool moved = detail::exchange_cache_complement(complement_offsets_, i_in, i_out);
+    if (fs != nullptr) fs->unhold(layer, (int32_t) in);
+    if (!moved) return false;
+    ++helper_exchanges_;
     return true;
 }
 
@@ -3577,7 +3615,7 @@ const uint8_t* FileExpertSource::blob_stable(int64_t layer, int64_t expert) {
             if (resident_blob(index) != nullptr || (!override_.empty() && override_[index] != nullptr)) return blob(layer, expert);
         }
         const uint8_t* b = mapped_blob(layer, expert);
-        if (b != nullptr) file_read_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
+        if (b != nullptr) note_file_bytes(layer_blob_bytes_[(size_t) layer]);
         return b;
     }
     return blob(layer, expert);
@@ -3596,7 +3634,7 @@ int FileExpertSource::blob_parts(int64_t layer, int64_t expert, BlobPart* out) {
     const int ns = spans(layer, expert, sp);
     for (int i = 0; i < ns; ++i) out[i] = {sp[i].p, sp[i].n, sp[i].at};
     if (ns > 0) {
-        file_read_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
+        note_file_bytes(layer_blob_bytes_[(size_t) layer]);
         ++reads_;
     }
     return ns;
@@ -3625,7 +3663,7 @@ const uint8_t* FileExpertSource::blob(int64_t layer, int64_t expert) {
         } else {
             result = mapped_blob(layer, expert);
             if (result != nullptr) {
-                file_read_bytes_.fetch_add(layer_blob_bytes_[(size_t) layer], std::memory_order_relaxed);
+                note_file_bytes(layer_blob_bytes_[(size_t) layer]);
 #if defined(__linux__)
                 if (io_stats_) {   // STRATA_IO_STATS=1: what the page cache held when the kernels were handed the blob
                     uint64_t total = 0;

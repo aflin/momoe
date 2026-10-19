@@ -28,6 +28,10 @@ public:
     // Bracket the existing pool callback; its signature and dispatch remain unchanged.
     void begin(const float* weights, int token_begin, int tokens);
     void end() { weights_ = nullptr; }
+    /// STRATA_HELPER_EXCHANGE: swaps whose evicted expert took its replacement's place in the RAM copy, and those that
+    /// could not (cumulative).
+    int64_t helper_exchanged() const { return helper_exchanged_; }
+    int64_t helper_exchange_failed() const { return helper_exchange_failed_; }
     void copy_rows(float* dst, const float* src, int token_begin, int tokens,
                    const int32_t* hit_rows, const int32_t* count, void* stream) const;
     void combine(float* dst, float* scratch, int token_begin, int tokens,
@@ -49,5 +53,11 @@ private:
     int32_t* m_mask_ = nullptr;
     const float* weights_ = nullptr;
     int token_begin_ = 0, tokens_ = 0;
+    int64_t helper_exchanged_ = 0, helper_exchange_failed_ = 0;
+    // STRATA_HELPER_ASYNC: the page-locked copy-back buffers and the queued round's RAM exchanges
+    struct PendingExchange { int32_t layer, in, out; uint8_t* bytes; };
+    std::vector<uint8_t*> pool_;
+    std::vector<PendingExchange> px_;
+    bool live_ = false;
 };
 } // namespace strata::core

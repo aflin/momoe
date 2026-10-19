@@ -1,11 +1,13 @@
 #include "strata/core/remote_expert_opt.hpp"
 #include "strata/core/remote_experts.hpp"
+#include "strata/core/expert_source.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/elementwise.hpp"
 #include "strata/kernels/verify_kernels.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 namespace strata::core {
@@ -76,6 +78,7 @@ RemoteExpertOpt::~RemoteExpertOpt() {
         p.remote->remote_opt_ = nullptr;
     }
     if (h_sum_) cudaFreeHost(h_sum_);
+    for (uint8_t* b : pool_) cudaFreeHost(b);
 }
 
 size_t RemoteExpertOpt::metadata_bytes() { return sizeof(ReduceMeta); }
@@ -140,8 +143,29 @@ bool RemoteExpertOpt::owns(int64_t layer, int32_t expert) const {
 bool RemoteExpertOpt::adapt(const std::vector<float>& usage, const std::vector<int32_t>& primary,
                      const std::vector<std::pair<int32_t, int32_t>>& pending, int max_swaps,
                      ExpertSource& source) {
+    // STRATA_HELPER_SWAPS=N (opt-in): at most N swaps a round on each helper (its copies share the helper's stream and
+    // link with its rows; default: the primary's --adapt-swaps)
+    static const int cap = [] { const char* v = std::getenv("STRATA_HELPER_SWAPS"); return v != nullptr ? std::atoi(v) : -1; }();
+    if (cap >= 0) max_swaps = std::min(max_swaps, cap);
     if (max_swaps <= 0) return true;
+    const ReadCauseScope read_cause(kReadHelperAdapt);
     const auto& lay = strata::kernels::cpu::expert_layout();
+    static const bool exchange = [] { const char* v = std::getenv("STRATA_HELPER_EXCHANGE"); return v != nullptr && std::atoi(v) != 0; }();
+    FileExpertSource* ram = nullptr;
+    if (exchange)
+        if (auto* f = dynamic_cast<FileExpertSource*>(&source); f != nullptr && f->complement_ready()) ram = f;
+    // STRATA_HELPER_ASYNC=1 (opt-in): the swaps are queued on each helper's stream instead of waited for (its kernels
+    // follow them there, so the table changes at once); the previous round's copies are waited for here, and its RAM
+    // exchanges applied, before this round plans.
+    static const bool async = [] { const char* v = std::getenv("STRATA_HELPER_ASYNC"); return v != nullptr && std::atoi(v) != 0; }();
+    if (live_) {
+        for (auto& p : peers_) p.remote->swaps_landed(true);
+        for (const auto& x : px_)
+            if (ram == nullptr || !ram->exchange_resident(x.layer, x.in, x.out, x.bytes)) ++helper_exchange_failed_;
+            else ++helper_exchanged_;
+        px_.clear();
+        live_ = false;
+    }
     std::vector<uint8_t> resident(primary.size(), 0);
     for (size_t i = 0; i < primary.size(); ++i) resident[i] = primary[i] >= 0;
     for (const auto& [i, slot] : pending) resident[(size_t) i] = 1;
@@ -181,6 +205,57 @@ bool RemoteExpertOpt::adapt(const std::vector<float>& usage, const std::vector<i
         std::sort(swaps.begin(), swaps.end(), [](auto& a, auto& b) { return a.gain > b.gain; });
         if ((int) swaps.size() > max_swaps) swaps.resize((size_t) max_swaps);
         if (swaps.empty()) continue;
+        // STRATA_HELPER_EXCHANGE=1 (opt-in) with the resident RAM mode: the evicted expert is copied back from the slot
+        // first and takes the RAM place its replacement leaves, so the RAM copy keeps holding exactly the experts no GPU
+        // holds; without it `out` is left only in the model files (its next CPU use is a file read) and `in` stays in
+        // RAM beside its new slot.
+        if (async) {
+            const OnDevice on(r.device_);
+            while (pool_.size() < swaps.size()) {
+                uint8_t* b = nullptr;
+                if (cudaHostAlloc((void**) &b, (size_t) lay.max_blob, cudaHostAllocPortable) != cudaSuccess) {
+                    (void) cudaGetLastError();
+                    err = "page-locked swap buffers";
+                    return false;
+                }
+                pool_.push_back(b);
+            }
+            for (size_t i = 0; i < swaps.size(); ++i) {
+                const auto& s = swaps[i];
+                const int32_t slot = r.cache_.slot_of(s.layer, s.out);
+                const size_t nb = (size_t) lay.blob_bytes(s.layer);
+                const bool backed = ram != nullptr && ram->has_resident(s.layer, s.in) && !ram->has_resident(s.layer, s.out);
+                if (backed && !check(cudaMemcpyAsync(pool_[i], r.cache_.device_slot(slot), nb, cudaMemcpyDeviceToHost,
+                                                     r.stream_), err)) return false;
+                const uint8_t* in_blob = source.blob(s.layer, s.in);
+                if (!r.cache_.fill_slot(slot, in_blob, r.stream_, err, (int64_t) nb)) return false;
+                source.note_async_read(in_blob, r.stream_);
+                r.cache_.replace(s.layer, s.out, s.in);
+                if (backed) px_.push_back({s.layer, s.in, s.out, pool_[i]});
+            }
+            if (!r.mark_swaps(err)) return false;
+            live_ = true;
+            continue;
+        }
+        thread_local std::vector<std::vector<uint8_t>> back;
+        std::vector<uint8_t> backed(swaps.size(), 0);
+        if (ram != nullptr) {
+            if (back.size() < swaps.size()) back.resize(swaps.size());
+            std::vector<int32_t> bl, be;
+            std::vector<uint8_t*> bd;
+            std::vector<size_t> bi;
+            for (size_t i = 0; i < swaps.size(); ++i) {
+                const auto& s = swaps[i];
+                if (!ram->has_resident(s.layer, s.in) || ram->has_resident(s.layer, s.out)) continue;
+                back[i].resize((size_t) lay.blob_bytes(s.layer));
+                bl.push_back(s.layer); be.push_back(s.out); bd.push_back(back[i].data()); bi.push_back(i);
+            }
+            if (!bl.empty()) {
+                std::vector<uint8_t> got(bl.size(), 0);
+                if (!r.copy_cached_blobs(bl.data(), be.data(), bd.data(), bl.size(), got.data(), err)) return false;
+                for (size_t j = 0; j < bi.size(); ++j) backed[bi[j]] = got[j];
+            }
+        }
         const OnDevice on(r.device_);
         for (const auto& s : swaps) {
             const uint8_t* in_blob = source.blob(s.layer, s.in);
@@ -189,8 +264,13 @@ bool RemoteExpertOpt::adapt(const std::vector<float>& usage, const std::vector<i
             source.note_async_read(in_blob, r.stream_);   // #1237
         }
         if (!check(cudaStreamSynchronize(r.stream_), err)) return false;
-        for (const auto& s : swaps) {
+        for (size_t i = 0; i < swaps.size(); ++i) {
+            const auto& s = swaps[i];
             r.cache_.replace(s.layer, s.out, s.in);
+            if (backed[i]) {
+                if (ram->exchange_resident(s.layer, s.in, s.out, back[i].data())) ++helper_exchanged_;
+                else ++helper_exchange_failed_;
+            }
             const size_t base = (size_t) s.layer * r.n_expert_;
             resident[base + s.out] = 0;
             resident[base + s.in] = 1;

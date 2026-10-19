@@ -1,10 +1,12 @@
 #pragma once
 
 #include "strata/core/expert_cache.hpp"
+#include "strata/core/expert_holder.hpp"
 #include "strata/core/expert_source.hpp"
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -17,7 +19,7 @@ class RemoteExpertOpt;
 
 /// A static, profile-filled expert tier on another CUDA device. CUDA0 keeps all
 /// dense weights and state; results return through the existing pinned CPU rows.
-class RemoteExperts {
+class RemoteExperts : public ExpertHolder {
 public:
     RemoteExperts() = default;
     ~RemoteExperts();
@@ -32,6 +34,12 @@ public:
               const ExpertCache& primary, ExpertSource& source,
               std::vector<uint8_t>& claimed, std::string& err, bool auto_size = false);
     void close();
+    /// Before open(): at most `max_bytes` of experts (0: no cap), and an automatic size leaves `reserve_bytes` free
+    /// (at least 512 MiB).  --helper-gib, --helper-reserve-mib.
+    void set_limits(uint64_t max_bytes, uint64_t reserve_bytes) {
+        max_bytes_ = max_bytes;
+        reserve_bytes_ = std::max<uint64_t>(reserve_bytes, 512ull << 20);
+    }
 
     /// `kind` is the primary verifier's classification (-1 = CPU candidate),
     /// or null on the one-token path. Entries already served on CUDA0 are excluded.
@@ -41,6 +49,15 @@ public:
     bool owns(int64_t index) const { return owned_[(size_t) index] != 0; }
     /// This helper's cache holds (layer, expert): begin() will take its rows unless the plan gave them away.
     bool holds(int64_t layer, int32_t expert) const { return cache_.slot_of(layer, expert) >= 0; }
+    // ExpertHolder (STRATA_PREFILL_HELPER_ROWS: the prompt path hands this helper the rows of the experts it holds)
+    bool valid() const override { return device_ >= 0; }
+    int device() const override { return device_; }
+    bool has(int64_t layer, int64_t expert) const override { return cache_.slot_of(layer, (int32_t) expert) >= 0; }
+    const uint8_t* slot_ptr(int64_t layer, int64_t expert) override {
+        const int32_t sl = cache_.slot_of(layer, (int32_t) expert);
+        return sl >= 0 ? cache_.device_slot(sl) : nullptr;
+    }
+    bool p2p() const override { return false; }   // the host route (the helper's rows already come back that way)
     bool optimized_decode() const { return remote_opt_ != nullptr; }
     bool finish(float* out, std::string& err);
     int64_t resident() const { return cache_.resident(); }
@@ -62,10 +79,29 @@ public:
     bool copy_cached_blobs(const int32_t* layers, const int32_t* experts, uint8_t* const* dst, size_t n,
                            uint8_t* hit, std::string& err);
 
+    /// STRATA_HELPER_PROMOTE: the slot holding (layer, held) is given to `incoming`.  When `held_bytes` is not null
+    /// the slot's old blob is copied there first; then `incoming_bytes` (a host blob of `layer`) is written into the
+    /// slot.  Synchronous on this helper's stream, for the adaptive tier between windows (nothing computes here then).
+    /// False with `err` on a CUDA failure, or when this cache does not hold (layer, held) or already holds `incoming`.
+    bool swap_slot(int32_t layer, int32_t held, int32_t incoming, uint8_t* held_bytes, const uint8_t* incoming_bytes,
+                   std::string& err);
+    /// The same, queued on this helper's stream instead of waited for: the slot's old blob goes to `held_bytes`
+    /// (read_event() is recorded after that copy), then the stream waits for `write_after` (an event of another
+    /// device: the copy that fills `incoming_bytes`) and writes `incoming_bytes` into the slot.  The table changes at
+    /// once: this helper's kernels run on the same stream, after the copy.  Both buffers must stay untouched until
+    /// swaps_landed() says so (mark_swaps() after the last swap of a round).
+    bool swap_slot_async(int32_t layer, int32_t held, int32_t incoming, uint8_t* held_bytes,
+                         const uint8_t* incoming_bytes, cudaEvent_t write_after, std::string& err);
+    cudaEvent_t read_event() const { return swap_read_ev_; }
+    bool mark_swaps(std::string& err);
+    /// Whether every swap queued before mark_swaps() has landed (`wait`: block until it has).
+    bool swaps_landed(bool wait);
+
 private:
     friend class RemoteExpertOpt;
     RemoteExpertOpt* remote_opt_ = nullptr;
     int device_ = -1;
+    uint64_t max_bytes_ = 0, reserve_bytes_ = 512ull << 20;
     int64_t n_expert_ = 0;
     int32_t groups_ = 0;
     int64_t computed_ = 0;
@@ -76,6 +112,8 @@ private:
     ExpertCache cache_;
     cudaStream_t stream_ = nullptr;
     cudaStream_t read_stream_ = nullptr;   ///< STRATA_PREFILL_HELPER_SOURCE: cache -> host copies
+    cudaEvent_t swap_read_ev_ = nullptr;   ///< STRATA_HELPER_PROMOTE: a queued swap's copy back has landed
+    cudaEvent_t swap_done_ev_ = nullptr;   ///< STRATA_HELPER_PROMOTE: a round's queued swaps have landed
     std::mutex read_mu_;                   ///< one cache reader at a time (the stager is threaded)
     float* h_x_ = nullptr;
     float* h_out_ = nullptr;

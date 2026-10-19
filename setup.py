@@ -1603,12 +1603,43 @@ def start_gpus(text):
     return parse_gpus(text, found)
 
 
+def helper_pair(can) -> list:
+    """The helper tier's pair (--helper-tier, docs/SECOND_GPU.md): the first two cards that can share a model when they
+    are not the same card (another model or another amount of VRAM), the main one first.  Empty otherwise: two equal
+    cards share a model better as a layer split."""
+    if len(can) < 2:
+        return []
+    x, y = can[0], can[1]
+    if x["name"] == y["name"] and round(x["vram_gb"]) == round(y["vram_gb"]):
+        return []
+    return [x, y]
+
+
+def helper_tier_gb(g) -> float:
+    """About how many GB of experts the helper card holds: its free VRAM less the 1.6 GB the tier keeps for its prompt
+    buffers (measured: 8.0 GiB of experts on an RTX 3060 12 GB that also drives the desktop)."""
+    free = gpu_free_gb(g["index"])
+    return max(0.0, (free if free is not None else g["vram_gb"] - 0.5) - 1.6)
+
+
+def helper_tier_lines(pair) -> list:
+    x, y = pair
+    text = (f"Or the helper tier: {gpu_name(x)} runs the model as it would alone, and {gpu_name(y)} holds a second "
+            f"tier of experts under its cache - about {helper_tier_gb(y):.0f} GB of them that then need no RAM, so the "
+            "PC keeps that much more memory free. Measured on an RTX 4070 Ti + RTX 3060 (Flash-Next IQ3_XXS): answers "
+            "about as fast as the 4070 Ti alone, prompts up to ~4K tokens ~20% faster, 16K-token prompts ~12% slower. "
+            "For two different cards (two equal ones share the model better). Details: docs/SECOND_GPU.md.")
+    return textwrap.wrap(text, width=110, initial_indent="  ", subsequent_indent="  ")
+
+
 def choose_gpus(a, found) -> list:
     """Which cards this install uses: --gpus / --gpu, or asked when two or more can share the model (the two best
     together recommended), else the supported card with the most VRAM.  Returns their numbers, the main one first."""
     if a.gpus:
         sel = parse_gpus(a.gpus, found)
         check_gpus(sel, found, yes=a.yes, named=str(a.gpus).strip().lower() != "all")
+        if a.helper_tier and len(sel) != 2:
+            fail("--helper-tier needs two GPUs", "name them with --gpus, the main one first: --gpus 1,0 --helper-tier")
         return sel
     if a.gpu is not None:
         check_gpus([a.gpu], found)
@@ -1619,26 +1650,44 @@ def choose_gpus(a, found) -> list:
         fail("none of your GPUs can run Momoe", "it needs an NVIDIA RTX 20 series or newer (compute capability 7.5+)")
     can = together_ok(found)
     if not can:
+        if a.helper_tier:
+            warn("--helper-tier: this PC has no two GPUs that can share a model; one GPU runs it")
+            a.helper_tier = False
         return [single[0]["index"]]
+    hp = helper_pair(can)
+    if a.helper_tier:
+        if hp:
+            return [g["index"] for g in hp]
+        warn("--helper-tier: the two GPUs are the same card - they share the model better as a layer split, which "
+             "is offered instead (or name them: --gpus 0,1 --helper-tier)")
+        a.helper_tier = False
     say()
     say(f"  Momoe can run the model on one GPU, or share it across {'these' if len(can) > 2 else 'both'}: then each"
         " card holds the")
     say("  experts of its own layers, so together they hold about twice as many, and prompts are read about 20%")
     say("  faster (details: docs/MULTI_GPU.md). A much slower extra card can also make it slower.")
-    opts = [can[:2]] + ([can] if len(can) > 2 else []) + [[g] for g in single]
+    if hp:
+        for line in helper_tier_lines(hp):
+            say(line)
+    opts = [can[:2]] + ([can] if len(can) > 2 else []) + ([hp] if hp else []) + [[g] for g in single]
+    tier_at = 2 + (len(can) > 2) if hp else 0     # the helper tier's entry (1-based), 0: not offered
     # #448: a pair whose second card cannot lend a 4096-token chunk recommends the first card alone (still offered)
     short = split_short(can[:2])
     rec = next(i for i, o in enumerate(opts, 1) if o == [can[0]]) if short else 1
     for i, o in enumerate(opts, 1):
-        label = (" + ".join(gpu_name(g) for g in o) + " together") if len(o) > 1 else gpu_name(o[0]) + " only"
+        if i == tier_at:
+            label = f"{gpu_name(o[0])} + {gpu_name(o[1])} as its second expert tier (helper tier: less RAM)"
+        else:
+            label = (" + ".join(gpu_name(g) for g in o) + " together") if len(o) > 1 else gpu_name(o[0]) + " only"
         say(f"  {i}) {label}" + ("   (recommended)" if i == rec else ""))
     for g in found:
         if gpu_problem(g, together=True) is not None:
             say(f"     (GPU {g['index']}, {g['name']}: {gpu_problem(g, together=True)})")
     for g in short:
         say(f"     ({split_short_note(g)})")
-    pick = opts[int(ask("Which GPUs?", [str(i) for i in range(1, len(opts) + 1)], str(rec), a.yes or a.check)) - 1]
-    return [g["index"] for g in pick]
+    n = int(ask("Which GPUs?", [str(i) for i in range(1, len(opts) + 1)], str(rec), a.yes or a.check))
+    a.helper_tier = n == tier_at
+    return [g["index"] for g in opts[n - 1]]
 
 
 def split_mmap(cfg: dict) -> bool:
@@ -6388,6 +6437,10 @@ def main() -> int:
     ap.add_argument("--layer-split", help="with --gpus: where each later GPU's layers start (\"18\", \"16,32\"), one "
                                           "rising number per GPU after the first - not layers per card; default "
                                           "auto, placed from each GPU's free VRAM")
+    ap.add_argument("--helper-tier", action="store_true",
+                    help="with two different NVIDIA GPUs: the second one holds a second tier of experts under the main "
+                         "one's cache instead of running layers of its own - the experts it holds need no RAM "
+                         "(docs/SECOND_GPU.md). With --gpus, the main one first; otherwise the two best cards. Saved")
     ap.add_argument("--no-remote-expert-opt", action="store_true",
                     help="with two or more GPUs: leave out --remote-expert-opt, which setup adds there (#578)")
     ap.add_argument("--host", help="where the server listens: 127.0.0.1 = this PC only (default), 0.0.0.0 = also other "
@@ -6610,6 +6663,7 @@ def main() -> int:
         if a.check and not hip:
             say(f"  (the AMD card: {'START-HERE.bat' if WIN else './setup.sh'} --backend hip)")
     cuda_tk = 13                                       # NVIDIA: the toolkit of this model's engine (cuda_choice)
+    helper = None                                      # --helper-tier's second card (NVIDIA, below)
     if hip:                                            # AMD: compiled here, on Linux
         if WIN:                                        # Strata's Windows AMD engine is its ready-made one: Momoe has none
             fail("Momoe runs AMD cards on Linux only for now: on Windows there is no AMD engine to compile",
@@ -6671,7 +6725,10 @@ def main() -> int:
         if len(found) > 1 or gpu_problem(found[0]) is not None:
             gpu_table(found)
         sel = choose_gpus(a, found)                    # asked when two or more cards can share the model
-        multi = sel if len(sel) > 1 else []
+        # --helper-tier: the second card is the main one's second expert tier, not a stage of a split - everything
+        # below is sized for the main card alone, as on one GPU, and the config names both (with --helper-tier)
+        helper = sel[1] if a.helper_tier and len(sel) == 2 else None
+        multi = sel if len(sel) > 1 and helper is None else []
         a.gpu = sel[0]                                 # the main GPU: the checks and the sizing below are its
         GPU_PICK = a.gpu
         gpu = gpu_info(a.gpu)
@@ -6679,6 +6736,8 @@ def main() -> int:
         gpu["archs"] = sorted({x["arch"] for x in chosen})  # the engine needs code for every one of them
         if multi:
             ok("GPUs: " + " + ".join(gpu_name(x) for x in chosen) + " together (the model's layers are split across them)")
+        elif helper is not None:
+            ok(f"GPUs: {gpu_name(chosen[0])}, with {gpu_name(chosen[1])} as its second expert tier (--helper-tier)")
         ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, compute capability {cc(gpu)}, driver {gpu['driver']}")
         cuda_tk, why = cuda_choice(gpu["archs"], a.cuda)   # one engine per model: its oldest card decides
         if why:
@@ -6892,6 +6951,9 @@ def main() -> int:
                      "it anyway", "  Try it anyway?")
         warn(f"installing {fam['title']} {size_of(model)} on {gpu_name(gpu)}, as you chose (untested: please report "
              "how it runs)")
+    if helper is not None and (fam.get("one_gpu") or small_family(family)):
+        warn(f"{fam['title']}: the helper tier is measured with Qwen3.8-Flash-Next only: using {gpu_name(gpu)} alone")
+        helper = None
     if fam.get("one_gpu") and multi:
         # like UD-Q4_K_XL's RAM budget: the engine has no layer split for this model yet, so one card runs it
         warn(f"{fam['title']} runs on one GPU for now (the engine has no layer split for it yet): using "
@@ -7555,6 +7617,14 @@ def main() -> int:
     if gpu["count"] > 1 or a.gpu is not None:
         cfg["gpu"] = gpu["index"]                      # the engine is told this card (issue #51)
         cfg["gpus_asked"] = True                       # chosen at setup: not asked again at start
+    if helper is not None:                             # the helper tier: the main card first, then the helper
+        cfg["gpu"] = [gpu["index"], helper]
+        cfg["gpus_asked"] = True
+        if "--helper-tier" not in cfg["args"]:
+            cfg["args"].append("--helper-tier")
+        ok(f"helper tier: GPU {helper} holds a second tier of experts under GPU {gpu['index']}'s cache (--helper-tier; "
+           'tune it with --helper-gib / --helper-reserve-mib in "args", or STRATA_HELPER_* in "env": '
+           "docs/SECOND_GPU.md)")
     if multi:                                          # a layer split across these cards (the server adds the flag)
         cfg["gpu"] = multi
         cfg["layer_split"] = a.layer_split or "auto"

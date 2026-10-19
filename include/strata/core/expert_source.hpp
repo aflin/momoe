@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
@@ -151,6 +152,39 @@ int64_t append_stage_lend_regions(int64_t n_layers, int64_t n_expert, const std:
                                   std::string& err);
 
 }  // namespace detail
+
+/// What a read of the model files was for (STRATA_READ_CAUSES=1, a diagnostic: the resident RAM mode's file reads
+/// split by cause in the per-request log).  A thread's own scope (ReadCauseScope) wins over the serve loop's phase
+/// (set_read_phase: the prompt, or decode between prompts), so the pool workers and the prompt path's stager threads
+/// are counted by the phase and the adaptive tiers by their scopes.
+enum ReadCause : int {
+    kReadDecode = 0,      ///< the verify windows: the CPU pool's misses, the PCIe share (the default phase)
+    kReadPrompt,          ///< the prompt path: its streamed experts and its stager copies
+    kReadRefill,          ///< the prompt path's loan given back: the lent slots refilled
+    kReadAdapt,           ///< the primary GPU cache's adaptive swaps
+    kReadHelperAdapt,     ///< a helper cache's adaptive swaps (RemoteExpertOpt::adapt)
+    kReadHelperFill,      ///< a helper cache's fill at start
+    kReadCauses
+};
+const char* read_cause_name(int cause);
+/// The serve loop's phase, for every thread without a scope of its own.
+void set_read_phase(int cause);
+/// This thread's cause: its innermost scope, else the phase.
+int read_cause();
+struct ReadCauseScope {
+    explicit ReadCauseScope(int cause);
+    ~ReadCauseScope();
+    ReadCauseScope(const ReadCauseScope&) = delete;
+    ReadCauseScope& operator=(const ReadCauseScope&) = delete;
+    int prev;
+};
+/// The phase for as long as it lives (the prompt), then back to decode.
+struct ReadPhaseScope {
+    explicit ReadPhaseScope(int cause) { set_read_phase(cause); }
+    ~ReadPhaseScope() { set_read_phase(kReadDecode); }
+    ReadPhaseScope(const ReadPhaseScope&) = delete;
+    ReadPhaseScope& operator=(const ReadPhaseScope&) = delete;
+};
 
 
 
@@ -763,6 +797,13 @@ public:
     /// STRATA_EXCHANGE_ROTATE (false, nothing changes).
     bool replace_resident(int64_t layer, int64_t in, int64_t out);
     int64_t ram_adapts() const { return ram_adapts_; }
+    /// STRATA_HELPER_EXCHANGE: a helper GPU cache swapped `in` (held by this copy) into a slot and evicted `out` (held by
+    /// no one else); `out_bytes` is that slot's old content, copied back before the slot was overwritten.  The copy
+    /// gives `in`'s place to `out`, so it keeps holding exactly the experts no GPU holds - as `commit_exchanges` does
+    /// for the primary cache - with no read of the file.  The same conditions as `replace_resident` (the caller's
+    /// thread, between windows, nothing reading `in`'s blob); false changes nothing.
+    bool exchange_resident(int64_t layer, int64_t in, int64_t out, const uint8_t* out_bytes);
+    int64_t helper_exchanges() const { return helper_exchanges_; }
     bool exchange_rotation() const { return exchange_storage_.active(); }
     uint64_t rotated_exchanges() const { return exchange_storage_.exchanges(); }
     uint64_t avoided_exchange_copy_bytes() const { return exchange_storage_.avoided_bytes(); }
@@ -773,6 +814,10 @@ public:
     /// `file_reads` counts, plus the prompt path's copies of them).
     int64_t ram_reads() const { return ram_reads_.load(std::memory_order_relaxed); }
     uint64_t file_read_bytes() const { return file_read_bytes_.load(std::memory_order_relaxed); }
+    /// STRATA_READ_CAUSES: those bytes by ReadCause (always counted; cheap).
+    uint64_t file_read_bytes(int cause) const {
+        return cause >= 0 && cause < kReadCauses ? cause_bytes_[(size_t) cause].load(std::memory_order_relaxed) : 0;
+    }
     /// Of those, the bytes `blob` read (decode windows, adaptive swaps; the rest are the prompt path's copies), and
     /// the time spent reading the files, summed over threads.
     uint64_t file_blob_bytes() const { return file_blob_bytes_.load(std::memory_order_relaxed); }
@@ -975,6 +1020,12 @@ private:
     std::atomic<uint64_t> stage_fence_waits_{0};      ///< refills that had to wait for a queued copy
     std::atomic<int64_t> ram_reads_{0};
     std::atomic<uint64_t> file_read_bytes_{0};
+    std::array<std::atomic<uint64_t>, kReadCauses> cause_bytes_{};
+    int64_t helper_exchanges_ = 0;
+    void note_file_bytes(uint64_t bytes) {
+        file_read_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+        cause_bytes_[(size_t) read_cause()].fetch_add(bytes, std::memory_order_relaxed);
+    }
     // ---- the Linux I/O path (set_io_prefetch)
     bool io_pf_ = false;
     bool io_fill_ = false;                            ///< experts.bin: the workers only fill the page cache (large preads), no staging, nothing waits

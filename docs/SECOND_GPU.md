@@ -207,6 +207,89 @@ cache in real VRAM; freeing another app's sticky allocation on the same card
 was worth about the same again.  Prefer explicit counts on a card that shares
 its VRAM with anything else.
 
+## The helper tier (`--helper-tier`)
+
+For two different NVIDIA cards, where the slower one would hold only a few layers of a split. The main card runs the
+model as it would alone; the other card is the **second tier of experts under the main card's cache**, and the RAM
+copy holds the rest. Each expert is in exactly one place:
+
+1. the main card's cache (computed there);
+2. the helper card's cache (computed there; the rows come back through pinned RAM, no P2P needed);
+3. the RAM copy (`--resident-experts`: computed by the CPU, or read over PCIe);
+4. the model file, only before it is loaded.
+
+When the main card's cache follows the conversation it promotes an expert from the helper, and the expert it evicts
+goes down to the helper's slot; the helper's own evictions go down to RAM, into the place the expert it takes in
+leaves. The experts the helper holds need no RAM, and when a prompt is read the helper computes their rows itself.
+
+**One switch.** `--helper-tier` in the config's `"args"`, with both cards in `"gpu"`, the main one first:
+
+```json
+"gpu": [1, 0],
+"args": [..., "--helper-tier"]
+```
+
+It turns on `--expert-cache-device1 auto`, `--remote-expert-opt`, the resident RAM mode (unless the config chose
+`--mmap-experts` or `--resident-budget-gib`), and the settings below. With `--helper-tier` the server adds no
+`--layer-split` and keeps the cards in the config's order. Setup offers it when two different cards can share the
+model (`--helper-tier` at setup: the two best, or the ones `--gpus` names).
+
+**The limits on the helper card:**
+- `--helper-gib G`: at most G GiB of its VRAM for experts (default: what fits).
+- `--helper-reserve-mib N`: what its cache leaves free. Default 1600 with `--helper-tier`, for the prompt buffers
+  the helper needs to compute prompt rows, and 512 without it.
+- `--expert-cache-device1 N`: a fixed number of experts instead.
+
+**Each setting on its own.** `--helper-tier` sets these only where the environment does not, so any of them can be
+changed in the config's `"env"` (`"env": {"STRATA_HELPER_SWAPS": "8"}`), or `0` to turn one off:
+
+| variable | `--helper-tier` | what it does |
+|---|---|---|
+| `STRATA_HELPER_EXCHANGE` | 1 | the helper's evictions take their replacements' places in RAM (without it they are left only in the model file) |
+| `STRATA_HELPER_PROMOTE` | 1 | the main cache promotes from the helper and evicts into it (without it, the helper's experts can never move up) |
+| `STRATA_HELPER_PROMOTE_MAX` | 32 (unset) | at most this many promotions and rotations a round |
+| `STRATA_HELPER_ASYNC` | 1 | the helper's own swaps are queued on its stream, not waited for |
+| `STRATA_HELPER_SWAPS` | 16 | at most this many of the helper's own swaps a round (the default, `--adapt-swaps` 96, held up its rows) |
+| `STRATA_HELPER_LEND` | 1 | the prompt path's borrowed slots keep their experts in RAM (~3.4 GiB on a 12 GB main card) |
+| `STRATA_PREFILL_HELPER_SOURCE` | 1 | the prompt path copies an expert the helper holds from the helper, not from the file |
+| `STRATA_PREFILL_HELPER_ROWS` | 1 | the helper computes the prompt rows of the experts it holds |
+| `STRATA_READ_CAUSES` | (unset) | a diagnostic: each request's file reads, by what they were for |
+
+Without `--helper-tier` and these variables nothing changes.
+
+**Measured** on an RTX 4070 Ti (main) + RTX 3060 12 GB (helper, also drives the desktop), Ryzen 9 5950X, 63 GB of
+RAM, Linux, Qwen3.8-Flash-Next IQ3_XXS, 64K context, int8 KV, `--mtp`; `tools/strata_bench.py`, 3 runs per test,
+greedy, 2026-10-18:
+
+| | 4070 Ti alone (two runs) | `--helper-tier` |
+|---|---:|---:|
+| experts on the GPUs | 2,910 | 2,825 + 5,492 on the 3060 (8.83 GiB) |
+| experts in RAM | ~41 GiB (all of them) | 29.9 GiB |
+| the PC's available memory | 2.1 GB | 11.8 GB |
+| short chat, decode tok/s | 58.2 / 55.9 | 59.7 |
+| agent session, decode tok/s | 63.7 / 63.8 | 68.3 |
+| 4K-token prompt, tok/s | 1,178 | 1,478 |
+| 16K-token prompt, tok/s | 2,130 | 1,813 |
+| agent turn, first token | 3.37 s | 2.51 s |
+
+The same configuration moved 64.5-71.1 tok/s between runs in the agent session, so decode is about the same as the
+main card alone; prompts up to ~4K tokens are faster and 16K-token prompts slower. Draft acceptance was 61-63% in
+every helper-tier run (60-61% alone). The output is not bit-identical to the main card alone (the experts are
+computed on other devices). Not measured: other cards or models, two equal cards (a layer split should suit them
+better: each card runs its own layers, with no wait for the other card inside a layer), Windows.
+
+What the separate settings did, in the same benchmark (decode short chat / agent, prompt 4K / 16K):
+
+| step | decode | prompt | file reads |
+|---|---|---|---|
+| helper cache + `--resident-experts`, nothing else | 42.6 / 69.8 | 930 / 1,413 | 482 GB |
+| + exchange, promotion, async, 16 swaps a round | 61.5 / 71.1 | 854 / 1,332 | ~386 GB (327 GB of them prompts) |
+| + the helper as the prompt's source, the lend region in RAM | 61.3 / 64.5 | 1,025 / 1,559 | 66 GB |
+| + the helper computes its prompt rows (`--helper-tier`) | 59.7 / 68.3 | 1,478 / 1,813 | 65 GB |
+
+`--peer-device` was tried on the same pair and kept the 3060's experts in RAM too (38.7 GiB), and its prompt buffers
+did not fit beside its cache.
+
 ## Choosing the primary device on Windows (`STRATA_PRIMARY_DEVICE`)
 
 The engine runs the model on the device the runtime numbers 0.  Windows' HIP
