@@ -50,7 +50,8 @@ Early, and maintained by one person. MoMoE has three engines:
 - **Strata's engine** (`momoe`), on Linux with an NVIDIA card: Qwen3.8-Flash-Next and the Qwen3.6 family.
 - **MoMoE's ggml engine** (`momoe-cuda`), on Linux with an NVIDIA card, including the DGX Spark, whose GB10 shares its
   128 GB of memory with the CPU. The experts that don't fit are read from the SSD directly, at 10-13 GB/s. It runs
-  Nemotron 3.5 Bolt and GLM-5.3-Flash.
+  Nemotron 3.5 Bolt and GLM-5.3-Flash. It also runs LFM2.5-24B-A2B on an 8 GB Jetson Orin Nano Super: there the
+  experts that don't fit are copied from the file cache, which holds most of the rest.
 - **MoMoE's Metal engine** (`momoe-metal`, [src/metal](src/metal/README.md)), on Apple Silicon Macs (early). On a Mac
   with less than about 28 GB, the experts that don't fit are read from the SSD as needed.
 
@@ -71,6 +72,7 @@ The machines the models were tested on:
 | --- | --- |
 | **PC** | Linux (Debian 12), NVIDIA RTX 4070 Ti (12 GB), Ryzen 9 5950X, 63 GB of RAM; an RTX 3060 (12 GB) too, for the [helper tier](#two-different-gpus-the-helper-tier) |
 | **Spark** | NVIDIA DGX Spark: GB10, 128 GB of memory shared by the CPU and the GPU |
+| **Jetson** | NVIDIA Jetson Orin Nano Super developer kit: 8 GB shared by the CPU and the GPU (7.3 GiB usable, about 5.9 GiB free beside its desktop), its 15 W power mode, an NVMe SSD |
 | **M4 Air** | MacBook Air M4, 32 GB |
 | **M4 Air, simulated 16 GB** | the same MacBook with 16 GiB of its memory wired away (`mlock`), so that macOS can neither use nor swap it |
 | **M1 Ultra** | Mac Studio M1 Ultra, 64 GB |
@@ -96,6 +98,9 @@ Speeds are in tokens per second. "Writes" is the speed of the answer, "reads" th
 | | | Spark, UD-Q4_K_XL (not offered by setup), every expert in memory | 20.2 | | |
 | [GLM-5.3-Flash 320B-A18B](https://huggingface.co/zai-org/GLM-5.3-Flash), files by [Unsloth](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF) (`--family glm53`) | UD-IQ3_XXS (setup's choice), UD-IQ4_XS, UD-Q3_K_XL (the DGX Spark; text only) | Spark, UD-IQ3_XXS, drafting on | 15.0 / 14.6 | | not measured |
 | | | Spark, UD-IQ4_XS, drafting on | 11.7 / 10.4 | 69 (3,620 tokens) | 2.3 / 2.5 |
+| [LFM2.5-24B-A2B](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B), files by [Unsloth](https://huggingface.co/unsloth/LFM2.5-24B-A2B-GGUF) (`--family lfm25`) | UD-IQ3_XXS (setup's choice), UD-IQ2_M, UD-Q4_K_XL (Linux and NVIDIA only) | Jetson, UD-IQ3_XXS, 16K context | 7.0 (server) / 6.9 (engine) | not measured | 4.8 (best fit) / 3.7-4.3 (server) |
+| [LFM2.5-8B-A1B](https://huggingface.co/LiquidAI/LFM2.5-8B-A1B), files by [Unsloth](https://huggingface.co/unsloth/LFM2.5-8B-A1B-GGUF) (`--family lfm25-8b`) | UD-Q4_K_XL (setup's choice), UD-IQ3_XXS, Q8_0 (Linux and NVIDIA only) | Jetson, UD-Q4_K_XL | 16.6 (engine) | not measured | 17.2 (best fit) |
+| | | Jetson, UD-IQ3_XXS, every expert in memory | 18.4 (engine) | not measured | 20.5 (all on the GPU) |
 
 How these were measured:
 - **Two numbers ("30.0 / 30.6"):** the server, 400-token chats, greedy / sampled.
@@ -106,6 +111,15 @@ How these were measured:
   Both times macOS hung while the 19.3 GB file was loading and restarted itself (a kernel panic, about two minutes
   in). The CPU-only run was not tried.
 - **Bolt on the Spark:** the engine on its own, not the server.
+- **LFM2.5 on the Jetson:** the 24B's server wrote a 1,699-token chat at 7.0 tok/s overall; the engine on its own, a
+  300-token answer at 6.8-6.9 tok/s over its second half (three runs), with the 2.2 GiB expert store it sizes itself.
+  The 8B, the same way: 200-token answers. On the Jetson a token runs as one GPU graph without stops (the experts
+  made resident through mailboxes, the store in host memory: 8B UD-Q4_K_XL 13.4 -> 16.3 tok/s, 24B 6.1 -> 6.7, same
+  tokens). llama.cpp (b11724, `llama-bench`, tg128): the 24B 4.8 tok/s with the experts of 16 layers on the GPU (the
+  most that fit), 4.2 with every expert on the CPU, its server 3.7-4.3 (8 layers' experts beside itself); the 8B
+  UD-Q4_K_XL 17.2 with 18 of 24 layers' experts on the GPU, UD-IQ3_XXS 20.5 all on the GPU. Greedy output against
+  llama.cpp's (three prompts, 48 tokens): the 24B 48, 48 and 42 (where the next token is a near-tie), the 8B
+  UD-IQ3_XXS 48, 48 and 45.
 - **Macs:** the details are in [design/mac-port.md](design/mac-port.md).
 - **llama.cpp:**
   - on the M1 Ultra, `llama-server` with six 500-token answers;

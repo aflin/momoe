@@ -15,6 +15,7 @@ and the formats change often; the engine boundary is token ids in, text deltas o
 """
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -51,7 +52,19 @@ class ChatTemplate:
         env.filters["tojson"] = tojson
         env.globals["raise_exception"] = raise_exception
         self.source = Path(path).read_text(encoding="utf-8")
-        self.template = env.from_string(self.source)
+        # transformers' {% generation %} ... {% endgeneration %} (it marks the assistant's tokens for training; LFM2's
+        # template has it): rendered as a plain block, its whitespace control kept
+        src = re.sub(r"\{%(-?)\s*generation\s*(-?)%\}", r"{%\1 if true \2%}", self.source)
+        src = re.sub(r"\{%(-?)\s*endgeneration\s*(-?)%\}", r"{%\1 endif \2%}", src)
+        # the bos token, for a template that writes it (LFM2's starts with {{ bos_token }}), when the tokenizer pack
+        # next to it names one (tools/strata_tokenizer.py writes it for the tokenizers llama.cpp adds a bos to)
+        try:
+            bos = json.loads((Path(path).parent / "tokenizer.json").read_text(encoding="utf-8")).get("bos_token")
+        except (OSError, ValueError):
+            bos = None
+        if bos:
+            env.globals["bos_token"] = bos
+        self.template = env.from_string(src)
         self.caps = self._detect_caps()
 
     def render(self, messages: list[dict], tools: list[dict] | None = None, add_generation_prompt: bool = True,
@@ -93,6 +106,9 @@ class ChatTemplate:
             prompt = render(messages, tools)
             if "<arg_key>" in self.source:              # GLM-5's form, read as the parser reads it
                 prompt = GlmCallRewriter().feed(prompt)
+            elif LFM_CALL_START in self.source:         # LFM2's
+                rw = LfmCallRewriter()
+                prompt = rw.feed(prompt) + rw.flush()
             # Instructions include example XML and literal tag names, which are not model output. Parse only
             # complete calls to our probe functions, using the same body parser as OutputParser.
             bodies = re.findall(r"<tool_call>\s*(<function=strata_caps_call_\d+>.*?</function>)\s*</tool_call>",
@@ -988,6 +1004,115 @@ class GlmCallRewriter:
         return rest
 
 
+LFM_CALL_START, LFM_CALL_END = "<|tool_call_start|>", "<|tool_call_end|>"
+_LFM_NAMES = {"true": True, "false": False, "null": None, "none": None}
+
+
+def _lfm_value(node):
+    """A call argument as written: a Python literal, or JSON's true / false / null (models write both)."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name) and node.id.lower() in _LFM_NAMES:
+        return _LFM_NAMES[node.id.lower()]
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return [_lfm_value(x) for x in node.elts]
+    if isinstance(node, ast.Dict) and None not in node.keys:
+        return {_lfm_value(k): _lfm_value(v) for k, v in zip(node.keys, node.values)}
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        v = _lfm_value(node.operand)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return -v if isinstance(node.op, ast.USub) else v
+    raise ValueError("not a literal")
+
+
+def lfm_calls(body: str) -> str | None:
+    """The inside of `<|tool_call_start|>...<|tool_call_end|>` - a Python list of calls with keyword arguments,
+    `[read_file(path='a.py', limit=40), ...]` - in this parser's form, or None when it is not that."""
+    try:
+        tree = ast.parse(body.strip(), mode="eval").body
+    except (SyntaxError, ValueError):
+        return None
+    out = []
+    for call in tree.elts if isinstance(tree, (ast.List, ast.Tuple)) else [tree]:
+        if not isinstance(call, ast.Call) or call.args:
+            return None
+        name, f = [], call.func
+        while isinstance(f, ast.Attribute):              # a dotted name (mcp.server.tool) as written
+            name.insert(0, f.attr)
+            f = f.value
+        if not isinstance(f, ast.Name):
+            return None
+        name.insert(0, f.id)
+        params = []
+        for kw in call.keywords:
+            if kw.arg is None:
+                return None
+            try:
+                v = _lfm_value(kw.value)
+            except ValueError:
+                return None
+            params.append(PARAM_START + kw.arg + ">\n" + (v if isinstance(v, str) else json.dumps(v, ensure_ascii=False))
+                          + "\n</parameter>\n")
+        out.append(CALL_START + "\n<function=" + ".".join(name) + ">\n" + "".join(params) + "</function>\n</tool_call>")
+    return "\n".join(out) if out else None
+
+
+class LfmCallRewriter:
+    """LFM2's tool calls (`<|tool_call_start|>[name(k=v, ...), ...]<|tool_call_end|>`, its chat template's format: a
+    Python list of calls) rewritten into this parser's form, so OutputParser's whole handling applies unchanged.  A
+    list is rewritten once it is complete (its arguments are not streamed as they are written); one that is not a list
+    of calls stays text, as written.  A tag split across deltas is held until whole."""
+
+    def __init__(self):
+        self.buf, self.inside = "", False
+
+    def feed(self, delta: str) -> str:
+        self.buf += delta
+        out = []
+        while True:
+            b = self.buf
+            if not self.inside:
+                i = b.find(LFM_CALL_START)
+                if i < 0:
+                    keep = GlmCallRewriter._held(b, (LFM_CALL_START,))
+                    out.append(b[:len(b) - keep])
+                    self.buf = b[len(b) - keep:]
+                    break
+                out.append(b[:i])
+                self.buf, self.inside = b[i + len(LFM_CALL_START):], True
+            else:
+                j = b.find(LFM_CALL_END)
+                if j < 0:
+                    if len(b) > RCALL_MAX:               # far too long for a call: text
+                        out.append(LFM_CALL_START + b)
+                        self.buf, self.inside = "", False
+                    break
+                out.append(lfm_calls(b[:j]) or LFM_CALL_START + b[:j] + LFM_CALL_END)
+                self.buf, self.inside = b[j + len(LFM_CALL_END):], False
+        return "".join(out)
+
+    def flush(self) -> str:
+        """The end of the output: a list whose end tag never came (the reply stopped right after it) is still read as
+        calls when it is complete; anything else is text."""
+        rest, self.buf = self.buf, ""
+        if self.inside:
+            self.inside = False
+            return lfm_calls(rest) or LFM_CALL_START + rest
+        return rest
+
+
+def lfm_forced(force: str | None) -> str | None:
+    """forced_call's opening in LFM2's form (the model goes on from it)."""
+    if not force:
+        return force
+    head = CALL_START + "\n" + FUNC_START
+    if force == head:
+        return LFM_CALL_START + "["
+    if force.startswith(head) and force.endswith(">\n"):
+        return LFM_CALL_START + "[" + force[len(head):-2] + "("
+    return force
+
+
 def glm_forced(force: str | None) -> str | None:
     """forced_call's opening in GLM's form (the model goes on from it)."""
     if not force:
@@ -1008,8 +1133,9 @@ class OutputParser:
     until it is complete, so clients never see `<tool_` or `</thi`."""
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
-                 recover: bool = False, glm: bool = False):
-        self.glm = GlmCallRewriter() if glm else None   # GLM-5's call format, rewritten into this one as it arrives
+                 recover: bool = False, glm: bool = False, lfm: bool = False):
+        # GLM-5's or LFM2's call format, rewritten into this one as it arrives
+        self.glm = GlmCallRewriter() if glm else LfmCallRewriter() if lfm else None
         self.state = "reasoning" if thinking else "content"
         self.buf = ""
         self.lead = False

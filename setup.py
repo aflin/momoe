@@ -74,6 +74,8 @@ HF_REVISIONS = {
     "Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF": "e4ae9970325413d582ba2c294122fc5567ec1dd7",
     "unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF": "34841e360524d421c564cc3ed247aa04a865473b",   # 2026-10-16
     "unsloth/GLM-5.3-Flash-GGUF": "a38483c8cd5df544f53d70fb281afe97369d5ab6",   # 2026-10-17
+    "unsloth/LFM2.5-24B-A2B-GGUF": "faa77113e93335b63423e9e8d33395f86eaf8946",  # 2026-10-13
+    "unsloth/LFM2.5-8B-A1B-GGUF": "37563684c4a625e9958906fd924e15095cf9c896",
 }
 
 
@@ -574,6 +576,18 @@ BOLT_FILES = {
     "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-UD-Q3_K_XL.gguf":
         (39027158016, "51077d511c769efb299073cc7b33d31bb007eb4fdaed60938dc1133146b708e3"),
 }
+# LFM2.5-24B-A2B (Liquid AI; Unsloth's GGUFs): 24B, 2.4B active, one file per size (bytes, SHA-256)
+LFM25_FILES = {
+    "LFM2.5-24B-A2B-UD-IQ2_M.gguf": (7535313152, "54d861a1245d460389e971112e07f9313d75778ba96e12880594f2352a83a992"),
+    "LFM2.5-24B-A2B-UD-IQ3_XXS.gguf": (8959328480, "e06694b1f0bb322ecfde6bf9af260d2f2047ed1b30bbfdd04d97bf55472bfeec"),
+    "LFM2.5-24B-A2B-UD-Q4_K_XL.gguf": (14876901632, "a235d23638cc5549cb1ff61da7522c8a7e97f056f27093462a1e56f35aba91d8"),
+}
+# LFM2.5-8B-A1B (Liquid AI; Unsloth's GGUFs): 8.3B, 1.5B active
+LFM25_8B_FILES = {
+    "LFM2.5-8B-A1B-UD-IQ3_XXS.gguf": (3272339040, "f460496b7cf64a2cadc951e89884eb7509c0aae32f9f62062d42ebb415cfa675"),
+    "LFM2.5-8B-A1B-UD-Q4_K_XL.gguf": (5351583328, "ee7c5e925a04cd672868959e48d199b66d6dcb9f90afe64f219856189e83b27e"),
+    "LFM2.5-8B-A1B-Q8_0.gguf": (9010196064, "ec11666b6129f0b4fe893760b66797f22e1c478a561b40e365f2b6930729b8d2"),
+}
 # GLM-5.3-Flash (zai-org, MIT; Unsloth's GGUFs): 320B, 18B active.  Split files in a folder per size: (path in the
 # repository, bytes, SHA-256).  Momoe's engine runs it on a GPU that shares the system's memory (the DGX Spark: the
 # experts it cannot hold read from the SSD directly, --direct-io) or, on a separate card, from the file cache (the whole
@@ -632,6 +646,35 @@ GGML_FAMILIES = {
               "engine_args": ["--mtp", "3"],
               "context": 65536, "min_vram_gb": 11,
               "license": "MIT: https://huggingface.co/zai-org/GLM-5.3-Flash"},
+    "lfm25": {"title": "LFM2.5-24B-A2B", "by": "Liquid AI; Unsloth's GGUFs",
+              "about": "short convolutions + attention + MoE, 2.4B active, an agent model that always thinks; "
+                       "7.5-15 GB, for small machines (measured on an 8 GB Jetson Orin Nano Super)",
+              "hf": hf("unsloth/LFM2.5-24B-A2B-GGUF"),
+              "file": "LFM2.5-24B-A2B-{q}.gguf", "tag": "lfm25-", "name": "lfm2.5-24b-a2b",
+              # ram_gb: the memory the size was measured with (on a GPU that shares it, the experts the store cannot
+              # hold are copied from the file cache; on a separate card the whole file should fit in the file cache)
+              "models": {"UD-IQ3_XXS": {"about": "3-bit (Unsloth Dynamic), measured on the Jetson Orin Nano Super "
+                                                 "(7.3 GiB): its first 48 greedy tokens = llama.cpp's", "ram_gb": 7},
+                         "UD-IQ2_M": {"about": "2-bit, smaller (not measured)", "ram_gb": 7},
+                         "UD-Q4_K_XL": {"about": "4-bit, larger (not measured)", "ram_gb": 16}},
+              "sha256": LFM25_FILES, "default": "UD-IQ3_XXS",
+              "context": 32768, "min_vram_gb": 0,
+              "license": "LFM Open License v1.0: https://huggingface.co/LiquidAI/LFM2.5-24B-A2B/blob/main/LICENSE"},
+    "lfm25-8b": {"title": "LFM2.5-8B-A1B", "by": "Liquid AI; Unsloth's GGUFs",
+                 "about": "LFM2.5-24B-A2B's small sibling, 1.5B active; 3.3-9 GB (measured on an 8 GB Jetson Orin Nano "
+                          "Super)",
+                 "hf": hf("unsloth/LFM2.5-8B-A1B-GGUF"),
+                 "file": "LFM2.5-8B-A1B-{q}.gguf", "tag": "lfm25-8b-", "name": "lfm2.5-8b-a1b",
+                 # ram_gb: as lfm25 (measured on the Jetson, 7.3 GiB: UD-Q4_K_XL 16.6 tok/s, its first 48 greedy
+                 # tokens = llama.cpp's on two of three prompts; UD-IQ3_XXS 18.4, every expert in the pool; Q8_0 4.2,
+                 # the file larger than the memory)
+                 "models": {"UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic), measured on the Jetson Orin Nano Super",
+                                           "ram_gb": 7},
+                            "UD-IQ3_XXS": {"about": "3-bit, smaller and a little faster, measured", "ram_gb": 7},
+                            "Q8_0": {"about": "8-bit, for 16 GB and more (on the 8 GB Jetson: 4.2 tok/s)", "ram_gb": 16}},
+                 "sha256": LFM25_8B_FILES, "default": "UD-Q4_K_XL",
+                 "context": 32768, "min_vram_gb": 0,
+                 "license": "LFM Open License v1.0: https://huggingface.co/LiquidAI/LFM2.5-8B-A1B/blob/main/LICENSE"},
 }
 
 
@@ -4631,6 +4674,9 @@ SAMPLING_QWEN36 = {"temperature": 0.6, "top_p": 0.95, "top_k": 20}       # Qwen3
 SAMPLING_FLASH_NEXT = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}   # Qwen3.8-Flash-Next: thinking mode
 SAMPLING_NEMOTRON = {"temperature": 1.0, "top_p": 0.95}                  # Nemotron 3.5 (Bolt): the card's text sampling
 SAMPLING_GLM53 = {"temperature": 1.0, "top_p": 0.95}                     # GLM-5.3-Flash: its card's evaluation settings
+SAMPLING_LFM25 = {"temperature": 0.1, "top_k": 50}                       # LFM2.5: the card's (and its repetition
+                                                                          # penalty 1.05, which momoe-cuda does not apply)
+SAMPLING_LFM25_8B = {"temperature": 0.2, "top_k": 80}                    # LFM2.5-8B-A1B: its card's (the same penalty)
 
 
 def recommended_sampling(model_name) -> dict | None:
@@ -4643,6 +4689,10 @@ def recommended_sampling(model_name) -> dict | None:
         return dict(SAMPLING_NEMOTRON)
     if name.startswith("glm-5.3-flash"):
         return dict(SAMPLING_GLM53)
+    if name.startswith("lfm2.5-8b-"):
+        return dict(SAMPLING_LFM25_8B)
+    if name.startswith("lfm2.5-"):
+        return dict(SAMPLING_LFM25)
     return None
 
 
@@ -5962,6 +6012,8 @@ def ggml_setup(a, data: Path, port: int, family: str) -> int:
         fail("no CUDA toolkit (nvcc) was found: the engine is compiled here",
              "install NVIDIA's CUDA toolkit (12.4 or newer), or set STRATA_NVCC=/path/to/nvcc, and run setup again")
     ctx = a.context or fam["context"]
+    if unified and ram < 16 and not a.context:          # (a Jetson: the KV cache comes out of the file cache's memory)
+        ctx = min(ctx, 16384)
     ok(f"model: {fam['title']} {q} on GPU {gpu['index']}, {ctx // 1024}K context")
     if fam.get("license"):
         say(f"  Its license: {fam['license']}")

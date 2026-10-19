@@ -91,8 +91,14 @@ CHATGLM4_PATTERN = (
     r"|\s+"
 )
 
-PRE_PATTERNS = {"qwen35": QWEN35_PATTERN, "tekken": TEKKEN_PATTERN, "glm4": CHATGLM4_PATTERN, "glm5": CHATGLM4_PATTERN}
-IGNORE_MERGES = {"glm4", "glm5"}
+# `lfm2` (Liquid's LFM2 / LFM2.5): llama-vocab.cpp maps it to LLAMA_VOCAB_PRE_TYPE_LLAMA3 with `ignore_merges` - the
+# same pattern as CHATGLM4's (numbers in runs of up to three digits, no \p{M} classes).
+PRE_PATTERNS = {"qwen35": QWEN35_PATTERN, "tekken": TEKKEN_PATTERN, "glm4": CHATGLM4_PATTERN, "glm5": CHATGLM4_PATTERN,
+                "lfm2": CHATGLM4_PATTERN}
+IGNORE_MERGES = {"glm4", "glm5", "lfm2"}
+# llama.cpp adds a bos token to these (add_bos); their chat templates write it as {{ bos_token }}: the pack names it
+# (`bos_token` in tokenizer.json) for the server's ChatTemplate
+ADD_BOS = {"lfm2"}
 
 
 class Tokenizer:
@@ -473,6 +479,9 @@ def extract(gguf_path, out_dir) -> dict:
         "pre_pattern_source": ".ref/llama.cpp src/llama-vocab.cpp L396 (LLAMA_VOCAB_PRE_TYPE_QWEN35)" if tk.pre == "qwen35"
                               else "llama.cpp src/llama-vocab.cpp LLAMA_VOCAB_PRE_TYPE_TEKKEN (tokenizer.json original)",
     }
+    bos = tk.special_ids.get("tokenizer.ggml.bos_token_id")
+    if tk.pre in ADD_BOS and bos is not None and 0 <= bos < len(tk.tokens):
+        cfg["bos_token"] = tk.tokens[bos]
     (out / "vocab.json").write_text(json.dumps(tk.ids, ensure_ascii=False), encoding="utf-8")
     (out / "merges.txt").write_text("\n".join("%s %s" % k for k, _ in
                                               sorted(tk.ranks.items(), key=lambda kv: kv[1])), encoding="utf-8")

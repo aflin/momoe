@@ -181,6 +181,11 @@ struct Model {
     // glm5-next (see Layer): the first n_dense blocks have a dense FFN, the others MoE (a sigmoid router, SwiGLU
     // experts clamped at swiglu_clamp); the k-pool selection with the unfinished block (kpool_tail)
     bool glm5 = false;
+    // lfm2moe (LFM2.5-24B-A2B, LFM2-8B-A1B): short-convolution blocks ('c': in_proj -> b | c | x, a depthwise
+    // convolution over b * x whose history is the conv state, c * it, out_proj) and GQA attention blocks ('a': q / k
+    // norms, NEOX RoPE); the first n_dense blocks have a dense FFN, the others a sigmoid-routed MoE (its bias only
+    // chooses, the chosen weights normalized), no shared expert
+    bool lfm = false;
     int n_dense = 0, kda_hd = 0, q_lora = 0, kv_lora = 0, mla_k = 0, mla_v = 0, hc_iters = 0;
     float norm_eps = 1e-6f, kda_lb = -INFINITY, hc_eps = 1e-6f;
     bool kpool_tail = true;
@@ -806,6 +811,16 @@ static void load_mtp_qwen4(Engine & e) {
     fprintf(stderr, "momoe-metal: MTP layer from %s: %.2f GiB\n", path, bytes / 1073741824.0);
 }
 
+#if defined(MOMOE_CUDA)
+static bool uma_small();
+// lfm2moe on a small unified-memory machine (the Jetson) whose pool cannot hold every expert: the pool in mapped host
+// memory and resident mailboxes, a token one graph with no stops (measured on the Orin Nano Super, same tokens: 8B-A1B
+// UD-Q4_K_XL 17.1 -> 19.2 tok/s, 24B-A2B UD-IQ3_XXS 6.2 -> 6.8; the host pool with the stops: 16.3).  MOMOE_NO_RMB=1: off
+static bool lfm_rmb(const Engine & e, int n_slots) {
+    return e.m.lfm && e.uma && !g_direct && uma_small() && n_slots < e.m.n_exp_all && !getenv("MOMOE_NO_RMB");
+}
+#endif
+
 // the pool's slots: each group gets `frac` of its experts (at least a few tokens' worth), every slot empty
 static void make_pool(Engine & e, double frac) {
     Model & m = e.m;
@@ -834,7 +849,7 @@ static void make_pool(Engine & e, double frac) {
     }
     P.host = P.dev = nullptr;
 #if defined(MOMOE_CUDA)
-    if (e.uma && g_direct && getenv("MOMOE_POOL_HOST")) {
+    if (e.uma && (getenv("MOMOE_POOL_HOST") || lfm_rmb(e, P.n_slots))) {   // (no --direct-io: from the file cache)
         // unified memory: the pool in pinned host memory the GPU maps.  The readers write the slots with the CPU (no
         // copy through the GPU, no stream to wait for); a copy through the GPU could not finish while a resident
         // mailbox's wait held the GPU (measured: the readers' copies stalled behind it)
@@ -879,11 +894,12 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     gguf_context * g = gguf_init_from_file(path, gp);
     if (!g) die("cannot read %s as GGUF", path);
     std::string arch = gguf_get_val_str(g, gguf_find_key(g, "general.architecture"));
-    if (arch != "qwen35moe" && arch != "qwen4exp" && arch != "nemotron_h_moe" && arch != "glm5-next")
-        die("%s: only qwen35moe, qwen4exp, nemotron_h_moe and glm5-next models", arch.c_str());
+    if (arch != "qwen35moe" && arch != "qwen4exp" && arch != "nemotron_h_moe" && arch != "glm5-next" && arch != "lfm2moe")
+        die("%s: only qwen35moe, qwen4exp, nemotron_h_moe, glm5-next and lfm2moe models", arch.c_str());
     m.qwen4 = arch == "qwen4exp";
     m.nemo = arch == "nemotron_h_moe";
     m.glm5 = arch == "glm5-next";
+    m.lfm = arch == "lfm2moe";
     {                                                        // the control tokens the serve loop needs, by name
         const int64_t ti = gguf_find_key(g, "tokenizer.ggml.tokens");
         if (ti < 0) die("the file has no vocabulary");
@@ -964,6 +980,36 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
         m.full_attn_interval = 0;
         m.rope_base = 0;
         for (int j = 0; j < 4; ++j) m.sections[j] = 0;
+    } else if (m.lfm) {                                      // llama.cpp's lfm2moe.cpp load_arch_hparams
+        const std::vector<uint64_t> kv = gguf_per_block(g, k("attention.head_count_kv"), m.n_layer);
+        if ((int) kv.size() < m.n_layer) die("the per-block arrays are shorter than the model");
+        m.layers.resize(m.n_layer);
+        m.n_head_kv = 0;
+        for (int il = 0; il < m.n_layer; ++il) {
+            Layer & L = m.layers[il];
+            L.kind = kv[il] > 0 ? 'a' : 'c';
+            L.recurrent = kv[il] == 0;
+            if (L.kind == 'a') {
+                if (m.n_head_kv && m.n_head_kv != (int) kv[il]) die("attention blocks with different KV head counts");
+                m.n_head_kv = (int) kv[il];
+            }
+        }
+        m.head_dim = has("attention.key_length") ? gguf_int(g, k("attention.key_length")) : m.n_embd / m.n_head;
+        m.n_rot = m.head_dim;
+        m.n_dense = has("leading_dense_block_count") ? gguf_int(g, k("leading_dense_block_count")) : 0;
+        m.n_expert = gguf_int(g, k("expert_count"));
+        m.n_used = gguf_int(g, k("expert_used_count"));
+        m.n_ff_exp = gguf_int(g, k("expert_feed_forward_length"));
+        if (gguf_int(g, k("expert_gating_func")) != 2) die("lfm2moe: only the sigmoid router");
+        // (llama.cpp scales the normalized weights only by a scale other than 0 and 1)
+        m.exp_scale = has("expert_weights_scale") ? gguf_float(g, k("expert_weights_scale")) : 1.0f;
+        if (m.exp_scale == 0.0f) m.exp_scale = 1.0f;
+        m.ssm_conv = gguf_int(g, k("shortconv.l_cache"));   // the convolution's width; its history: l_cache - 1
+        if (m.ssm_conv < 2) die("lfm2moe: a short convolution of width 1");
+        m.rms_eps = gguf_float(g, k("attention.layer_norm_rms_epsilon"));
+        m.rope_base = gguf_float(g, k("rope.freq_base"));
+        m.full_attn_interval = 0;
+        for (int j = 0; j < 4; ++j) m.sections[j] = 0;
     } else if (m.nemo) {                                            // per-block arrays: which block is which, expert sizes
         const std::vector<uint64_t> kv = gguf_uarr(g, k("attention.head_count_kv"));
         // (an MoE block is one with a feed-forward size: Super gives the expert sizes as one value, these per block)
@@ -1010,7 +1056,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     m.n_head_kv = gguf_int(g, k("attention.head_count_kv"));
     m.head_dim = gguf_int(g, k("attention.key_length"));
     }   // (the indented block below is qwen35moe / qwen4exp only)
-    if (!m.nemo && !m.glm5) {
+    if (!m.nemo && !m.glm5 && !m.lfm) {
     m.n_rot = gguf_int(g, k("rope.dimension_count"));
     m.n_expert = gguf_int(g, k("expert_count"));
     m.n_used = gguf_int(g, k("expert_used_count"));
@@ -1173,6 +1219,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
             if (il < 0) {
                 if (!strcmp(name, "token_embd.weight")) m.tok_embd = t;
                 else if (!strcmp(name, "output_norm.weight")) m.out_norm = t;
+                else if (!strcmp(name, "token_embd_norm.weight") && m.lfm) m.out_norm = t;   // (lfm2moe's output norm)
                 else if (!strcmp(name, "output.weight")) m.output = t;
                 else if (!strcmp(name, "output_hc_norm.weight")) m.hc_head_norm = t;
                 else if (!strcmp(name, "output_hc_down.weight")) m.hc_head_down = t;
@@ -1216,7 +1263,10 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
                 {"hc_attn_scale.weight", &L.hc_attn_scale}, {"hc_ffn_fn.weight", &L.hc_ffn_fn},
                 {"hc_ffn_base.weight", &L.hc_ffn_base}, {"hc_ffn_scale.weight", &L.hc_ffn_scale},
                 {"ffn_norm.weight", &L.ffn_norm}, {"ffn_gate.weight", &L.ffn_gate}, {"ffn_up.weight", &L.ffn_up},
-                {"ffn_down.weight", &L.ffn_down}};
+                {"ffn_down.weight", &L.ffn_down},
+                // lfm2moe: the short convolution (its kernel, in_proj, out_proj)
+                {"shortconv.conv.weight", &L.conv1d}, {"shortconv.in_proj.weight", &L.ssm_in},
+                {"shortconv.out_proj.weight", &L.ssm_out}};
             auto it = slot.find(r);
             if (it == slot.end()) fprintf(stderr, "momoe-metal: tensor %s not used\n", name);
             else *it->second = t;
@@ -1226,7 +1276,8 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     m.n_vocab = (int) m.tok_embd->ne[1];
     for (size_t il = 0; il < m.layers.size(); ++il) {        // (glm5-next: the first n_dense blocks have a dense FFN)
         const Layer & L = m.layers[il];
-        if (L.exp_fd[1] < 0 && (!m.nemo || L.kind == 'e') && !(m.glm5 && (int) il < m.n_dense)) die("a layer has no routed experts");
+        if (L.exp_fd[1] < 0 && (!m.nemo || L.kind == 'e') && !((m.glm5 || m.lfm) && (int) il < m.n_dense))
+            die("a layer has no routed experts");
     }
     if (m.qwen4 && !m.hc_head_norm) die("the hyper-connection head (output_hc_*) is missing");
     if (m.ple_layer >= 0) {
@@ -1356,6 +1407,8 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
         } else if (L.kind == 'm') {                          // Mamba-2: [d_state, head_dim, n_head] per sequence
             L.conv_state = ggml_new_tensor_1d(cs, GGML_TYPE_F32, (int64_t) (m.ssm_conv - 1) * conv_ch);
             L.ssm_state = ggml_new_tensor_1d(cs, GGML_TYPE_F32, (int64_t) m.ssm_state * head_v * m.ssm_dt_rank);
+        } else if (m.lfm && L.kind == 'c') {                 // the short convolution's history: [l_cache - 1, n_embd]
+            L.conv_state = ggml_new_tensor_1d(cs, GGML_TYPE_F32, (int64_t) (m.ssm_conv - 1) * m.n_embd);
         } else if (L.kind == 'e') {
             if (e.hybrid) L.cpu_dn = ggml_new_tensor_3d(cs, GGML_TYPE_F32, m.latent, m.n_used, HYB_MAX_T);
         } else if (L.recurrent) {
@@ -2770,6 +2823,140 @@ static ggml_tensor * nemo_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * 
     return ggml_add(c, moe, sh);
 }
 
+// ------------------------------------------------------------------------------------------------ lfm2moe
+// LFM2.5-24B-A2B: llama.cpp's lfm2.cpp (llama_model_lfm2::graph, lfm2moe's), op for op, for one sequence.
+
+// the short convolution: in_proj -> b | c | x; b * x through a depthwise convolution of width l_cache over the last
+// l_cache - 1 positions (the conv state) and this batch; c * that; out_proj
+static ggml_tensor * lfm_conv_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, Layer & L, ggml_tensor * x, int T) {
+    Model & m = e.m;
+    const int64_t n = m.n_embd, dc = m.ssm_conv - 1;
+    ggml_tensor * bcx = ggml_reshape_3d(c, ggml_mul_mat(c, L.ssm_in, x), 3 * n, T, 1);  // [3 n_embd, T, 1]
+    const size_t es = ggml_element_size(bcx);
+    ggml_tensor * b = ggml_view_3d(c, bcx, n, T, 1, bcx->nb[1], bcx->nb[2], 0);
+    ggml_tensor * cg = ggml_view_3d(c, bcx, n, T, 1, bcx->nb[1], bcx->nb[2], n * es);
+    ggml_tensor * xx = ggml_view_3d(c, bcx, n, T, 1, bcx->nb[1], bcx->nb[2], 2 * n * es);
+    ggml_tensor * bx = ggml_transpose(c, ggml_mul(c, b, xx));                             // [T, n_embd, 1]
+    ggml_tensor * cst = ggml_reshape_3d(c, L.conv_state, dc, n, 1);
+    ggml_tensor * cin = ggml_concat(c, cst, bx, 0);                                       // [dc + T, n_embd, 1]
+    ggml_tensor * last = ggml_view_3d(c, cin, dc, n, 1, cin->nb[1], cin->nb[2], ggml_row_size(cin->type, T));
+    ggml_build_forward_expand(gf, ggml_cpy(c, last, cst));
+    ggml_tensor * co = ggml_ssm_conv(c, cin, L.conv1d);                                   // [n_embd, T, 1]
+    ggml_tensor * y = ggml_mul(c, cg, co);
+    return ggml_mul_mat(c, L.ssm_out, ggml_reshape_2d(c, y, n, T));
+}
+
+// GQA attention: q and k normed per head, NEOX RoPE, the cache [head_dim, n_head_kv, n_ctx] f16
+static ggml_tensor * lfm_attn_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, Layer & L, ggml_tensor * x,
+                                    const Inputs & in, int p0, int T, int n_kv) {
+    Model & m = e.m;
+    const int hd = m.head_dim;
+    ggml_tensor * q = norm(c, ggml_reshape_3d(c, ggml_mul_mat(c, L.wq, x), hd, m.n_head, T), L.q_norm, m.rms_eps);
+    ggml_tensor * k = norm(c, ggml_reshape_3d(c, ggml_mul_mat(c, L.wk, x), hd, m.n_head_kv, T), L.k_norm, m.rms_eps);
+    ggml_tensor * v = ggml_reshape_3d(c, ggml_mul_mat(c, L.wv, x), hd, m.n_head_kv, T);
+    ggml_tensor * pos = ggml_view_1d(c, in.pos, T, 0);                                    // (section 0: p0 + i)
+    q = ggml_rope_ext(c, q, pos, nullptr, m.n_rot, GGML_ROPE_TYPE_NEOX, 0, m.rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+    k = ggml_rope_ext(c, k, pos, nullptr, m.n_rot, GGML_ROPE_TYPE_NEOX, 0, m.rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+    const size_t row = ggml_row_size(GGML_TYPE_F16, (int64_t) hd * m.n_head_kv);
+    ggml_build_forward_expand(gf, ggml_cpy(c, k, ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, T, L.k_cache->nb[1], row, row * p0)));
+    ggml_build_forward_expand(gf, ggml_cpy(c, v, ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, T, L.v_cache->nb[1], row, row * p0)));
+    ggml_tensor * kv_k = ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, n_kv, L.k_cache->nb[1], row, 0);
+    ggml_tensor * kv_v = ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, n_kv, L.v_cache->nb[1], row, 0);
+    ggml_tensor * o = ggml_flash_attn_ext(c, ggml_permute(c, q, 0, 2, 1, 3), ggml_permute(c, kv_k, 0, 2, 1, 3),
+                                          ggml_permute(c, kv_v, 0, 2, 1, 3), in.mask, 1.0f / sqrtf((float) hd), 0.0f, 0.0f);
+    ggml_prec_set_acc(o, GGML_PREC_F32);
+    o = ggml_reshape_2d(c, o, (int64_t) hd * m.n_head, T);
+    return ggml_mul_mat(c, L.wo, o);
+}
+
+// the MoE (llama.cpp's build_moe_ffn with the sigmoid gate, norm_w): the bias only chooses, the chosen experts'
+// sigmoid weights normalized; SwiGLU experts, no shared expert.  pred_in / pred_in2: the next blocks' routers on this
+// block's residual, chosen in the same step (read ahead while the GPU goes on), as moe_layer
+static ggml_tensor * lfm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, int il, ggml_tensor * x, int T,
+                                   ggml_tensor * pred_in, ggml_tensor * pred_in2) {
+    Model & m = e.m;
+    Layer & L = m.layers[il];
+    ggml_tensor * lg = ggml_mul_mat(c, L.gate_inp, x);
+    ggml_format_name(lg, "ffn_moe_logits-%d", il);
+    ggml_tensor * probs = ggml_sigmoid(c, lg);                                            // [n_expert, T]
+    ggml_tensor * both = ggml_add(c, probs, L.exp_probs_b);
+    if (pred_in) {
+        const Layer & N = m.layers[il + 1];
+        both = ggml_concat(c, both, ggml_add(c, ggml_sigmoid(c, ggml_mul_mat(c, N.gate_inp, pred_in)), N.exp_probs_b), 1);
+    }
+    if (pred_in2) {
+        const Layer & N = m.layers[il + 2];
+        both = ggml_concat(c, both, ggml_add(c, ggml_sigmoid(c, ggml_mul_mat(c, N.gate_inp, pred_in2)), N.exp_probs_b), 1);
+    }
+    ggml_tensor * top = ggml_cont(c, ggml_argsort_top_k(c, both, m.n_used));            // [n_used, T (2T, 3T)]
+    const bool masked = !ns_paused(e, il);
+    Group & G = e.pool.g[L.grp];
+    const bool big = staged(m.n_used, G.n_slots, T);         // the staging copy, by expert number
+#if defined(MOMOE_CUDA)
+    const bool rmb = e.rmb && !big && T <= HYB_MAX_T;       // the resident mailbox (rmb_layer): no stop here
+#else
+    const bool rmb = false;
+#endif
+    ggml_format_name(top, masked ? "want-%d" : rmb ? "rmbtopk-%d" : "topk-%d", il);
+    if (e.ns_graph) ggml_set_output(top);
+    e.topk[il] = top;
+    ggml_build_forward_expand(gf, top);
+    ggml_tensor * ids = pred_in ? ggml_view_2d(c, top, m.n_used, T, top->nb[1], 0) : top;   // [n_used, T]
+    if (masked && e.nostall == 1)                            // sub: the best of the experts in the pool
+        ids = ggml_cont(c, ggml_argsort_top_k(c, ggml_add(c, ggml_add(c, probs, L.exp_probs_b), L.res_mask), m.n_used));
+    ggml_tensor * w = ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, m.n_expert, T), ids);   // [1, n_used, T]
+    if (masked && e.nostall == 2)                            // drop: the missing ones weigh nothing
+        w = ggml_mul(c, w, ggml_reshape_3d(c, ggml_get_rows(c, L.res_keep, ggml_reshape_1d(c, ids, (int64_t) m.n_used * T)),
+                                           1, m.n_used, T));
+    w = ggml_reshape_2d(c, w, m.n_used, T);
+    w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
+    if (m.exp_scale != 1.0f) w = ggml_scale(c, w, m.exp_scale);
+    w = ggml_reshape_3d(c, w, 1, m.n_used, T);
+    ggml_tensor * slots = nullptr;
+#if defined(MOMOE_CUDA)
+    if (rmb) {                                               // the choice to the worker; the slots back from it
+        MbLayer & B = e.mb.layer[il];
+        B.send.n_i32 = (int32_t) ggml_nelements(top);
+        B.wait.n_f32 = m.n_used * T;
+        ggml_tensor * args[2] = {ggml_view_1d(c, lg, 1, 0), top};
+        ggml_tensor * send = ggml_custom_4d(c, GGML_TYPE_I32, 1, 1, 1, 1, args, 2, momoe_mailbox_cpu_stub, 1, &B.send);
+        ggml_format_name(send, "rmbsend-%d", il);
+        ggml_build_forward_expand(gf, send);
+        ggml_tensor * wargs[1] = {send};
+        slots = ggml_custom_4d(c, GGML_TYPE_I32, m.n_used, T, 1, 1, wargs, 1, momoe_mailbox_cpu_stub, 1, &B.wait);
+        ggml_format_name(slots, "rmbwait-%d", il);
+        e.force_gpu.push_back(send);
+        e.force_gpu.push_back(slots);
+        e.mb_graph = true;
+        e.mb.graph.push_back(il);
+    } else
+#endif
+    slots = ggml_reshape_2d(c, ggml_get_rows(c, L.slot_map, ggml_reshape_1d(c, ids, (int64_t) m.n_used * T)), m.n_used, T);
+    ggml_tensor * x3 = ggml_reshape_3d(c, x, m.n_embd, 1, T);
+    ggml_tensor ** as = big ? G.stage : G.t;
+    ggml_tensor * layer_t[3];
+    if (big && e.preloaded) {                                // the layer's experts in a row in the pool (preload)
+        const int64_t s0 = L.slots_host()[0];
+        for (int j = 0; j < 3; ++j)
+            layer_t[j] = ggml_view_3d(c, G.t[j], G.t[j]->ne[0], G.t[j]->ne[1], L.n_exp, G.t[j]->nb[1], G.t[j]->nb[2],
+                                      (size_t) s0 * G.t[j]->nb[2]);
+        as = layer_t;
+    }
+    if (big) slots = ids;
+    ggml_tensor * up = ggml_mul_mat_id(c, as[1], x3, slots);                            // [n_ff, n_used, T]
+    ggml_tensor * gt = ggml_mul_mat_id(c, as[0], x3, slots);
+    ggml_tensor * dn = ggml_mul_mat_id(c, as[2], ggml_swiglu_split(c, gt, up), slots); // [n_embd, n_used, T]
+    ggml_format_name(dn, "moe_down-%d", il);
+    dn = ggml_mul(c, dn, w);
+    ggml_tensor * moe = nullptr;
+    for (int i = 0; i < m.n_used; ++i) {
+        ggml_tensor * v = ggml_view_2d(c, dn, m.n_embd, T, dn->nb[2], i * dn->nb[1]);
+        moe = moe ? ggml_add(c, moe, v) : v;
+    }
+    ggml_format_name(moe, "ffn_moe_out-%d", il);
+    return moe;
+}
+
 // ------------------------------------------------------------------------------------------------ glm5-next
 // GLM-5.3-Flash: llama.cpp's glm5-next.cpp, op for op (its fused mHC and lightning-indexer ops, as llama.cpp picks on
 // CUDA), for one sequence: a position's cell is its position, the k-pool j is cells kpool*j .. kpool*j + kpool-1.
@@ -3280,6 +3467,29 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
             ggml_format_name(x, "l_out-%d", il);
         }
     }
+    if (m.lfm) {                                             // operator (conv or attention), then the FFN, each with
+        for (int il = 0; il < m.n_layer; ++il) {             // its pre-norm and residual
+            Layer & L = m.layers[il];
+            ggml_tensor * h = norm(c, x, L.attn_norm, m.rms_eps);
+            ggml_format_name(h, "operator_norm-%d", il);
+            h = L.kind == 'c' ? lfm_conv_layer(e, c, gf, L, h, T) : lfm_attn_layer(e, c, gf, L, h, in, p0, T, n_kv);
+            ggml_format_name(h, L.kind == 'c' ? "conv_out-%d" : "attn_out-%d", il);
+            x = ggml_add(c, x, h);
+            ggml_tensor * f = norm(c, x, L.ffn_norm, m.rms_eps);
+            ggml_format_name(f, "ffn_norm-%d", il);
+            if (il < m.n_dense) {
+                f = ggml_mul_mat(c, L.ffn_down, ggml_swiglu_split(c, ggml_mul_mat(c, L.ffn_gate, f), ggml_mul_mat(c, L.ffn_up, f)));
+            } else {                                         // the next blocks' routers on their FFN norm of this residual
+                ggml_tensor * pred = e.predict && il + 1 < m.n_layer ? norm(c, x, m.layers[il + 1].ffn_norm, m.rms_eps) : nullptr;
+                ggml_tensor * pred2 = pred && e.predict2 && il + 2 < m.n_layer
+                                    ? norm(c, x, m.layers[il + 2].ffn_norm, m.rms_eps) : nullptr;
+                f = lfm_moe_layer(e, c, gf, il, f, T, pred, pred2);
+            }
+            ggml_format_name(f, "ffn_out-%d", il);
+            x = ggml_add(c, x, f);
+            ggml_format_name(x, "l_out-%d", il);
+        }
+    }
     if (m.glm5) {                                            // mHC: the streams start as hc copies of the embedding
         ggml_tensor * res = ggml_repeat_4d(c, ggml_reshape_3d(c, x, m.n_embd, 1, T), m.n_embd, m.hc, T, 1);
         for (int il = 0; il < m.n_layer; ++il) {
@@ -3345,7 +3555,7 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
         }
         x = res;                                             // [n_embd, hc, T]
     }
-    for (int il = 0; il < m.n_layer && !m.qwen4 && !m.nemo && !m.glm5; ++il) {
+    for (int il = 0; il < m.n_layer && !m.qwen4 && !m.nemo && !m.glm5 && !m.lfm; ++il) {
         Layer & L = m.layers[il];
         ggml_tensor * h = norm(c, x, L.attn_norm, m.rms_eps);
         ggml_format_name(h, "attn_norm-%d", il);
@@ -3482,12 +3692,12 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
         if (ggml_backend_sched_graph_compute_async(e.sched, gf) != GGML_STATUS_SUCCESS) die("the graph failed");
         const uint64_t n_pause = (ggml_backend_metal_pause_counter(e.metal) - base) / 2;
         uint64_t want_pause = 0;
-        for (int il = 0; il < m.n_layer; ++il) want_pause += ns_paused(e, il);
+        for (int il = 0; il < m.n_layer; ++il) want_pause += e.topk[il] && ns_paused(e, il);   // (a dense block: none)
         if (n_pause != want_pause) die("the graph has a pause point per layer missing");
         uint64_t at = base + 1;
         int done = 0;                                        // --nostall-every: the layers seen to so far
         for (int il = 0; il < m.n_layer; ++il) {
-            if (!ns_paused(e, il)) continue;
+            if (!e.topk[il] || !ns_paused(e, il)) continue;
             const double w0 = now_s();
             while (ggml_backend_metal_pause_signaled(e.metal) < at) { }
             e.t_wait += now_s() - w0;
@@ -3612,6 +3822,36 @@ static double uma_free_bytes() {
     return avail;
 }
 
+#if defined(MOMOE_CUDA)
+// unified memory: what is kept for the rest of the system (MOMOE_UMA_RESERVE_GIB), what must be free to start on top
+// of it (MOMOE_UMA_MIN_GIB) and the smallest useful pool: 10, 24 and 4 GiB (set on the DGX Spark, 121 GiB), or on a
+// machine under 16 GiB 20%, 15% and 15% of its memory (a Jetson Orin Nano, 7.3 GiB: about 1.5, 1.1 and 1.1; there the
+// engine itself, its dense weights and buffers, took 0.7 GB beside a 2 GiB pool)
+static double mem_total_gib() {
+    double t = 0;
+    if (FILE * f = fopen("/proc/meminfo", "r")) {
+        char k[64];
+        unsigned long long v;
+        while (fscanf(f, "%63s %llu kB\n", k, &v) == 2)
+            if (!strcmp(k, "MemTotal:")) t = v / 1048576.0;
+        fclose(f);
+    }
+    return t;
+}
+static double uma_gib(const char * env, double cap, double share) {
+    if (getenv(env)) return atof(getenv(env));
+    const double t = mem_total_gib();
+    return t > 0 && t < 16 ? std::min(cap, share * t) : cap;   // (the share only under 16 GiB: the Spark keeps 10, 24)
+}
+static double uma_reserve_gib() { return uma_gib("MOMOE_UMA_RESERVE_GIB", 10, 0.20); }
+static double uma_min_gib() { return uma_gib("MOMOE_UMA_MIN_GIB", 24, 0.15); }
+// a unified-memory machine under 16 GiB (a Jetson): its experts are copied from the mapped file, not read past the page
+// cache, and the page cache keeps most of the memory - with a model larger than the memory it is the bigger store, read
+// at RAM speed.  Measured on a Jetson Orin Nano Super (7.3 GiB, LFM2.5-24B-A2B UD-IQ3_XXS, 400 tokens): direct reads 1.0
+// tok/s, copies 8.1 with a 1.5-2.5 GiB pool, 7.3 with 3.0
+static bool uma_small() { const double t = mem_total_gib(); return t > 0 && t < 16; }
+#endif
+
 static void fit_pool(Engine & e) {
 #if defined(MOMOE_CUDA)
     const int T = std::min(e.max_batch, e.n_ctx);
@@ -3625,17 +3865,20 @@ static void fit_pool(Engine & e) {
     double margin = (getenv("MOMOE_VRAM_MARGIN_MIB") ? atof(getenv("MOMOE_VRAM_MARGIN_MIB")) : 512) * 1048576.0;
     if (e.uma) {                                             // the "VRAM" is the machine's RAM: what the system and
         const double room = uma_free_bytes();               // the cgroup leave, less a reserve for everything else
-        margin = (getenv("MOMOE_UMA_RESERVE_GIB") ? atof(getenv("MOMOE_UMA_RESERVE_GIB")) : 10) * 1073741824.0;
+        margin = uma_reserve_gib() * 1073741824.0;
         fprintf(stderr, "momoe-cuda: unified memory: %.2f GiB free for this process (the GPU reports %.2f), %.0f GiB "
                 "kept for the rest of the system\n", room / 1073741824.0, fr / 1073741824.0, margin / 1073741824.0);
         // (not the GPU's figure: it leaves out the page cache, which the system gives back as the pool takes memory;
         // the cgroup does not count the GPU's allocations: MemAvailable does)
         fr = (size_t) std::max(0.0, room);
     }
-    const double want = (double) e.pool.pool_bytes + (double) fr - margin;
+    double want = (double) e.pool.pool_bytes + (double) fr - margin;
+    if (e.uma && !g_direct && uma_small())                   // (see uma_small: MOMOE_UMA_POOL_SHARE, default 0.3)
+        want = std::min(want, (getenv("MOMOE_UMA_POOL_SHARE") ? atof(getenv("MOMOE_UMA_POOL_SHARE")) : 0.3)
+                              * mem_total_gib() * 1073741824.0);
     fprintf(stderr, "momoe-cuda: %.2f GiB of VRAM free after the compute buffers: the pool gets %.2f GiB\n",
             fr / 1073741824.0, want / 1073741824.0);
-    if (e.uma && want < 4.0 * 1073741824.0)                 // (unified memory: what is left after the reserve cannot
+    if (e.uma && want < std::min(4.0, uma_min_gib()) * 1073741824.0)   // (unified memory: what is left after the reserve cannot
         die("too little memory left for the expert pool: is another program holding it?");   // hold a useful pool)
     make_pool(e, std::max(0.0, want / (double) e.pool.all_bytes));
 #else
@@ -4354,23 +4597,25 @@ int main(int argc, char ** argv) {
     e.load_mtp = mtp_k > 0;
     e.max_window = std::max(2, mtp_k + 1);
     if (getenv("MOMOE_DIRECT")) g_direct = true;
+    bool small_uma = false;                                  // a unified-memory machine under 16 GiB (uma_small)
 #if defined(MOMOE_CUDA)
     {                                                        // unified memory: experts read past the page cache unless
         cudaDeviceProp prop;                                 // MOMOE_NO_DIRECT (paging the mapped file in: 0.1-0.25 of the
         if (cudaGetDeviceProperties(&prop, e.device) == cudaSuccess && prop.integrated) {   // SSD there; measured)
             e.uma = true;
+            small_uma = uma_small();
             // enough hardware queues that the readers' copy stream does not share the compute stream's (before the
             // context is made: the resident mailboxes' waits would hold it)
             setenv("CUDA_DEVICE_MAX_CONNECTIONS", "32", 0);
-            if (!getenv("MOMOE_NO_DIRECT")) g_direct = true;
+            if (!getenv("MOMOE_NO_DIRECT") && !small_uma) g_direct = true;   // (a small one: see uma_small)
             fprintf(stderr, "momoe-cuda: %s shares the system's memory: experts %s\n", prop.name,
                     g_direct ? "read from the SSD directly (--direct-io; MOMOE_NO_DIRECT=1: from the mapped file)"
                              : "copied from the mapped file");
             // a machine whose memory another program holds (another momoe-cuda, llama.cpp): refused before anything is
             // loaded.  The GPU's allocations come out of the RAM and are charged to no cgroup, so two engines at once
             // ran the DGX Spark out of memory and it stopped answering (2026-10-17)
-            const double reserve = (getenv("MOMOE_UMA_RESERVE_GIB") ? atof(getenv("MOMOE_UMA_RESERVE_GIB")) : 10) * 1073741824.0;
-            const double need = reserve + (getenv("MOMOE_UMA_MIN_GIB") ? atof(getenv("MOMOE_UMA_MIN_GIB")) : 24) * 1073741824.0
+            const double reserve = uma_reserve_gib() * 1073741824.0;
+            const double need = reserve + uma_min_gib() * 1073741824.0
                                 + std::max(0.0, pool_gib) * 1073741824.0;   // (--pool-gib: that pool on top)
             const double room = uma_free_bytes();
             if (room < need) {
@@ -4396,6 +4641,10 @@ int main(int argc, char ** argv) {
         // tok/s, but the device pool with the stops is faster still: 9.2)
         rmb_init(e);                                         // (a graph per token, built again each time: no CUDA graphs)
         if (!getenv("MOMOE_CUDA_GRAPHS")) setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0);
+    } else if (e.m.lfm && e.pool.host && (lfm_rmb(e, e.pool.n_slots) || getenv("MOMOE_RMB"))
+               && e.pool.n_slots < e.m.n_exp_all) {         // (a device pool: the readers' copies would wait behind
+        rmb_init(e);                                         // the mailbox's wait, measured: never with one)
+        if (!getenv("MOMOE_CUDA_GRAPHS")) setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0);
     } else if (!getenv("MOMOE_CUDA_GRAPHS"))                 // CUDA graphs for the mailbox's one-graph token only: with
         setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0);         // the stops' many splits, instantiating them ran out of
                                                             // VRAM (12 GB card; MOMOE_CUDA_GRAPHS=1: on anyway)
@@ -4404,7 +4653,8 @@ int main(int argc, char ** argv) {
     e.readers.device = e.device;
     e.fillers.device = e.device;
     if (e.hybrid) e.fillers.start(getenv("MOMOE_FILLERS") ? atoi(getenv("MOMOE_FILLERS")) : 2);
-    e.readers.start(getenv("MOMOE_READERS") ? atoi(getenv("MOMOE_READERS")) : kHostMem ? 8 : 16);   // (CUDA: measured)
+    e.readers.start(getenv("MOMOE_READERS") ? atoi(getenv("MOMOE_READERS"))   // (CUDA: measured; a small unified-memory
+                    : kHostMem ? 8 : small_uma ? 4 : 16);   // machine: as fast with 4, a quarter of the pinned buffers)
     e.demand.device = e.device;
     if (getenv("MOMOE_DEMAND_READERS")) e.demand.start(atoi(getenv("MOMOE_DEMAND_READERS")));
     e.predict = !getenv("MOMOE_NO_PREDICT") && !(e.hybrid && e.m.nemo);   // (hybrid: measured faster without)
@@ -4417,7 +4667,10 @@ int main(int argc, char ** argv) {
     if (nocache) die("--nocache: Apple Silicon only");
 #endif
     if (e.pool.n_slots == e.m.n_exp_all && !getenv("MOMOE_NO_PRELOAD")) pre = true;   // all fit: no pauses
-    if (pre) preload(e);
+    if (pre) {
+        preload(e);
+        e.predict = e.predict2 = false;                      // (nothing to read ahead: the graphs
+    }                                                        // skip the next layers' routers)
     else if (profile) pin_profile(e, profile, getenv("MOMOE_PIN_FRAC") ? atof(getenv("MOMOE_PIN_FRAC")) : 0.6);
     e.pause = !kHostMem ? false : !debug_on() && !getenv("MOMOE_NO_PAUSE") && (!pre || getenv("MOMOE_FORCE_PAUSE"));
 #if !defined(MOMOE_CUDA)
@@ -4428,6 +4681,7 @@ int main(int argc, char ** argv) {
     else if (!pre || debug_on() || getenv("MOMOE_FORCE_CB")) ggml_backend_sched_set_eval_callback(e.sched, eval_cb, &e);
     if (const char * ns = nostall_arg) {
         if (strcmp(ns, "sub") && strcmp(ns, "drop")) die("--nostall takes sub or drop, not %s", ns);
+        if (e.m.lfm) die("--nostall: not for lfm2moe models (their dense blocks have no experts)");
         if (!kHostMem) die("--nostall: Apple Silicon only");
         if (!e.pause || pre) fprintf(stderr, "momoe-metal: --nostall: not used (every expert is in memory: no pauses)\n");
         else {

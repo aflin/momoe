@@ -59,7 +59,7 @@ SHUTDOWN = threading.Event()                      # set by POST /shutdown (momoe
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
-                            forced_call, glm_forced, images_of, literal_tags, mark_think_literals,
+                            forced_call, glm_forced, lfm_forced, images_of, literal_tags, mark_think_literals,
                             openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
@@ -3206,6 +3206,8 @@ class Service:
                          if len(ids) == 1}
         # GLM-5's tool-call format (<tool_call>NAME<arg_key>..): the parser rewrites it into its own (GlmCallRewriter)
         self.glm = "<arg_key>" in getattr(template, "source", "")
+        # LFM2's (<|tool_call_start|>[name(k=v)]<|tool_call_end|>, a Python list): rewritten too (LfmCallRewriter)
+        self.lfm = not self.glm and "<|tool_call_start|>" in getattr(template, "source", "")
         # #567: a prompt re-encodes only what follows the last special token it shares with a recent prompt (the
         # same ids as a full encode: tools/strata_tokenizer.py PromptEncoder).  Tokenizers without resume points
         # encode in full.
@@ -4246,7 +4248,7 @@ class Service:
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
         parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
-                              glm=self.glm)
+                              glm=self.glm, lfm=self.lfm)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
@@ -5951,6 +5953,8 @@ def make_handler(svc: Service):
             force = forced_call(req.get("tool_choice"), tools)      # a bad value is a 400 before anything is sent
             if svc.glm:
                 force = glm_forced(force)
+            elif svc.lfm:
+                force = lfm_forced(force)
             messages, validator = prepare_format(req.get("response_format"), messages)
             if validator is not None and (tools or req.get("strata_mcp")):
                 raise ValueError("structured response_format with tools/MCP is not supported")
@@ -6196,6 +6200,8 @@ def make_handler(svc: Service):
             force = forced_call(req.get("tool_choice"), tools)        # "any" / {"type": "tool", "name": N}
             if svc.glm:
                 force = glm_forced(force)
+            elif svc.lfm:
+                force = lfm_forced(force)
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
