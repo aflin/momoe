@@ -69,7 +69,7 @@ The machines the models were tested on:
 
 | Name | Machine |
 | --- | --- |
-| **PC** | Linux (Debian 12), NVIDIA RTX 4070 Ti (12 GB), Ryzen 9 5950X, 63 GB of RAM |
+| **PC** | Linux (Debian 12), NVIDIA RTX 4070 Ti (12 GB), Ryzen 9 5950X, 63 GB of RAM; an RTX 3060 (12 GB) too, for the [helper tier](#two-different-gpus-the-helper-tier) |
 | **Spark** | NVIDIA DGX Spark: GB10, 128 GB of memory shared by the CPU and the GPU |
 | **M4 Air** | MacBook Air M4, 32 GB |
 | **M4 Air, simulated 16 GB** | the same MacBook with 16 GiB of its memory wired away (`mlock`), so that macOS can neither use nor swap it |
@@ -177,6 +177,56 @@ momoe log --no-follow                 # print the last lines and stop
 
 With two logs or more, each line starts with `[server]`, `[engine]`, ... The engine log is the running config's
 (when none runs, the last one started). Ctrl+C stops following; the server keeps running.
+
+## Two different GPUs: the helper tier
+
+With two different NVIDIA cards, for example a fast one and an older one, `--helper-tier` uses the second card as a
+second level of expert cache instead of splitting the model's layers between the cards:
+
+1. the main card runs the model as it would alone, with its own expert cache;
+2. the helper card holds the next experts in line and computes them itself;
+3. the RAM holds the rest.
+
+Each expert is in one place only. When the main card takes in an expert from the helper, the one it lets go moves
+down to the helper; the helper's evictions move down to RAM. The experts on the helper need no RAM, which is the point:
+**the PC keeps much more memory free**, at about the same speed.
+
+Setup offers it when it finds two different cards that can run the model together (the layer split stays its
+recommendation), or `./momoe setup --helper-tier`. By hand: both cards in the config's `"gpu"`, the main card first,
+and `--helper-tier` in `"args"`:
+
+```json
+"gpu": [1, 0],
+"args": [..., "--helper-tier"]
+```
+
+`--helper-gib G` limits the helper's VRAM for experts (default: what fits, less 1.6 GB kept free for its prompt
+buffers). Every setting it turns on can be changed on its own: see
+[docs/SECOND_GPU.md](docs/SECOND_GPU.md#the-helper-tier---helper-tier).
+
+Measured on the PC, RTX 4070 Ti (main) + RTX 3060 12 GB (helper, also driving the desktop), Flash-Next IQ3_XXS, 64K
+context, `tools/strata_bench.py`, 3 runs per test, 2026-10-18:
+
+| | 4070 Ti alone (two runs) | `--helper-tier` |
+| --- | ---: | ---: |
+| experts on the 3060 | | 5,492 (8.83 GiB) |
+| experts in RAM | ~41 GiB | 29.9 GiB |
+| the PC's available memory | 2.1 GB | 11.8 GB |
+| writes, short chat | 58.2 / 55.9 | 59.7 |
+| writes, agent session | 63.7 / 63.8 | 68.3 |
+| reads, 4K-token prompt | 1,178 | 1,478 |
+| reads, 16K-token prompt | 2,130 | 1,813 |
+| agent turn, first token | 3.37 s | 2.51 s |
+
+Writing speed is about the same: the agent session moved between 64.5 and 71.1 between runs of the same
+configuration. Short prompts are read faster and long ones slower. The answers are not bit-identical to one card's.
+
+With a 262K context, the KV cache leaves the 4070 Ti room for fewer experts (1,071 instead of about 2,850). In
+everyday use with that config (2026-10-18, 7 answers of 115-4,572 tokens), it wrote 43.6-56.1 tok/s with a 54-71%
+hit rate in the main card's cache. The first answer after each start was about 20 tok/s, while the caches fill.
+
+For two equal cards, the layer split should be the better choice: each card runs its own layers without waiting for
+the other inside a layer. That, other cards, other models and Windows are not measured.
 
 ## Where things are
 
