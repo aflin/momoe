@@ -803,6 +803,9 @@ public:
     /// for the primary cache - with no read of the file.  The same conditions as `replace_resident` (the caller's
     /// thread, between windows, nothing reading `in`'s blob); false changes nothing.
     bool exchange_resident(int64_t layer, int64_t in, int64_t out, const uint8_t* out_bytes);
+    /// Why `exchange_resident(layer, in, out, ...)` would refuse now, in a few words, or nullptr when it would not (the
+    /// same tests; for the log's counts).
+    const char* exchange_refusal(int64_t layer, int64_t in, int64_t out) const;
     int64_t helper_exchanges() const { return helper_exchanges_; }
     bool exchange_rotation() const { return exchange_storage_.active(); }
     uint64_t rotated_exchanges() const { return exchange_storage_.exchanges(); }

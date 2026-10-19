@@ -9755,6 +9755,9 @@ int main(int argc, char** argv) {
             return true;
         }();
         int64_t helper_promoted = 0, helper_rotated = 0;
+        // rotations whose RAM exchange was refused, by reason; each stays correct: "already in RAM" loses nothing (its
+        // replacement keeps a RAM copy too), otherwise the rotated-down expert is read from the model file when next used
+        std::map<std::string, int64_t> hp_refused;
         // two page-locked, portable buffers per move (both cards copy through them), at most hp_cap moves a round
         const int hp_cap = [&] {
             const char* v = std::getenv("STRATA_HELPER_PROMOTE_MAX");
@@ -9875,9 +9878,9 @@ int main(int argc, char** argv) {
             src.commit_exchanges();   // the resident RAM mode: the evicted experts take their places in RAM
             if (hp_live) {            // STRATA_HELPER_PROMOTE: a rotated-down expert takes its replacement's place in RAM
                 for (const HpRot& x : hp_rot)
-                    if (!src.exchange_resident(x.layer, x.in, x.victim, x.bytes))
-                        std::fprintf(stderr, "momoe serve: STRATA_HELPER_PROMOTE: the RAM copy refused (%d, %d <- %d)\n",
-                                     (int) x.layer, (int) x.in, (int) x.victim);
+                    if (const char* why = src.exchange_refusal(x.layer, x.in, x.victim);
+                        why != nullptr || !src.exchange_resident(x.layer, x.in, x.victim, x.bytes))
+                        ++hp_refused[why != nullptr ? why : "the copy failed"];   // counted in the request's summary
                 hp_rot.clear();
                 hp_live = false;
             }
@@ -15083,10 +15086,19 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "momoe serve: resident RAM: %lld helper-cache evictions moved into the RAM copy "
                                      "(STRATA_HELPER_EXCHANGE), %lld could not be\n",
                              (long long) remote_opt->helper_exchanged(), (long long) remote_opt->helper_exchange_failed());
-            if (helper_promote)   // cumulative
+            if (helper_promote) {   // cumulative
+                std::string refused;
+                int64_t n_refused = 0;
+                for (const auto& [why, n] : hp_refused) {
+                    refused += (refused.empty() ? "" : ", ") + std::to_string(n) + " " + why;
+                    n_refused += n;
+                }
+                if (n_refused > 0)
+                    refused = "; the RAM copy not exchanged for " + std::to_string(n_refused) + " of them (" + refused + ")";
                 std::fprintf(stderr, "momoe serve: helper tier: %lld experts promoted from the helper, %lld evictions "
-                                     "rotated down through it (STRATA_HELPER_PROMOTE)\n",
-                             (long long) helper_promoted, (long long) helper_rotated);
+                                     "rotated down through it (STRATA_HELPER_PROMOTE)%s\n",
+                             (long long) helper_promoted, (long long) helper_rotated, refused.c_str());
+            }
             if (src.ram_adapts() > 0)   // STRATA_RAM_ADAPT, cumulative
                 std::fprintf(stderr, "momoe serve: resident RAM: %lld experts moved in from the file in place of "
                                      "unused ones (STRATA_RAM_ADAPT)\n", (long long) src.ram_adapts());

@@ -3538,18 +3538,27 @@ bool FileExpertSource::replace_resident(int64_t layer, int64_t in, int64_t out) 
     return true;
 }
 
-bool FileExpertSource::exchange_resident(int64_t layer, int64_t in, int64_t out, const uint8_t* out_bytes) {
-    if (!complement_ready_ || complement_host_ == nullptr || exchange_storage_.active() || !staged_.empty() ||
-        out_bytes == nullptr || layer < 0 || layer >= n_layers_ || in < 0 || out < 0 || in >= n_expert_ ||
-        out >= n_expert_ || in == out)
-        return false;
+const char* FileExpertSource::exchange_refusal(int64_t layer, int64_t in, int64_t out) const {
+    if (!complement_ready_ || complement_host_ == nullptr) return "no RAM copy";
+    if (exchange_storage_.active() || !staged_.empty()) return "other exchanges staged";
+    if (layer < 0 || layer >= n_layers_ || in < 0 || out < 0 || in >= n_expert_ || out >= n_expert_ || in == out)
+        return "bad expert";
     const size_t i_in = (size_t) layer * (size_t) n_expert_ + (size_t) in;
     const size_t i_out = (size_t) layer * (size_t) n_expert_ + (size_t) out;
-    if (i_in >= complement_offsets_.size() || i_out >= complement_offsets_.size()) return false;
-    if (!override_.empty() && (override_[i_in] != nullptr || override_[i_out] != nullptr)) return false;
+    if (i_in >= complement_offsets_.size() || i_out >= complement_offsets_.size()) return "bad expert";
+    if (!override_.empty() && (override_[i_in] != nullptr || override_[i_out] != nullptr)) return "an exchange pending";
     const uint64_t at = complement_offsets_[i_in], bytes = layer_blob_bytes_[(size_t) layer];
-    if (at == kNoComplement || complement_offsets_[i_out] != kNoComplement || at > complement_bytes_ ||
-        bytes > complement_bytes_ - at) return false;
+    if (at == kNoComplement) return "its replacement has no RAM place";
+    if (complement_offsets_[i_out] != kNoComplement) return "already in RAM";
+    if (at > complement_bytes_ || bytes > complement_bytes_ - at) return "bad place";
+    return nullptr;
+}
+
+bool FileExpertSource::exchange_resident(int64_t layer, int64_t in, int64_t out, const uint8_t* out_bytes) {
+    if (out_bytes == nullptr || exchange_refusal(layer, in, out) != nullptr) return false;
+    const size_t i_in = (size_t) layer * (size_t) n_expert_ + (size_t) in;
+    const size_t i_out = (size_t) layer * (size_t) n_expert_ + (size_t) out;
+    const uint64_t at = complement_offsets_[i_in], bytes = layer_blob_bytes_[(size_t) layer];
     // #2134: a Foresight slot may be copying out of `in`'s place right now; it is dropped before the place is rewritten
     ForesightSwap* fs = fs_swap_.load(std::memory_order_acquire);
     if (fs != nullptr) fs->hold(layer, (int32_t) in);
