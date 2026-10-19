@@ -698,12 +698,41 @@ void ggml_vec_dot_q1_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
 #endif
 }
 
-// Momoe: Q2_0 x Q8_0 on AVX2 (Nemotron-3.5-Super's low-bit experts; was the generic loop only). A Q2_0 block is 64
-// weights (value + 1, 2 bits each, 4 to a byte in order) with one scale, against two Q8_0 blocks of 32
+#if defined(__AVX2__)
+// four consecutive Q2_0 weights per byte: byte b becomes b & 3, (b >> 2) & 3, (b >> 4) & 3, (b >> 6) & 3 (OR, never add: the overlapping copies only touch masked-off bits)
+static inline __m256i q2_0_unpack_32_avx2(const uint8_t * qs) {
+    __m256i v = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *) qs));
+    v = _mm256_or_si256(v, _mm256_slli_epi32(v, 12));
+    v = _mm256_or_si256(v, _mm256_slli_epi32(v,  6));
+    return _mm256_and_si256(v, _mm256_set1_epi32(0x03030303));
+}
+
+// 32 weights against one Q8_0 block: sum((v - 1) * y) = sum(v * y) - sum(y), exact for every int8 y
+static inline __m256 q2_0_dot_32_avx2(const uint8_t * qs, const int8_t * qy) {
+    const __m256i v = q2_0_unpack_32_avx2(qs);
+    const __m256i y = _mm256_loadu_si256((const __m256i *) qy);
+    const __m256i p = _mm256_sub_epi16(_mm256_maddubs_epi16(v, y), _mm256_maddubs_epi16(_mm256_set1_epi8(1), y));
+    return _mm256_cvtepi32_ps(_mm256_madd_epi16(p, _mm256_set1_epi16(1)));
+}
+
+static inline __m256 q2_0_acc_block_avx2(const block_q2_0 * x, const block_q8_0 * y, __m256 acc) {
+    const float  dx = GGML_CPU_FP16_TO_FP32(x->d);
+    const __m256 d0 = _mm256_set1_ps(dx * GGML_CPU_FP16_TO_FP32(y[0].d));
+    const __m256 d1 = _mm256_set1_ps(dx * GGML_CPU_FP16_TO_FP32(y[1].d));
+    const __m256 p0 = q2_0_dot_32_avx2(x->qs + 0, y[0].qs);
+    const __m256 p1 = q2_0_dot_32_avx2(x->qs + 8, y[1].qs);
+#if defined(__FMA__)
+    acc = _mm256_fmadd_ps(d0, p0, acc);
+    return _mm256_fmadd_ps(d1, p1, acc);
+#else
+    acc = _mm256_add_ps(acc, _mm256_mul_ps(d0, p0));
+    return _mm256_add_ps(acc, _mm256_mul_ps(d1, p1));
+#endif
+}
+#endif
+
 void ggml_vec_dot_q2_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
 #if defined(__AVX2__)
-    const int nb = n / QK2_0;
-
     assert(n % QK2_0 == 0);
     assert(nrc == 1);
     UNUSED(nrc);
@@ -713,31 +742,21 @@ void ggml_vec_dot_q2_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
 
     const block_q2_0 * GGML_RESTRICT x = vx;
     const block_q8_0 * GGML_RESTRICT y = vy;
+    const int nb = n / QK2_0;
 
-    const __m128i m3 = _mm_set1_epi8(3);
-    const __m256i one = _mm256_set1_epi8(1);
-    __m256 acc = _mm256_setzero_ps();
-
-    for (int i = 0; i < nb; ++i) {
-        const __m128i q = _mm_loadu_si128((const __m128i *) x[i].qs);    // bytes 0-7: the first 32, 8-15: the second
-        const __m128i v0 = _mm_and_si128(q, m3);
-        const __m128i v1 = _mm_and_si128(_mm_srli_epi16(q, 2), m3);
-        const __m128i v2 = _mm_and_si128(_mm_srli_epi16(q, 4), m3);
-        const __m128i v3 = _mm_and_si128(_mm_srli_epi16(q, 6), m3);
-        // byte b's four values next to each other: weight 4b + k is (byte b >> 2k) & 3
-        const __m128i a_lo = _mm_unpacklo_epi8(v0, v1), c_lo = _mm_unpacklo_epi8(v2, v3);
-        const __m128i a_hi = _mm_unpackhi_epi8(v0, v1), c_hi = _mm_unpackhi_epi8(v2, v3);
-        const __m256i w0 = _mm256_sub_epi8(MM256_SET_M128I(_mm_unpackhi_epi16(a_lo, c_lo), _mm_unpacklo_epi16(a_lo, c_lo)), one);
-        const __m256i w1 = _mm256_sub_epi8(MM256_SET_M128I(_mm_unpackhi_epi16(a_hi, c_hi), _mm_unpacklo_epi16(a_hi, c_hi)), one);
-
-        const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
-        const __m256 p0 = mul_sum_i8_pairs_float(w0, _mm256_loadu_si256((const __m256i *) y[2 * i + 0].qs));
-        const __m256 p1 = mul_sum_i8_pairs_float(w1, _mm256_loadu_si256((const __m256i *) y[2 * i + 1].qs));
-        acc = _mm256_fmadd_ps(_mm256_set1_ps(d0 * GGML_CPU_FP16_TO_FP32(y[2 * i + 0].d)), p0, acc);
-        acc = _mm256_fmadd_ps(_mm256_set1_ps(d0 * GGML_CPU_FP16_TO_FP32(y[2 * i + 1].d)), p1, acc);
+    // two Q2_0 blocks per step, each into its own accumulator (two FMA chains)
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 1 < nb; i += 2) {
+        acc0 = q2_0_acc_block_avx2(x + i + 0, y + 2*i + 0, acc0);
+        acc1 = q2_0_acc_block_avx2(x + i + 1, y + 2*i + 2, acc1);
+    }
+    if (i < nb) {
+        acc0 = q2_0_acc_block_avx2(x + i, y + 2*i, acc0);
     }
 
-    *s = hsum_float_8(acc);
+    *s = hsum_float_8(_mm256_add_ps(acc0, acc1));
 #else
     ggml_vec_dot_q2_0_q8_0_generic(n, s, bs, vx, bx, vy, by, nrc);
 #endif
