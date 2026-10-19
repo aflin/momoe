@@ -86,7 +86,7 @@ tokens are within a few hundredths of each other, which was checked); and the se
 
 | Model, size | PC | Spark | Jetson | M1 Ultra | M4 Air |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.8-Flash-Next IQ3_XXS | 57.9* | 31.8 | - | 28.1 | 8.6-8.9* (set up by hand) |
+| Qwen3.8-Flash-Next IQ3_XXS | 57.9* | 31.8 | - | 28.1 | 7.5 |
 | Flash-Next Coder IQ1_M | 54.8* | 28.4 | - | 25.5 ⁱ | - |
 | Swift 1.5 IQ3_XXS | 63.4* | 30.3 | - | 25.7 ⁱ | - |
 | Flash-Next (Unsloth) UD-IQ4_XS | 12.4* | 24.5 | - | 12.0 ⁱ | - |
@@ -102,7 +102,7 @@ tokens are within a few hundredths of each other, which was checked); and the se
 
 \* With drafting: the model's own multi-token-prediction (MTP) layer proposes up to 3 or 4 tokens ahead and the model
 checks them in one pass, keeping only what it would have written itself. Numbers without \* are without drafting:
-the Flash-Next family on the Spark and the M1 Ultra and Ornith on the M1 Ultra were measured without it, LFM has no
+the Flash-Next family on the Spark and the Macs and Ornith on the M1 Ultra were measured without it, LFM has no
 MTP layer, and MoMoE does not yet draft with Bolt's. llama.cpp's numbers are all without drafting.
 
 ⁱ Measured while macOS had moved the engine, started in the background over SSH, to the efficiency cores (graph
@@ -152,11 +152,10 @@ How these were measured (2026-10-19 unless named; build `momoe-cuda` / `momoe-me
 - **The Jetson:** 16K context. llama.cpp b11724, `llama-bench` tg128.
 - **The Macs:** setup's configs: every expert in memory where it fits beside the KV cache (Flash-Next IQ3_XXS and Swift
   at 32K context, the others at 64K), else an expert pool and the rest from the SSD (Unsloth's Flash-Next: 39 GiB on the
-  M1 Ultra; GLM: 29 GiB). The files larger than Metal's working set (48 GiB on the M1 Ultra) were not run in llama.cpp:
+  M1 Ultra; GLM: 29 GiB; Flash-Next IQ3_XXS on the M4 Air: 14 GiB, from the memory free when setup ran). The files larger than Metal's working set (48 GiB on the M1 Ultra) were not run in llama.cpp:
   that took a MacBook down. The 8 GB-Mac rows: setup's 8 GB config (a 3 GiB pool, 16K context); with all 32 GB the
   same runs wrote 42.8 and 14.8 tok/s. It does not simulate an 8 GB Mac's smaller Metal limit.
-- **Before today:** Flash-Next on the M4 Air was set up by hand (12 GiB of experts in memory, drafting); Ornith on the
-  M4 Air, its 16 GB simulation and llama.cpp beside them are in [design/mac-port.md](design/mac-port.md).
+- **Before today:** Ornith on the M4 Air, its 16 GB simulation and llama.cpp beside them are in [design/mac-port.md](design/mac-port.md).
 
 ### Two cards: layer split and helper tier
 

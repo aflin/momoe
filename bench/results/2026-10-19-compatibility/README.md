@@ -18,7 +18,7 @@ and streamed) and answered after the tool's result. Every row, with its conditio
 
 | Model, size | PC (4070 Ti) | PC, two cards | Spark | Jetson | M1 Ultra | M4 Air |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.8-Flash-Next IQ3_XXS | 57.9* | – | 31.8 | – | 28.1 | 8.6–8.9* (set up by hand, earlier) |
+| Qwen3.8-Flash-Next IQ3_XXS | 57.9* | – | 31.8 | – | 28.1 | 7.5 (setup's 14 GiB pool; 8.4 over a 1,673-token server chat) |
 | Flash-Next Coder IQ1_M | 54.8* | – | 28.4 | – | 25.5 ⁱ | – |
 | Swift 1.5 IQ3_XXS | 63.4* | – | 30.3 | – | 25.7 ⁱ | – |
 | Flash-Next (Unsloth) UD-IQ4_XS | 12.4* | – | 24.5 | – | 12.0 ⁱ | – |
@@ -33,9 +33,9 @@ and streamed) and answered after the tool's result. Every row, with its conditio
 | Flash-Next NVFP4 | PC only (Strata's own packs), not tested in MoMoE | | | | | |
 
 \* With drafting: the model's own multi-token-prediction (MTP) layer proposes up to 3 or 4 tokens ahead and the model
-checks them in one pass (Strata's engine on the PC: `--spec 4`; `momoe-cuda` / `momoe-metal`: `--mtp 3` for GLM and
-Flash-Next on the M4 Air, `--mtp 4` for the Qwen3.6 family). Without \*: no drafting. The Flash-Next family on the
-Spark and the M1 Ultra and Ornith on the M1 Ultra were measured without it, the two-card runs too, LFM has no MTP
+checks them in one pass (Strata's engine on the PC: `--spec 4`; `momoe-cuda` / `momoe-metal`: `--mtp 3` for GLM,
+`--mtp 4` for the Qwen3.6 family). Without \*: no drafting. The Flash-Next family on the
+Spark and the Macs and Ornith on the M1 Ultra were measured without it, the two-card runs too, LFM has no MTP
 layer, and MoMoE does not yet draft with Bolt's. llama.cpp's numbers are all without drafting.
 
 ⁱ Measured while macOS had moved the engine, started in the background over SSH, to the M1 Ultra's efficiency cores
