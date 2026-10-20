@@ -34,6 +34,7 @@ class Update(unittest.TestCase):
         out = io.StringIO()
         with mock.patch.object(setup, "pip_install") as pip, \
                 mock.patch.object(setup, "update_installed_engine") as eng, \
+                mock.patch.object(setup, "update_ggml_engines") as self.ggml, \
                 mock.patch.object(setup, "refresh_draft_vocab") as dv, \
                 mock.patch.object(setup, "start") as start, \
                 mock.patch("subprocess.call") as call, \
@@ -48,6 +49,7 @@ class Update(unittest.TestCase):
         self.assertEqual(rc, 0)
         pip.assert_called_once()
         eng.assert_called_once_with()
+        self.ggml.assert_called_once_with()                       # momoe-metal / momoe-cuda too
         dv.assert_called_once()
         self.assertEqual(dv.call_args[0][1], "en")                 # the model's own subset is kept
         start.assert_not_called()
@@ -68,7 +70,7 @@ class Update(unittest.TestCase):
         self.assertEqual(rc, 0)
         for m in (pip, eng, dv, start, call):
             m.assert_not_called()
-        self.assertIn("START-HERE.bat", out)
+        self.assertIn("momoe setup", out)                         # momoe.bat setup / ./momoe setup
 
     def test_a_json_that_is_no_model_config_is_skipped(self):
         """#549: a strata-*.json without "args" (not written by setup) stopped update.sh with KeyError: 'args'."""
@@ -141,6 +143,97 @@ class SettingsLine(unittest.TestCase):
         text = " ".join(out.getvalue().split())
         self.assertIn("Settings (strata-iq3_s.json): --kv int8 --kv-resident 32768", text)
         self.assertIn("--vram-reserve-mib 2048", text)
+
+
+class GgmlEngines(unittest.TestCase):
+    """Momoe's ggml engines (momoe-metal, momoe-cuda) are compiled again by --update when src/metal changed: the source
+    hash in <build>/BUILD.json.  Only a build this folder has; the build script is mocked."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "src" / "metal").mkdir(parents=True)
+        (self.root / "src" / "metal" / "momoe_metal.cpp").write_text("int main() {}\n")
+        self.runs = []
+        self.fail_build = False
+
+    def cuda_build(self, archs="86;89"):
+        b = self.root / "build-cuda"
+        (b / "cmake").mkdir(parents=True)
+        (b / "momoe-cuda").write_bytes(b"x")
+        (b / "cmake" / "CMakeCache.txt").write_text(f"CMAKE_BUILD_TYPE:STRING=Release\nCMAKE_CUDA_ARCHITECTURES:STRING={archs}\n")
+        return b
+
+    def update(self, platform="linux", nvcc="/usr/local/cuda/bin/nvcc"):
+        def fake_run(cmd, env=None, **k):
+            self.runs.append((cmd, env))
+            if self.fail_build:
+                raise SystemExit(1)
+        out = io.StringIO()
+        with mock.patch.object(setup, "ROOT", self.root), mock.patch.object(setup, "run", fake_run), \
+                mock.patch.object(setup, "find_nvcc", return_value=(nvcc, (13, 0))), \
+                mock.patch.object(setup.sys, "platform", platform), contextlib.redirect_stdout(out):
+            setup.update_ggml_engines()
+        return out.getvalue()
+
+    def test_nothing_built_nothing_compiled(self):
+        self.update()
+        self.assertEqual(self.runs, [])
+
+    def test_an_unstamped_build_is_compiled_once_for_its_own_architectures(self):
+        b = self.cuda_build()
+        out = self.update()
+        self.assertEqual(len(self.runs), 1)
+        cmd, env = self.runs[0]
+        self.assertTrue(cmd[-1].endswith("build_cuda.sh"), cmd)
+        self.assertEqual(env["CUDA_ARCHS"], "86;89")              # not "native": the cards it was built for
+        self.assertEqual(env["NVCC"], "/usr/local/cuda/bin/nvcc")
+        with mock.patch.object(setup, "ROOT", self.root):
+            self.assertEqual(json.loads((b / "BUILD.json").read_text())["src"], setup.source_hash(setup.GGML_ENGINE_SOURCES))
+        self.assertIn("momoe-cuda compiled again", out)
+        self.update()                                             # stamped: the same source is not compiled again
+        self.assertEqual(len(self.runs), 1)
+
+    def test_the_stamp_keeps_the_architectures_setup_chose(self):
+        b = self.cuda_build(archs="native")                       # the CMake cache does not say (it is not kept there)
+        with mock.patch.object(setup, "ROOT", self.root):
+            setup.stamp_ggml_build(b, "89")                         # setup built for one card (--gpu)
+        (self.root / "src" / "metal" / "momoe_metal.cpp").write_text("int main() { return 1; }\n")
+        self.update()
+        self.assertEqual(self.runs[0][1]["CUDA_ARCHS"], "89")
+        self.assertEqual(json.loads((b / "BUILD.json").read_text())["archs"], "89")   # kept for the next update
+
+    def test_a_changed_source_is_compiled_again(self):
+        self.cuda_build()
+        self.update()
+        (self.root / "src" / "metal" / "momoe_metal.cpp").write_text("int main() { return 0; }\n")   # a git pull
+        self.update()
+        self.assertEqual(len(self.runs), 2)
+
+    def test_a_failed_build_keeps_the_engine_and_stamps_nothing(self):
+        b = self.cuda_build()
+        self.fail_build = True
+        out = self.update()
+        self.assertIn("the installed one is kept", out)
+        self.assertTrue((b / "momoe-cuda").exists())
+        self.assertFalse((b / "BUILD.json").exists())
+
+    def test_no_nvcc_keeps_the_engine(self):
+        self.cuda_build()
+        out = self.update(nvcc=None)
+        self.assertEqual(self.runs, [])
+        self.assertIn("no CUDA toolkit", out)
+
+    def test_metal_only_on_a_mac(self):
+        b = self.root / "build-metal"
+        b.mkdir()
+        (b / "momoe-metal").write_bytes(b"x")
+        self.update(platform="linux")
+        self.assertEqual(self.runs, [])
+        self.update(platform="darwin")
+        self.assertEqual(len(self.runs), 1)
+        self.assertTrue(self.runs[0][0][-1].endswith("build.sh"))
 
 
 if __name__ == "__main__":

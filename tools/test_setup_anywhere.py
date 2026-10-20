@@ -172,6 +172,7 @@ class Routing(unittest.TestCase):
                 mock.patch.object(setup, "ok"), mock.patch.object(setup, "warn"), mock.patch.object(setup, "step"), \
                 mock.patch.object(setup, "find_nvcc", return_value=("/nvcc", (13, 0))), \
                 mock.patch.object(setup, "pip_install"), mock.patch.object(setup, "run"), \
+                mock.patch.object(setup, "stamp_ggml_build"), \
                 mock.patch.object(setup.Path, "exists", return_value=True), mock.patch.object(setup, "done", return_value=True), \
                 mock.patch.object(setup, "verify_sha256"), mock.patch.object(setup, "check_shards"), \
                 mock.patch.object(setup, "weights_gib", return_value=(100.0, 7.0)), \
@@ -238,6 +239,7 @@ class MacDraft(unittest.TestCase):
                    mock.patch.object(setup, "say"), mock.patch.object(setup, "ok"), mock.patch.object(setup, "warn"),
                    mock.patch.object(setup, "step"), mock.patch.object(setup, "pip_install"),
                    mock.patch.object(setup, "run", side_effect=lambda cmd, **kw: ran.append(cmd) or fake_run(cmd)),
+                   mock.patch.object(setup, "stamp_ggml_build"),          # the build is mocked: no stamp in this folder
                    mock.patch.object(setup.Path, "exists", autospec=True, side_effect=exists),
                    mock.patch.object(setup, "done", return_value=True), mock.patch.object(setup, "verify_sha256"),
                    mock.patch.object(setup, "download", side_effect=AssertionError("a download in a test")),

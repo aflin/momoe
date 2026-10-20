@@ -4242,6 +4242,69 @@ def update_engine_gpu(toolkit=13):
     return {**g, "count": len(found)}
 
 
+GGML_ENGINE_SOURCES = ("src/metal",)    # momoe-metal and momoe-cuda: momoe_metal.cpp, its vendored ggml, the build scripts
+GGML_BUILDS = {"build-metal": ("momoe-metal", "build.sh"), "build-cuda": ("momoe-cuda", "build_cuda.sh")}
+
+
+def stamp_ggml_build(bdir: Path, archs: str | None = None) -> None:
+    """<build-metal or build-cuda>/BUILD.json: the source the ggml engine there was compiled from, and (momoe-cuda) the
+    CUDA architectures it was compiled for, which update_ggml_engines compiles for again."""
+    if not bdir.is_dir():
+        return
+    meta = {"src": source_hash(GGML_ENGINE_SOURCES), **({"archs": archs} if archs else {})}
+    (bdir / "BUILD.json").write_text(json.dumps(meta, indent=1) + "\n", encoding="utf-8")
+
+
+def cmake_cuda_archs(bdir: Path) -> str | None:
+    """The CUDA architectures an existing momoe-cuda build was configured for (its CMake cache), e.g. "86;89"."""
+    cache = bdir / "cmake" / "CMakeCache.txt"
+    if cache.exists():
+        m = re.search(r"^CMAKE_CUDA_ARCHITECTURES:[A-Z]+=(.+)$", cache.read_text(encoding="utf-8", errors="replace"), re.M)
+        if m and m.group(1).strip() not in ("", "native"):
+            return m.group(1).strip()
+    return None
+
+
+def update_ggml_engines() -> None:
+    """Momoe's ggml engines - momoe-metal on a Mac (build-metal/), momoe-cuda on Linux (build-cuda/) - compiled again
+    when src/metal changed since they were built (a git pull), as update_installed_engine does for engine/.  Only an
+    engine this folder already has; a build from before the BUILD.json stamp is compiled once (only what changed).  The
+    build scripts replace the program file, so a model still running keeps the one it started with.  If it cannot be
+    compiled, the installed one is kept."""
+    want = source_hash(GGML_ENGINE_SOURCES)
+    for name, (exe_name, script) in GGML_BUILDS.items():
+        bdir = ROOT / name
+        exe = bdir / exe_name
+        if not exe.exists() or (name == "build-metal") != (sys.platform == "darwin"):
+            continue
+        stamp = bdir / "BUILD.json"
+        try:
+            meta = json.loads(stamp.read_text(encoding="utf-8")) if stamp.exists() else {}
+        except (OSError, ValueError):
+            meta = {}
+        if meta.get("src") == want:
+            continue
+        say(f"  {exe_name}: its source changed since it was compiled - compiling it again (only what changed) ...")
+        env = dict(os.environ)
+        if name == "build-cuda":
+            nvcc, _ = find_nvcc()
+            if not nvcc:
+                warn(f"no CUDA toolkit (nvcc) found: {exe_name} is not compiled again; the installed one is kept")
+                continue
+            env["NVCC"] = nvcc
+            env["PATH"] = str(Path(nvcc).parent) + os.pathsep + env.get("PATH", "")
+            archs = meta.get("archs") or cmake_cuda_archs(bdir)
+            if archs:                                  # the architectures it was built for, not "native" on this PC
+                env["CUDA_ARCHS"] = archs
+        try:
+            run(["sh", str(ROOT / "src" / "metal" / script)], env=env)
+        except (Exception, SystemExit) as e:
+            warn(f"could not compile {exe_name} again{'' if isinstance(e, SystemExit) else f' ({e})'}: the installed one is kept")
+            continue
+        stamp_ggml_build(bdir, env.get("CUDA_ARCHS"))
+        ok(f"{exe_name} compiled again: {exe}")
+
+
 def update_installed_engine(toolkit=None) -> None:
     """The installed engine is compiled again before the model starts when its source changed (a git pull), so a plain
     START-HERE.bat on an existing install runs the new code.  Momoe has no ready-made engine: one that was not compiled
@@ -5508,12 +5571,13 @@ def update_install(have: list, a) -> int:
     keeps its engine (update_installed_engine says to close it and run this again)."""
     have = [p for p in have if model_config(p)]        # #549: a strata-*.json that is no model config is skipped
     if not have:
-        say("  No model is installed in this Momoe folder yet: run START-HERE.bat (Linux: ./setup.sh) to set it up -")
+        say("  No model is installed in this Momoe folder yet: run " + ("momoe.bat" if WIN else "./momoe") + " setup to set one up -")
         say("  it finds an earlier install's model files next to it and reuses them.")
         return 0
     pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
                 "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
     update_installed_engine()
+    update_ggml_engines()                              # Momoe: momoe-metal / momoe-cuda, when src/metal changed
     mtp_done: set = set()
     for cfg_path in have:
         cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
@@ -5526,7 +5590,7 @@ def update_install(have: list, a) -> int:
     ver = engine_version(Path(json.loads(have[0].read_text(encoding="utf-8-sig"))["exe"]))
     say()
     ok("Momoe is updated" + (f" (engine {'.'.join(map(str, ver))})" if any(ver) else "") +
-       ". Start the model with " + ("START-HERE.bat" if WIN else "./setup.sh") + " when you want it.")
+       ". Start a model with " + ("momoe.bat" if WIN else "./momoe") + " start NAME when you want it.")
     return 0
 
 
@@ -6568,6 +6632,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         run(["sh", str(ROOT / "src" / "metal" / "build.sh")])
         if not exe.exists():
             fail("the engine did not build", f"see {ROOT / 'build-metal' / 'cmake.build.log'}")
+        stamp_ggml_build(exe.parent)                   # what update_ggml_engines compares against
         ok(str(exe))
     else:
         step(2, "building the engine (momoe-cuda; the first build takes 10-20 minutes)")
@@ -6579,6 +6644,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         run(["sh", str(ROOT / "src" / "metal" / "build_cuda.sh")], env=env)
         if not exe.exists():
             fail("the engine did not build", f"see {ROOT / 'build-cuda' / 'cmake.build.log'}")
+        stamp_ggml_build(exe.parent, archs)            # what update_ggml_engines compares against (and builds for)
         ok(f"{exe} (CUDA {ver[0]}.{ver[1]}, sm {archs.replace(';', ', ')})")
 
     tag = fam["tag"] + size_of(q)
