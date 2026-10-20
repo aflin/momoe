@@ -45,6 +45,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <array>
 
 static double now_s() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -627,6 +628,7 @@ struct Engine {
     double t_cpu_wait = 0;
     bool load_mtp = false;                                   // --mtp K: draft K tokens with the MTP layer
     bool preloaded = false;                                  // every expert in its own slot (preload)
+    std::vector<ggml_backend_t> sched_backends;              // e.sched's (a reused graph's own scheduler)
     std::string draft_vocab;                                 // --draft-vocab: the draft head's token subset
     std::string mtp_gguf;                                    // --mtp-gguf: qwen4exp's MTP layer (not in its GGUFs)
     double t_mtp = 0;                                        // time in the MTP layer
@@ -1629,6 +1631,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
 #endif
     backends.push_back(e.cpu);
     e.sched = ggml_backend_sched_new(backends.data(), nullptr, (int) backends.size(), 32768, false, true);
+    e.sched_backends = backends;
     gguf_free(g);
 }
 
@@ -2544,6 +2547,8 @@ static void preload(Engine & e) {
 // ------------------------------------------------------------------------------------------------ the graph
 struct Inputs {
     ggml_tensor *tokens, *pos, *mask;
+    ggml_tensor *kv_idx = nullptr;                           // I64 [T]: the positions written (a graph reused token
+                                                             // after token: the caches' rows as an input, not offsets)
     // QSA (llama.cpp's llm_graph_input_kpool, one sequence: a position's cell is its position): the blocks completed
     // by this batch (j_first.., n_new) are pooled; with more than top_k / kpool blocks the selection runs (sel)
     ggml_tensor *new_pos = nullptr;                          // I32 [4 * n_new]: rope position of each new block
@@ -2553,6 +2558,8 @@ struct Inputs {
                                                              // (cell numbers as f32: Metal casts f32 -> i32, not back)
     int j_first = 0, n_new = 0, n_pool = 0;
     bool sel = false;
+    ggml_tensor *pool_src = nullptr;                         // a reused graph: I32 [kpool * n_new], the new blocks' rows
+    ggml_tensor *pool_dst = nullptr;                         // in the raw cache; I64 [n_new], their rows in the pool
     ggml_tensor *sel_mask = nullptr;                         // glm5-next: F32 [n_sel, T]: 0 for a token's live slots
                                                              // (its first min(visible, n_top) pools by score), -inf
     int n_sel = 0;
@@ -2560,6 +2567,14 @@ struct Inputs {
 
 static ggml_tensor * norm(ggml_context * c, ggml_tensor * x, ggml_tensor * w, float eps) {
     return ggml_mul(c, ggml_rms_norm(c, x, eps), w);
+}
+
+// a batch's rows (w values each, contiguous) into a cache at the positions of in.kv_idx (a reused graph)
+static void cache_rows(ggml_context * c, ggml_cgraph * gf, ggml_tensor * cache, ggml_tensor * src, int64_t w, int T,
+                       const Inputs & in) {
+    if (ggml_nelements(cache) % w || !ggml_is_contiguous(cache)) die("a cache does not hold whole rows (cache_rows)");
+    ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, cache, w, ggml_nelements(cache) / w),
+                                                ggml_reshape_2d(c, ggml_cont(c, src), w, T), in.kv_idx));
 }
 
 static ggml_tensor * l2_norm(ggml_context * c, ggml_tensor * x, float eps) {   // llama.cpp's build_gdn_l2_norm
@@ -2577,13 +2592,16 @@ static ggml_tensor * qsa_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, L
     int sections[4] = {m.sections[0], m.sections[1], m.sections[2], m.sections[3]};
     ggml_tensor * k_raw = ggml_mul_mat(c, L.idx_k, x);                                 // [D, T]
     const size_t rr = L.idx_raw->nb[1];
-    ggml_build_forward_expand(gf, ggml_cpy(c, k_raw, ggml_view_2d(c, L.idx_raw, D, T, rr, rr * p0)));
+    if (in.kv_idx) cache_rows(c, gf, L.idx_raw, k_raw, D, T, in);
+    else ggml_build_forward_expand(gf, ggml_cpy(c, k_raw, ggml_view_2d(c, L.idx_raw, D, T, rr, rr * p0)));
     if (in.n_new > 0) {
-        ggml_tensor * rows = ggml_view_3d(c, L.idx_raw, D, kp, in.n_new, rr, rr * kp, rr * kp * in.j_first);
+        ggml_tensor * rows = in.pool_src                     // (a reused graph: the rows by an input; f16 -> f32 either way)
+            ? ggml_reshape_3d(c, ggml_get_rows(c, L.idx_raw, in.pool_src), D, kp, in.n_new)
+            : ggml_view_3d(c, L.idx_raw, D, kp, in.n_new, rr, rr * kp, rr * kp * in.j_first);
         ggml_tensor * pooled = nullptr;
         for (int64_t i = 0; i < kp; ++i) {
             ggml_tensor * sl = ggml_view_2d(c, rows, D, in.n_new, rows->nb[2], i * rows->nb[1]);
-            sl = ggml_cast(c, sl, GGML_TYPE_F32);
+            if (sl->type != GGML_TYPE_F32) sl = ggml_cast(c, sl, GGML_TYPE_F32);
             pooled = pooled ? ggml_add(c, pooled, sl) : sl;
         }
         pooled = norm(c, ggml_scale(c, pooled, 1.0f / kp), L.idx_k_norm, m.rms_eps);
@@ -2591,8 +2609,11 @@ static ggml_tensor * qsa_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, L
         pooled = ggml_rope_multi(c, pooled, in.new_pos, nullptr, m.n_rot, sections, GGML_ROPE_TYPE_IMROPE, 262144,
                                  m.rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
         const size_t pr = L.idx_pool->nb[1];
-        ggml_build_forward_expand(gf, ggml_cpy(c, ggml_reshape_2d(c, pooled, D, in.n_new),
-                                               ggml_view_2d(c, L.idx_pool, D, in.n_new, pr, pr * in.j_first)));
+        if (in.pool_dst)
+            ggml_build_forward_expand(gf, ggml_set_rows(c, L.idx_pool, ggml_reshape_2d(c, pooled, D, in.n_new), in.pool_dst));
+        else
+            ggml_build_forward_expand(gf, ggml_cpy(c, ggml_reshape_2d(c, pooled, D, in.n_new),
+                                                   ggml_view_2d(c, L.idx_pool, D, in.n_new, pr, pr * in.j_first)));
     }
     if (!in.sel) return nullptr;
     ggml_tensor * pooled = ggml_view_3d(c, L.idx_pool, D, 1, in.n_pool, L.idx_pool->nb[1], L.idx_pool->nb[1], 0);
@@ -2648,10 +2669,15 @@ static ggml_tensor * attn_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, 
                         0.0f, 1.0f, 32.0f, 1.0f);
     // this batch's K and V into the cache, then attention over the cache up to n_kv
     const size_t row = ggml_row_size(GGML_TYPE_F16, (int64_t) hd * m.n_head_kv);
-    ggml_build_forward_expand(gf, ggml_cpy(c, k, ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, T,
-                                                               L.k_cache->nb[1], row, row * p0)));
-    ggml_build_forward_expand(gf, ggml_cpy(c, v, ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, T,
-                                                               L.v_cache->nb[1], row, row * p0)));
+    if (in.kv_idx) {
+        cache_rows(c, gf, L.k_cache, k, (int64_t) hd * m.n_head_kv, T, in);
+        cache_rows(c, gf, L.v_cache, v, (int64_t) hd * m.n_head_kv, T, in);
+    } else {
+        ggml_build_forward_expand(gf, ggml_cpy(c, k, ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, T,
+                                                                   L.k_cache->nb[1], row, row * p0)));
+        ggml_build_forward_expand(gf, ggml_cpy(c, v, ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, T,
+                                                                   L.v_cache->nb[1], row, row * p0)));
+    }
     ggml_tensor * kv_k = ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, n_kv, L.k_cache->nb[1], row, 0);
     ggml_tensor * kv_v = ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, n_kv, L.v_cache->nb[1], row, 0);
     ggml_tensor * qp = ggml_permute(c, q, 0, 2, 1, 3);
@@ -2981,6 +3007,7 @@ static ggml_tensor * mamba2_layer(Engine & e, ggml_context * c, ggml_cgraph * gf
 static ggml_tensor * nemo_attn_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, Layer & L, ggml_tensor * x,
                                      const Inputs & in, int p0, int T, int n_kv, ggml_tensor * kv_idx = nullptr) {
     Model & m = e.m;
+    if (!kv_idx) kv_idx = in.kv_idx;
     const int hd = m.head_dim;
     ggml_tensor * q = ggml_reshape_3d(c, ggml_mul_mat(c, L.wq, x), hd, m.n_head, T);
     ggml_tensor * k = ggml_reshape_3d(c, ggml_mul_mat(c, L.wk, x), hd, m.n_head_kv, T);
@@ -3138,8 +3165,9 @@ static ggml_tensor * lfm_conv_layer(Engine & e, ggml_context * c, ggml_cgraph * 
 
 // GQA attention: q and k normed per head, NEOX RoPE, the cache [head_dim, n_head_kv, n_ctx] f16
 static ggml_tensor * lfm_attn_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, Layer & L, ggml_tensor * x,
-                                    const Inputs & in, int p0, int T, int n_kv) {
+                                    const Inputs & in, int p0, int T, int n_kv, ggml_tensor * kv_idx = nullptr) {
     Model & m = e.m;
+    if (!kv_idx) kv_idx = in.kv_idx;
     const int hd = m.head_dim;
     ggml_tensor * q = norm(c, ggml_reshape_3d(c, ggml_mul_mat(c, L.wq, x), hd, m.n_head, T), L.q_norm, m.rms_eps);
     ggml_tensor * k = norm(c, ggml_reshape_3d(c, ggml_mul_mat(c, L.wk, x), hd, m.n_head_kv, T), L.k_norm, m.rms_eps);
@@ -3148,8 +3176,14 @@ static ggml_tensor * lfm_attn_layer(Engine & e, ggml_context * c, ggml_cgraph * 
     q = ggml_rope_ext(c, q, pos, nullptr, m.n_rot, GGML_ROPE_TYPE_NEOX, 0, m.rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
     k = ggml_rope_ext(c, k, pos, nullptr, m.n_rot, GGML_ROPE_TYPE_NEOX, 0, m.rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
     const size_t row = ggml_row_size(GGML_TYPE_F16, (int64_t) hd * m.n_head_kv);
-    ggml_build_forward_expand(gf, ggml_cpy(c, k, ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, T, L.k_cache->nb[1], row, row * p0)));
-    ggml_build_forward_expand(gf, ggml_cpy(c, v, ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, T, L.v_cache->nb[1], row, row * p0)));
+    if (kv_idx) {                                            // the positions as an input (a graph reused token after token)
+        const int64_t w = (int64_t) hd * m.n_head_kv;
+        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.k_cache, w, e.n_ctx), ggml_reshape_2d(c, k, w, T), kv_idx));
+        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.v_cache, w, e.n_ctx), ggml_reshape_2d(c, v, w, T), kv_idx));
+    } else {
+        ggml_build_forward_expand(gf, ggml_cpy(c, k, ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, T, L.k_cache->nb[1], row, row * p0)));
+        ggml_build_forward_expand(gf, ggml_cpy(c, v, ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, T, L.v_cache->nb[1], row, row * p0)));
+    }
     ggml_tensor * kv_k = ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, n_kv, L.k_cache->nb[1], row, 0);
     ggml_tensor * kv_v = ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, n_kv, L.v_cache->nb[1], row, 0);
     ggml_tensor * o = ggml_flash_attn_ext(c, ggml_permute(c, q, 0, 2, 1, 3), ggml_permute(c, kv_k, 0, 2, 1, 3),
@@ -3332,7 +3366,8 @@ static ggml_tensor * glm_kpool_select(Engine & e, ggml_context * c, ggml_cgraph 
     ik = ggml_add(c, ggml_mul(c, ggml_norm(c, ik, m.norm_eps), L.idx_k_norm), L.idx_k_norm_b);
     ggml_tensor * ig = ggml_mul_mat(c, L.idx_gate, x);
     const size_t rr = L.idx_raw->nb[1];
-    ggml_build_forward_expand(gf, ggml_cpy(c, ggml_concat(c, ik, ig, 0), ggml_view_2d(c, L.idx_raw, 2 * D, T, rr, rr * p0)));
+    if (in.kv_idx) cache_rows(c, gf, L.idx_raw, ggml_concat(c, ik, ig, 0), 2 * D, T, in);
+    else ggml_build_forward_expand(gf, ggml_cpy(c, ggml_concat(c, ik, ig, 0), ggml_view_2d(c, L.idx_raw, 2 * D, T, rr, rr * p0)));
     if (in.n_new > 0) {
         ggml_tensor * pk = ggml_view_3d(c, L.idx_raw, D, kp, in.n_new, rr, rr * kp, rr * kp * in.j_first);
         ggml_tensor * pg = ggml_view_3d(c, L.idx_raw, D, kp, in.n_new, rr, rr * kp, rr * kp * in.j_first + ggml_row_size(L.idx_raw->type, D));
@@ -3383,7 +3418,8 @@ static ggml_tensor * glm_mla_layer(Engine & e, ggml_context * c, ggml_cgraph * g
     ggml_tensor * qa = ggml_permute(c, ggml_mul_mat(c, L.wk_b, ggml_permute(c, q, 0, 2, 1, 3)), 0, 2, 1, 3);   // [kv_lora, n_head, T]
     ggml_tensor * mask = glm_kpool_select(e, c, gf, L, x, qr, in, p0, T, n_kv);
     const size_t row = L.lat_cache->nb[1];
-    ggml_build_forward_expand(gf, ggml_cpy(c, kv, ggml_view_2d(c, L.lat_cache, m.kv_lora, T, row, row * p0)));
+    if (in.kv_idx) cache_rows(c, gf, L.lat_cache, kv, m.kv_lora, T, in);
+    else ggml_build_forward_expand(gf, ggml_cpy(c, kv, ggml_view_2d(c, L.lat_cache, m.kv_lora, T, row, row * p0)));
     ggml_tensor * lat = ggml_view_3d(c, L.lat_cache, m.kv_lora, 1, n_kv, row, row, 0);
     ggml_tensor * o = ggml_flash_attn_ext(c, ggml_permute(c, qa, 0, 2, 1, 3), ggml_permute(c, lat, 0, 2, 1, 3),
                                           ggml_permute(c, lat, 0, 2, 1, 3), mask, 1.0f / sqrtf((float) m.mla_k), 0.0f, 0.0f);
@@ -3509,6 +3545,8 @@ struct Out {
     std::vector<float> all_logits;                           // logits and all: every position's [T, n_vocab]
 };
 
+static uint64_t g_sched_gen = 1;                             // a reused decode graph's allocation: bumped by every other
+                                                             // graph the scheduler allocates
 #if defined(MOMOE_CUDA)
 // momoe-cuda, Bolt's one-token decode through mailboxes: the graph is built once per attention window (256 positions)
 // and kept, its per-token values (the token, the mask, the KV cache's row) set as inputs, so every token computes the
@@ -3524,7 +3562,6 @@ struct DecodeCache {
     uint64_t sched_gen = 0;                                  // the scheduler's allocation it was made with
 };
 static DecodeCache g_dec;
-static uint64_t g_sched_gen = 1;                             // bumped by every other graph the scheduler allocates
 
 static bool decode_cache_ok(const Engine & e, int T, const Out * out) {
     static const bool off = getenv("MOMOE_NO_GRAPH_REUSE") != nullptr;
@@ -3642,22 +3679,37 @@ static int forward_decode(Engine & e, const int32_t * toks, int p0, Out * out) {
 }
 #endif
 
+
 // the k-pool inputs (QSA's, glm5-next's) of a batch at positions p0..p0+T-1: made, then set after the allocation
+static void kpool_shape(const Engine & e, Inputs & in, int p0, int T) {
+    const Model & m = e.m;
+    if (!m.kpool) return;
+    const int kp = m.kpool, total = p0 + T;
+    in.j_first = p0 / kp;
+    in.n_new = std::max(0, total / kp - in.j_first);
+    in.n_pool = std::max(64, (total / kp + 1 + 63) / 64 * 64);
+    static const bool no_qsa = getenv("MOMOE_NO_QSA") != nullptr;   // a test: attention to every position
+    in.sel = total / kp > m.idx_top_k / kp && !no_qsa;       // else every finished block is kept: dense attention
+    if (m.glm5) in.sel = true;                               // (glm5-next: the selection is the mask, always: a token
+                                                             // never sees its own unfinished pool)
+    if (in.sel && m.glm5) in.n_sel = kp * std::min(in.n_pool, m.idx_top_k / kp) + (m.kpool_tail ? kp - 1 : 0);
+}
+
 static void kpool_new(Engine & e, ggml_context * c, Inputs & in, int p0, int T) {
     Model & m = e.m;
     if (!m.kpool) return;
     {
-        const int kp = m.kpool, total = p0 + T;
-        in.j_first = p0 / kp;
-        in.n_new = std::max(0, total / kp - in.j_first);
-        in.n_pool = std::max(64, (total / kp + 1 + 63) / 64 * 64);
-        static const bool no_qsa = getenv("MOMOE_NO_QSA") != nullptr;   // a test: attention to every position
-        in.sel = total / kp > m.idx_top_k / kp && !no_qsa;   // else every finished block is kept: dense attention
-        if (m.glm5) in.sel = true;                           // (glm5-next: the selection is the mask, always: a token
-                                                             // never sees its own unfinished pool)
+        const int kp = m.kpool;
+        kpool_shape(e, in, p0, T);
         if (in.n_new > 0 && !m.glm5) {                       // (glm5-next: no positions)
             in.new_pos = ggml_new_tensor_1d(c, GGML_TYPE_I32, 4 * (int64_t) in.n_new);
             ggml_set_input(in.new_pos);
+            if (in.kv_idx) {                                 // a reused graph: the new blocks' rows as inputs
+                in.pool_src = ggml_new_tensor_1d(c, GGML_TYPE_I32, (int64_t) kp * in.n_new);
+                in.pool_dst = ggml_new_tensor_1d(c, GGML_TYPE_I64, in.n_new);
+                ggml_set_input(in.pool_src);
+                ggml_set_input(in.pool_dst);
+            }
         }
         if (in.sel) {
             in.pool_idxs = ggml_new_tensor_2d(c, GGML_TYPE_F32, kp, in.n_pool);
@@ -3667,8 +3719,6 @@ static void kpool_new(Engine & e, ggml_context * c, Inputs & in, int p0, int T) 
             ggml_set_input(in.pool_mask);
             ggml_set_input(in.tail_idxs);
             if (m.glm5) {
-                const int n_top = std::min(in.n_pool, m.idx_top_k / kp);
-                in.n_sel = kp * n_top + (m.kpool_tail ? kp - 1 : 0);
                 in.sel_mask = ggml_new_tensor_2d(c, GGML_TYPE_F32, in.n_sel, T);
                 ggml_set_input(in.sel_mask);
             }
@@ -3679,11 +3729,20 @@ static void kpool_new(Engine & e, ggml_context * c, Inputs & in, int p0, int T) 
 static void kpool_set(Engine & e, const Inputs & in, int p0, int T, int n_kv) {
     Model & m = e.m;
     const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(-INFINITY);
+    const int j_first = m.kpool ? p0 / m.kpool : 0;         // (this call's: a reused graph was built at another)
     if (in.new_pos) {                                        // a block's keys rotate to its first position
         std::vector<int32_t> np(4 * (size_t) in.n_new);
         for (int j = 0; j < in.n_new; ++j)
-            for (int s4 = 0; s4 < 4; ++s4) np[(size_t) s4 * in.n_new + j] = (in.j_first + j) * m.kpool;
+            for (int s4 = 0; s4 < 4; ++s4) np[(size_t) s4 * in.n_new + j] = (j_first + j) * m.kpool;
         ggml_backend_tensor_set(in.new_pos, np.data(), 0, np.size() * sizeof(int32_t));
+    }
+    if (in.pool_src) {
+        std::vector<int32_t> src((size_t) m.kpool * in.n_new);
+        for (size_t i = 0; i < src.size(); ++i) src[i] = (int32_t) ((size_t) j_first * m.kpool + i);
+        ggml_backend_tensor_set(in.pool_src, src.data(), 0, src.size() * sizeof(int32_t));
+        std::vector<int64_t> dst(in.n_new);
+        for (int j = 0; j < in.n_new; ++j) dst[j] = j_first + j;
+        ggml_backend_tensor_set(in.pool_dst, dst.data(), 0, dst.size() * sizeof(int64_t));
     }
     if (in.sel) {
         const int kp = m.kpool, n_real = (p0 + T) / kp;
@@ -3715,13 +3774,19 @@ static void kpool_set(Engine & e, const Inputs & in, int p0, int T, int n_kv) {
     }
 }
 
-static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = nullptr) {
+// one forward graph: its tensors, and what forward() sets and reads back
+struct Built {
+    ggml_context * c = nullptr;
+    ggml_cgraph * gf = nullptr;
+    Inputs in;
+    ggml_tensor *seq0 = nullptr, *ple_in = nullptr, *on_cpu = nullptr, *on_gpu = nullptr;
+    ggml_tensor *hid = nullptr, *logits = nullptr, *best = nullptr;
+};
+
+// the graph of T tokens at p0.. (by_input: the caches' rows as an input, so the graph can be computed again at other
+// positions with the same shapes)
+static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built & b, bool by_input) {
     Model & m = e.m;
-#if defined(MOMOE_CUDA)
-    if (decode_cache_ok(e, T, out)) return forward_decode(e, toks, p0, out);
-#endif
-    const double tb0 = now_s();
-    const int n_kv = std::min(e.n_ctx, ((p0 + T + 255) / 256) * 256);
     ggml_init_params ip = {ggml_tensor_overhead() * 40000 + ggml_graph_overhead_custom(32768, false), nullptr, true};
     ggml_context * c = ggml_init(ip);
     ggml_cgraph * gf = ggml_new_graph_custom(c, 32768, false);
@@ -3745,6 +3810,10 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
     ggml_set_input(in.pos);
     in.mask = ggml_new_tensor_2d(c, GGML_TYPE_F16, n_kv, T);
     ggml_set_input(in.mask);
+    if (by_input) {                                          // the rows written: an input (a reused graph)
+        in.kv_idx = ggml_new_tensor_1d(c, GGML_TYPE_I64, T);
+        ggml_set_input(in.kv_idx);
+    }
     ggml_tensor * x = ggml_get_rows(c, m.tok_embd, in.tokens);
     ggml_set_name(x, "model.input_embed");
     ggml_tensor * on_cpu = nullptr, * on_gpu = nullptr;      // momoe-cuda: the embeddings are in RAM (see load): their
@@ -3923,24 +3992,110 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
     ggml_tensor * best = ggml_argmax(c, logits);
     ggml_set_output(best);
     ggml_build_forward_expand(gf, best);
+    b.c = c;
+    b.gf = gf;
+    b.in = in;
+    b.seq0 = seq0;
+    b.ple_in = ple_in;
+    b.on_cpu = on_cpu;
+    b.on_gpu = on_gpu;
+    b.hid = hid;
+    b.logits = logits;
+    b.best = best;
+}
 
-    ggml_backend_sched_reset(e.sched);
-#if defined(MOMOE_CUDA)
-    ++g_sched_gen;                                           // the reused decode graph is no longer allocated
-#endif
-    if (on_gpu) {
-        ggml_backend_sched_set_tensor_backend(e.sched, on_cpu, e.cpu);
-        ggml_backend_sched_set_tensor_backend(e.sched, on_gpu, e.metal);
+static int g_built = 0;                                      // forward graphs built and the time it took (the stats
+static double g_built_s = 0;                                 // line's)
+
+#if !defined(MOMOE_CUDA)
+// momoe-metal: graphs kept and computed again, as llama.cpp reuses its graph.  Building a graph a token kept the GPU
+// waiting (LFM2.5-8B on the M1 Ultra: 0.85 ms of a token's 8.3), and macOS then ran it at ~850 MHz, not ~1,250 (120
+// tok/s; reused: 186, llama.cpp 175-185).  Only with every expert in its slot (no stops, no callback); each kept graph
+// has its own scheduler, so a drafting window, its rollback and the next window keep theirs.  A graph is found by
+// what shapes it: the tokens, the attention window, the outputs read back, and the k-pool's blocks (how many a batch
+// finishes; their rows are inputs).  MOMOE_NO_GRAPH_REUSE=1: built every time.
+struct GraphCache {
+    std::array<int, 14> key{};
+    bool ready = false;                                      // built and allocated
+    Built b;
+    ggml_backend_sched_t sched = nullptr;
+    uint64_t used = 0;
+};
+static GraphCache g_gc[16];
+
+static GraphCache * graph_cache(Engine & e, int T, int p0, int n_kv, const Out * out) {
+    static const bool off = getenv("MOMOE_NO_GRAPH_REUSE") || getenv("MOMOE_TOP") || getenv("MOMOE_FORCE_CB");
+    if (off || !e.preloaded || e.pause || e.nostall || e.reserve_only || debug_on() || T > e.max_window + 1) return nullptr;
+    Inputs sh{};
+    kpool_shape(e, sh, p0, T);
+    const std::array<int, 14> key = {T, n_kv, sh.n_new, sh.n_new && e.m.glm5 ? sh.j_first : -1, sh.n_pool, sh.sel, sh.n_sel,
+                                     out && out->logits, out && e.m.has_mtp, out && out->all, out && out->snap,
+                                     e.predict, e.predict2, 0};
+    static uint64_t clock = 0;
+    GraphCache * lru = &g_gc[0];
+    for (GraphCache & g : g_gc) {
+        if (g.ready && g.key == key) {
+            g.used = ++clock;
+            return &g;
+        }
+        if (g.used < lru->used) lru = &g;
     }
-#if defined(MOMOE_CUDA)
-    for (ggml_tensor * t : e.force_gpu) ggml_backend_sched_set_tensor_backend(e.sched, t, e.metal);
+    if (lru->b.c) ggml_free(lru->b.c);
+    lru->b = Built();
+    lru->ready = false;
+    lru->key = key;
+    lru->used = ++clock;
+    if (!lru->sched)
+        lru->sched = ggml_backend_sched_new(e.sched_backends.data(), nullptr, (int) e.sched_backends.size(), 32768, false, true);
+    return lru;
+}
+#else
+struct GraphCache { bool ready; Built b; ggml_backend_sched_t sched; };
+static GraphCache * graph_cache(Engine &, int, int, int, const Out *) { return nullptr; }
 #endif
-    if (e.reserve_only) {                                    // fit_pool: the compute buffers of the largest graph
-        if (!ggml_backend_sched_reserve(e.sched, gf)) die("cannot reserve the compute buffers: too little VRAM free");
-        ggml_free(c);
-        return 0;
+
+static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = nullptr) {
+    Model & m = e.m;
+#if defined(MOMOE_CUDA)
+    if (decode_cache_ok(e, T, out)) return forward_decode(e, toks, p0, out);
+#endif
+    const double tb0 = now_s();
+    const int n_kv = std::min(e.n_ctx, ((p0 + T + 255) / 256) * 256);
+    Built lb;
+    GraphCache * gc = graph_cache(e, T, p0, n_kv, out);     // Metal: a graph kept for these shapes (else built here)
+    Built & b = gc ? gc->b : lb;
+    const bool built = gc && gc->ready;
+    if (!built) {
+        build_forward(e, T, p0, n_kv, out, b, gc != nullptr);
+        ++g_built;
     }
-    if (!ggml_backend_sched_alloc_graph(e.sched, gf)) die("cannot allocate the graph");
+    ggml_context * c = b.c;
+    ggml_cgraph * gf = b.gf;
+    Inputs & in = b.in;
+    ggml_tensor * seq0 = b.seq0, * ple_in = b.ple_in, * on_cpu = b.on_cpu, * on_gpu = b.on_gpu;
+    ggml_tensor * hid = b.hid, * logits = b.logits, * best = b.best;
+    ggml_backend_sched_t sched = gc ? gc->sched : e.sched;
+    static const bool show_top = getenv("MOMOE_TOP") != nullptr;   // the last position's 5 most likely tokens
+
+    if (!built) {
+        ggml_backend_sched_reset(sched);
+        if (!gc) ++g_sched_gen;                              // the reused decode graph is no longer allocated
+        if (on_gpu) {
+            ggml_backend_sched_set_tensor_backend(sched, on_cpu, e.cpu);
+            ggml_backend_sched_set_tensor_backend(sched, on_gpu, e.metal);
+        }
+#if defined(MOMOE_CUDA)
+        for (ggml_tensor * t : e.force_gpu) ggml_backend_sched_set_tensor_backend(sched, t, e.metal);
+#endif
+        if (e.reserve_only) {                                // fit_pool: the compute buffers of the largest graph
+            if (!ggml_backend_sched_reserve(sched, gf)) die("cannot reserve the compute buffers: too little VRAM free");
+            ggml_free(c);
+            return 0;
+        }
+        if (!ggml_backend_sched_alloc_graph(sched, gf)) die("cannot allocate the graph");
+        if (gc) gc->ready = true;
+        g_built_s += now_s() - tb0;
+    }
     ggml_backend_tensor_set(in.tokens, toks, 0, (size_t) T * sizeof(int32_t));
     std::vector<int32_t> pos((size_t) T * 4);
     for (int i = 0; i < T; ++i) {                            // text: [p, p, p, 0] per token, section-major
@@ -3952,6 +4107,11 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
     for (int i = 0; i < T; ++i)
         for (int j = 0; j < n_kv; ++j) mask[(size_t) i * n_kv + j] = j <= p0 + i ? zero : ninf;
     ggml_backend_tensor_set(in.mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+    if (in.kv_idx) {
+        std::vector<int64_t> rows(T);
+        for (int i = 0; i < T; ++i) rows[i] = p0 + i;
+        ggml_backend_tensor_set(in.kv_idx, rows.data(), 0, rows.size() * sizeof(int64_t));
+    }
     if (seq0) {
         const int32_t zero_id = 0;
         ggml_backend_tensor_set(seq0, &zero_id, 0, sizeof zero_id);
@@ -3981,7 +4141,7 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
     }
 #endif
     if (!e.pause || (e.ns_graph && e.ns_every == 0)) {
-        if (ggml_backend_sched_graph_compute(e.sched, gf) != GGML_STATUS_SUCCESS) die("the graph failed");
+        if (ggml_backend_sched_graph_compute(sched, gf) != GGML_STATUS_SUCCESS) die("the graph failed");
 #if defined(MOMOE_CUDA)
         if (mb_job) {
             if (*e.mb.timeout) die("the GPU waited for the CPU's experts and gave up (the mailbox worker stopped)");
@@ -4080,7 +4240,7 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
                                     V * sizeof(float));
         }
     }
-    ggml_free(c);
+    if (!gc) ggml_free(c);
     return nb.back();
 }
 
@@ -4334,24 +4494,80 @@ static void rollback(Engine & e, int T, int n_keep) {
 
 // the MTP layer over T positions: hidden states h (the main model's, or its own when chaining) and the tokens that
 // follow them; returns the greedy token after the last, and its own hidden state for the next draft
+// the MTP layer's graphs, kept as forward()'s are (see GraphCache): by the window's tokens and the attention window
+struct MtpGraph {
+    int T = -1, n_kv = -1;
+    bool ready = false;
+    ggml_context * c = nullptr;
+    ggml_cgraph * gf = nullptr;
+    Inputs in{};
+    ggml_tensor *hin = nullptr, *hl = nullptr, *best = nullptr, *bp = nullptr;
+    ggml_backend_sched_t sched = nullptr;
+    uint64_t used = 0;
+};
+#if !defined(MOMOE_CUDA)
+static MtpGraph g_mtpg[4];
+static MtpGraph * mtp_graph(Engine & e, int T, int n_kv) {
+    static const bool off = getenv("MOMOE_NO_GRAPH_REUSE") || getenv("MOMOE_FORCE_CB");
+    if (off || e.m.glm5 || !e.preloaded || e.pause || e.nostall || debug_on() || T > e.max_window + 1) return nullptr;
+    static uint64_t clock = 0;
+    MtpGraph * lru = &g_mtpg[0];
+    for (MtpGraph & g : g_mtpg) {
+        if (g.ready && g.T == T && g.n_kv == n_kv) {
+            g.used = ++clock;
+            return &g;
+        }
+        if (g.used < lru->used) lru = &g;
+    }
+    if (lru->c) ggml_free(lru->c);
+    ggml_backend_sched_t sc = lru->sched;
+    *lru = MtpGraph();
+    lru->sched = sc ? sc : ggml_backend_sched_new(e.sched_backends.data(), nullptr, (int) e.sched_backends.size(), 8192,
+                                                   false, true);
+    lru->T = T;
+    lru->n_kv = n_kv;
+    lru->used = ++clock;
+    return lru;
+}
+#else
+static MtpGraph * mtp_graph(Engine &, int, int) { return nullptr; }
+#endif
+
 static int mtp_forward(Engine & e, const float * h, const int32_t * toks, int T, int p0, std::vector<float> & h_out,
                        float * prob = nullptr) {
     Model & m = e.m;
     const double tm0 = now_s();
     Layer & L = m.mtp;
     const int n_kv = std::min(e.n_ctx, ((p0 + T + 255) / 256) * 256);
+    MtpGraph * G = mtp_graph(e, T, n_kv);                   // Metal: a graph kept for these shapes (else built here)
+    ggml_context * c = nullptr;
+    ggml_cgraph * gf = nullptr;
+    Inputs in{};
+    ggml_tensor * hin = nullptr, * hl = nullptr, * head_in = nullptr, * best = nullptr, * bp = nullptr;
+    if (G && G->ready) {
+        c = G->c;
+        gf = G->gf;
+        in = G->in;
+        hin = G->hin;
+        hl = G->hl;
+        best = G->best;
+        bp = G->bp;
+    } else {
     ggml_init_params ip = {ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(8192, false), nullptr, true};
-    ggml_context * c = ggml_init(ip);
-    ggml_cgraph * gf = ggml_new_graph_custom(c, 8192, false);
-    Inputs in;
+    c = ggml_init(ip);
+    gf = ggml_new_graph_custom(c, 8192, false);
     in.tokens = ggml_new_tensor_1d(c, GGML_TYPE_I32, T);
     ggml_set_input(in.tokens);
-    ggml_tensor * hin = ggml_new_tensor_2d(c, GGML_TYPE_F32, m.h_dim(), T);
+    hin = ggml_new_tensor_2d(c, GGML_TYPE_F32, m.h_dim(), T);
     ggml_set_input(hin);
     in.pos = ggml_new_tensor_1d(c, GGML_TYPE_I32, (int64_t) T * 4);
     ggml_set_input(in.pos);
     in.mask = ggml_new_tensor_2d(c, GGML_TYPE_F16, n_kv, T);
     ggml_set_input(in.mask);
+    if (G) {                                                 // the rows written: an input (a reused graph)
+        in.kv_idx = ggml_new_tensor_1d(c, GGML_TYPE_I64, T);
+        ggml_set_input(in.kv_idx);
+    }
     // its MoE: the experts whole (no pool), and the shared expert
     auto moe_of = [&](ggml_tensor * pn) {
         // its own expert count: the checkpoint's 512, also under the Coder's pruned 256
@@ -4376,7 +4592,7 @@ static int mtp_forward(Engine & e, const float * h, const int32_t * toks, int T,
         return ggml_add(c, moe, sh);
     };
     ggml_tensor * en = norm(c, ggml_get_rows(c, m.tok_embd, in.tokens), L.enorm, m.rms_eps);
-    ggml_tensor * hl, * head_in;                             // the next draft's input; the head's
+                                                             // hl: the next draft's input; head_in: the head's
     if (m.glm5) kpool_new(e, c, in, p0, T);                  // (its MLA block's own k-pool selection)
     if (m.glm5) {
         // llama.cpp's glm5-next graph_mtp: e and h normed, eh_proj of [e ; h], one MLA block (a full indexer of its
@@ -4438,18 +4654,29 @@ static int mtp_forward(Engine & e, const float * h, const int32_t * toks, int T,
     }
     ggml_set_output(hl);
     ggml_tensor * probs_v = ggml_soft_max(c, ggml_mul_mat(c, m.dhead ? m.dhead : m.output, head_in));   // [n_vocab or subset]
-    ggml_tensor * best = ggml_argmax(c, probs_v);
+    best = ggml_argmax(c, probs_v);
     ggml_set_output(best);
-    ggml_tensor * bp = ggml_get_rows(c, ggml_reshape_2d(c, probs_v, 1, probs_v->ne[0]), best);   // its probability
+    bp = ggml_get_rows(c, ggml_reshape_2d(c, probs_v, 1, probs_v->ne[0]), best);   // its probability
     ggml_set_output(bp);
     ggml_build_forward_expand(gf, best);
     ggml_build_forward_expand(gf, bp);
     ggml_build_forward_expand(gf, hl);
-    ggml_backend_sched_reset(e.sched);
-#if defined(MOMOE_CUDA)
-    ++g_sched_gen;
-#endif
-    if (!ggml_backend_sched_alloc_graph(e.sched, gf)) die("cannot allocate the MTP graph");
+    ggml_backend_sched_t sc = G ? G->sched : e.sched;
+    ggml_backend_sched_reset(sc);
+    if (!G) ++g_sched_gen;
+    if (!ggml_backend_sched_alloc_graph(sc, gf)) die("cannot allocate the MTP graph");
+    if (G) {
+        G->c = c;
+        G->gf = gf;
+        G->in = in;
+        G->hin = hin;
+        G->hl = hl;
+        G->best = best;
+        G->bp = bp;
+        G->ready = true;
+    }
+    }
+    ggml_backend_sched_t sched = G ? G->sched : e.sched;
     ggml_backend_tensor_set(in.tokens, toks, 0, (size_t) T * sizeof(int32_t));
     ggml_backend_tensor_set(hin, h, 0, (size_t) T * m.h_dim() * sizeof(float));
     std::vector<int32_t> pos((size_t) T * 4);
@@ -4461,8 +4688,13 @@ static int mtp_forward(Engine & e, const float * h, const int32_t * toks, int T,
     for (int i = 0; i < T; ++i)
         for (int j = 0; j < n_kv; ++j) mask[(size_t) i * n_kv + j] = j <= p0 + i ? zero : ninf;
     ggml_backend_tensor_set(in.mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+    if (in.kv_idx) {
+        std::vector<int64_t> rows(T);
+        for (int i = 0; i < T; ++i) rows[i] = p0 + i;
+        ggml_backend_tensor_set(in.kv_idx, rows.data(), 0, rows.size() * sizeof(int64_t));
+    }
     if (m.glm5) kpool_set(e, in, p0, T, n_kv);
-    if (ggml_backend_sched_graph_compute(e.sched, gf) != GGML_STATUS_SUCCESS) die("the MTP graph failed");
+    if (ggml_backend_sched_graph_compute(sched, gf) != GGML_STATUS_SUCCESS) die("the MTP graph failed");
     int32_t r = 0;
     ggml_backend_tensor_get(best, &r, 0, sizeof(r));
     if (m.dhead) r = m.dvocab[r];
@@ -4470,7 +4702,7 @@ static int mtp_forward(Engine & e, const float * h, const int32_t * toks, int T,
     e.t_mtp += now_s() - tm0;
     h_out.resize(m.h_dim());
     ggml_backend_tensor_get(hl, h_out.data(), 0, h_out.size() * sizeof(float));
-    ggml_free(c);
+    if (!G) ggml_free(c);
     return r;
 }
 
@@ -5235,6 +5467,8 @@ int main(int argc, char ** argv) {
     std::vector<int32_t> out;
     t0 = now_s();
     double t_half = 0, cb_half = 0, b_half = 0, c_half = 0, w_half = 0;
+    int built_half = 0;
+    double built_s_half = 0;
     if (mtp_k > 0) {                                          // drafts from the MTP layer, checked in one window
         const int ne = e.m.h_dim();
         std::vector<float> hc, hc2;
@@ -5350,7 +5584,7 @@ int main(int argc, char ** argv) {
     std::vector<float> lp;
     std::vector<ggml_fp16_t> h16;
     for (int i = 0; i < n_gen; ++i) {
-        if (i == n_gen / 2) { t_half = now_s(); cb_half = e.pool.cb_s; b_half = e.t_build; c_half = e.t_compute; w_half = e.t_wait; }
+        if (i == n_gen / 2) { t_half = now_s(); cb_half = e.pool.cb_s; b_half = e.t_build; built_half = g_built; built_s_half = g_built_s; c_half = e.t_compute; w_half = e.t_wait; }
         int32_t fed = next;
         if (kl_ref && fread(&fed, 4, 1, kl_ref) != 1) die("the KL reference is shorter than -n");
         out.push_back(fed);
@@ -5396,9 +5630,9 @@ int main(int argc, char ** argv) {
             (n_gen - n_gen / 2) / (now_s() - t_half), 1000 * (now_s() - t_half) / (n_gen - n_gen / 2),
             1000 * (e.pool.cb_s - cb_half) / (n_gen - n_gen / 2));
     fprintf(stderr, "momoe-metal:   per token: graph build + alloc %.2f ms, compute %.2f ms (waiting for pauses %.2f ms); "
-            "%d graph splits\n", 1000 * (e.t_build - b_half) / (n_gen - n_gen / 2),
+            "%d graph splits; %d graphs built (%.1f ms)\n", 1000 * (e.t_build - b_half) / (n_gen - n_gen / 2),
             1000 * (e.t_compute - c_half) / (n_gen - n_gen / 2), 1000 * (e.t_wait - w_half) / (n_gen - n_gen / 2),
-            ggml_backend_sched_get_n_splits(e.sched));
+            ggml_backend_sched_get_n_splits(e.sched), g_built - built_half, 1000 * (g_built_s - built_s_half));
     printf("tokens:");
     for (auto t : out) printf(" %d", t);
     printf("\n");

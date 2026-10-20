@@ -18,18 +18,18 @@ and streamed) and answered after the tool's result. Every row, with its conditio
 
 | Model, size | PC (4070 Ti) | PC, two cards | Spark | Jetson | M1 Ultra | M4 Air |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.8-Flash-Next IQ3_XXS | 57.9* | – | 31.8 | – | 29.7 (server 29.2) | 7.9* (setup's 11 GiB pool; earlier engine, 14 GiB, no drafting: 7.5) |
-| Flash-Next Coder IQ1_M | 54.8* | – | 28.4 | – | 51.0* (30.0 without drafting) | – |
-| Swift 1.5 IQ3_XXS | 63.4* | – | 30.3 | – | 29.0 (server 28.5) | – |
+| Qwen3.8-Flash-Next IQ3_XXS | 57.9* | – | 31.8 | – | 33.4 | 7.9* (setup's 11 GiB pool; earlier engine, 14 GiB, no drafting: 7.5) |
+| Flash-Next Coder IQ1_M | 54.8* | – | 28.4 | – | 56.0* | – |
+| Swift 1.5 IQ3_XXS | 63.4* | – | 30.3 | – | 33.2 | – |
 | Flash-Next (Unsloth) UD-IQ4_XS | 12.4* | – | 24.5 | – | 19.0* (36 GiB pool; server 17.9) | – |
-| Qwen3.6-35B-A3B (Unsloth) UD-IQ4_XS | 158.7* | – | 61.0* | – | 113.4* | – |
-| Qwen3.6-35B-A3B (bartowski) IQ4_XS | 157.5* | – | 77.1* | – | 98.1* | – |
-| Ornith-1.5 IQ4_XS | 128.8* (setup's config; 99.0* with a 256K context) | – | 68.2* | – | 70.7* | 26.9* (14 GiB pool; as a 16 GB Mac, earlier: 9.7–13.1) |
-| KAT-Coder i-quality-v2 | 126.2* | – | 57.3* | – | 88.3* | – |
-| Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 | runs (split 18.0, helper 14.4, right after a start) | 27.4 | – | 34.0 (UD-Q3_K_XL) | – |
+| Qwen3.6-35B-A3B (Unsloth) UD-IQ4_XS | 158.7* | – | 61.0* | – | 122.1* | – |
+| Qwen3.6-35B-A3B (bartowski) IQ4_XS | 157.5* | – | 77.1* | – | 108.2* | – |
+| Ornith-1.5 IQ4_XS | 128.8* (setup's config; 99.0* with a 256K context) | – | 68.2* | – | 84.5* | 26.9* (14 GiB pool; as a 16 GB Mac, earlier: 9.7–13.1) |
+| KAT-Coder i-quality-v2 | 126.2* | – | 57.3* | – | 96.5* | – |
+| Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 | runs (split 18.0, helper 14.4, right after a start) | 27.4 | – | 37.5 (UD-Q3_K_XL) | – |
 | GLM-5.3-Flash UD-IQ3_XXS | doesn't fit one 12 GB card | 0.5 (split) | 18.0* | – | 4.5* | – |
-| LFM2.5-24B-A2B | 75.9 (UD-Q4_K_XL) | 42.1 (helper, store warm; 40.6 over 300 tokens from a start, against 20.4 on one card) | 126.0 | 6.9 | 57.4 | 11.9 (as an 8 GB Mac; 12.0 with all 32 GB) |
-| LFM2.5-8B-A1B UD-Q4_K_XL | 255 | 197 (split) | 157.1 | 16.6 | 120.3 (server 120-128) | 43.1 (as an 8 GB Mac; 43.3 with all 32 GB) |
+| LFM2.5-24B-A2B | 75.9 (UD-Q4_K_XL) | 42.1 (helper, store warm; 40.6 over 300 tokens from a start, against 20.4 on one card) | 126.0 | 6.9 | 104.3 (server 99.8) | 11.9 (as an 8 GB Mac; 12.0 with all 32 GB) |
+| LFM2.5-8B-A1B UD-Q4_K_XL | 255 | 197 (split) | 157.1 | 16.6 | 185.3 (server 177.5) | 43.1 (as an 8 GB Mac; 43.3 with all 32 GB) |
 | Flash-Next NVFP4 | PC only (Strata's own packs), not tested in MoMoE | | | | | |
 
 \* With drafting: the model's own multi-token-prediction (MTP) layer proposes up to 3 or 4 tokens ahead and the model
@@ -42,6 +42,10 @@ The Mac numbers were measured again in the evening with the engine that keeps on
 while a request runs (see the README). The earlier ones (in stats.csv) were measured with macOS holding the engine on
 the efficiency cores at random: graph building 0.8 or ~4.2 ms a token, LFM2.5-8B 150 or 62-68 tok/s run to run, and its
 server 64-69 on every request.
+
+The M1 Ultra column was measured again on 2026-10-20 with the engine that keeps its graphs (see the README; the same
+tokens as before on all twelve models, with graphs kept, without, and with the previous engine). Unsloth's Flash-Next
+and GLM keep their 2026-10-19 numbers: with an expert pool, a graph is still built each token.
 
 Engines: on the PC Strata's engine for the Qwen3.8-Flash-Next and Qwen3.6 families (`tools/strata_bench.py`, three
 runs, the chat decode median; Ornith on `momoe-cuda`: 63.9) and `momoe-cuda` for Bolt, GLM and LFM; `momoe-cuda` for
@@ -60,12 +64,12 @@ helper: 300 of 300; Bolt with the helper: 200 of 200, the split at a near-tie).
 | LFM2.5-8B UD-IQ3_XXS | Jetson | 18.7 | 20.5 |
 | LFM2.5-24B UD-Q4_K_XL | PC | 75.9 | 105.1 |
 | LFM2.5-8B UD-Q4_K_XL | PC | 255 | 305.8 |
-| LFM2.5-8B UD-Q4_K_XL | M1 Ultra | 120.3 / 120–128 (server) | 169 (190 later the same day) / 176–182 (server) |
-| LFM2.5-24B UD-IQ3_XXS | M1 Ultra | 57.4 | 108.7 |
-| Qwen3.6 (Unsloth) UD-IQ4_XS | M1 Ultra | 113.4* | 90.2–91.2 |
-| Qwen3.6 (bartowski) IQ4_XS | M1 Ultra | 98.1* | 96.8 |
-| KAT-Coder i-quality-v2 | M1 Ultra | 88.3* | 87.5 |
-| Bolt UD-Q3_K_XL | M1 Ultra | 34.0 | 38.5 (it cannot read prompts there: no Metal kernel for 9 experts a token) |
+| LFM2.5-8B UD-Q4_K_XL | M1 Ultra | 185.3 / 177.5 (server) | 169 (190 later the same day) / 176–182 (server) |
+| LFM2.5-24B UD-IQ3_XXS | M1 Ultra | 104.3 / 99.8 (server) | 108.7 |
+| Qwen3.6 (Unsloth) UD-IQ4_XS | M1 Ultra | 122.1* | 90.2–91.2 |
+| Qwen3.6 (bartowski) IQ4_XS | M1 Ultra | 108.2* | 96.8 |
+| KAT-Coder i-quality-v2 | M1 Ultra | 96.5* | 87.5 |
+| Bolt UD-Q3_K_XL | M1 Ultra | 37.5 | 38.5 (it cannot read prompts there: no Metal kernel for 9 experts a token) |
 | Bolt UD-IQ3_XXS | PC | 30.0 / 30.6 (server, earlier) | 26.2 / 26.1 |
 | GLM-5.3 UD-IQ3_XXS | Spark | 18.0* / 15.0* / 14.6* (server, 10-17); 13.3 (10-17) | 1.3 (10-17, a 48-token check with every expert on the CPU, cold; not a speed test) |
 | GLM-5.3 UD-IQ4_XS | Spark | 11.7* / 10.4* (server, 10-17); 9.3 (10-17) | 2.3 / 2.5 |
