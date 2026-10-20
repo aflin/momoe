@@ -65,6 +65,15 @@ class Update(unittest.TestCase):
         eng.assert_called_once_with()
         self.assertEqual(dv.call_args[0][1], "cjk")
 
+    def test_a_ggml_engine_names_no_strata_version(self):
+        # momoe-metal / momoe-cuda carry no engine version: the closing line says none (it said 0.1.12)
+        with tempfile.TemporaryDirectory() as d:
+            p = self.config(Path(d), exe=str(Path(d) / "build-metal" / "momoe-metal"))
+            rc, pip, eng, dv, start, call, out = self.run_update([p])
+        self.assertEqual(rc, 0)
+        self.assertIn("Momoe is updated. Start a model with", out)
+        self.assertNotIn("(engine", out)
+
     def test_nothing_installed(self):
         rc, pip, eng, dv, start, call, out = self.run_update([])
         self.assertEqual(rc, 0)

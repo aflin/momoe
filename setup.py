@@ -5587,7 +5587,10 @@ def update_install(have: list, a) -> int:
         if cfg.get("backend") == "hip" and WIN:
             hip_runtime_beside_exe(Path(cfg["exe"]).parent)   # #468 #461
         ok(f"{cfg.get('model_name', cfg_path.stem)}: up to date")
-    ver = engine_version(Path(json.loads(have[0].read_text(encoding="utf-8-sig"))["exe"]))
+    # the version of the engine in engine/ (Strata's line), from the first config that runs it: momoe-metal and
+    # momoe-cuda carry none (their BUILD.json is a source stamp), so a folder with only those says no number
+    strata_cfgs = [c for c in (json.loads(p.read_text(encoding="utf-8-sig")) for p in have) if not ggml_engine(c)]
+    ver = engine_version(Path(strata_cfgs[0]["exe"])) if strata_cfgs else (0,)
     say()
     ok("Momoe is updated" + (f" (engine {'.'.join(map(str, ver))})" if any(ver) else "") +
        ". Start a model with " + ("momoe.bat" if WIN else "./momoe") + " start NAME when you want it.")
