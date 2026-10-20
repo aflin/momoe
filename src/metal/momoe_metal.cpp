@@ -4354,10 +4354,12 @@ static int mtp_forward(Engine & e, const float * h, const int32_t * toks, int T,
     ggml_set_input(in.mask);
     // its MoE: the experts whole (no pool), and the shared expert
     auto moe_of = [&](ggml_tensor * pn) {
+        // its own expert count: the checkpoint's 512, also under the Coder's pruned 256
+        const int64_t n_exp = L.gate_inp->ne[1];
         ggml_tensor * probs = ggml_soft_max(c, ggml_mul_mat(c, L.gate_inp, pn));
         ggml_tensor * ids = ggml_cont(c, ggml_argsort_top_k(c, probs, m.n_used));
         ggml_set_name(ids, "mtp-ids");                       // not a pause point ("topk-" only)
-        ggml_tensor * w = ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, m.n_expert, T), ids);
+        ggml_tensor * w = ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, n_exp, T), ids);
         w = ggml_reshape_2d(c, w, m.n_used, T);
         w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
         w = ggml_reshape_3d(c, w, 1, m.n_used, T);
@@ -4515,6 +4517,42 @@ static int sample(const std::vector<float> & logits, const Sampling & sp, std::m
     return idx[n - 1];
 }
 
+// macOS judges a thread that mostly waits for the GPU as light work: it keeps it on the efficiency cores and lowers the
+// GPU's clock with it, and the two then hold each other there (the M1 Ultra, LFM2.5-8B through the server: 62-68 tok/s
+// on every request; llama.cpp's server 176-182, its CPU threads polling between graphs).  QoS classes and launchd's
+// Interactive did not change it; a thread that stays runnable does.  So while a request runs, one thread waits on
+// the ARM wait-for-event instruction (the core idles until the next event): 121-122 tok/s, ~0.7 W more on the CPU
+// (a counting loop: the same speed for ~2.5 W; a thread asleep even half the time: back to the slow state)
+struct Awake {
+#if defined(__APPLE__) && defined(__aarch64__)
+    static std::mutex & mu() { static std::mutex m; return m; }
+    static std::condition_variable & cv() { static std::condition_variable c; return c; }
+    static std::atomic<int> & on() { static std::atomic<int> n{0}; return n; }
+    Awake() {
+        static std::once_flag once;
+        std::call_once(once, [] {
+            std::thread([] {
+                for (;;) {
+                    {
+                        std::unique_lock<std::mutex> lk(mu());
+                        cv().wait(lk, [] { return on().load() > 0; });
+                    }
+                    while (on().load(std::memory_order_relaxed) > 0)
+                        for (int i = 0; i < 64; ++i) __asm__ volatile("wfe");
+                }
+            }).detach();
+        });
+        { std::lock_guard<std::mutex> lk(mu()); ++on(); }
+        cv().notify_all();
+    }
+    ~Awake() { --on(); }
+#else
+    Awake() = default;
+#endif
+    Awake(const Awake &) = delete;
+    Awake & operator=(const Awake &) = delete;
+};
+
 struct Serve {
     std::mutex mu;
     std::condition_variable cv;
@@ -4596,8 +4634,9 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
     Model & m = e.m;
     const int ne = m.h_dim();                               // the MTP layer's hidden input per position
     const std::vector<int32_t> eos = m.eos_ids;             // Qwen: 248044, 248046; Nemotron: 11 (and </s> if eos)
-    Serve sv;
-    std::thread reader([&] {                                // stdin on its own thread: a STOP reaches a running request
+    // never freed: after QUIT the stdin reader may still wake (end of input) and lock it before the process ends
+    Serve & sv = *new Serve;
+    std::thread reader([&sv = sv] {                         // stdin on its own thread: a STOP reaches a running request
         char buf[1 << 16];
         std::string acc;
         for (;;) {
@@ -4695,6 +4734,7 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
         bool bad = false;
         for (int32_t t : prompt) bad |= t < 0 || t >= m.n_vocab;
         if (bad) { sv.busy = false; out_line("ERR a token id is outside the vocabulary"); continue; }
+        Awake awake;                                         // (macOS: see Awake)
         // where to start: the state continues when the prompt extends it; else the longest checkpoint the prompt
         // starts with whose positions the caches still hold (an agent's next turn); else the parked conversation's,
         // its positions put back; else from the start.  At least the last prompt token is run again (its logits are
@@ -5123,6 +5163,7 @@ int main(int argc, char ** argv) {
         fflush(stderr);
         _exit(r);                                             // the stdin reader may still be blocked in a read
     }
+    Awake awake;                                             // (macOS: see Awake)
     double t0 = now_s();
     int p = 0, next = 0;
     std::vector<float> H;                                    // --mtp: the prompt's hidden states (the MTP layer's input)
@@ -5398,3 +5439,4 @@ int main(int argc, char ** argv) {
     ggml_backend_free(e.cpu);
     quit(0);
 }
+

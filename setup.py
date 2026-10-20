@@ -5908,14 +5908,21 @@ def mac_available_gib() -> float:
     return n * page / 2**30
 
 
+MAC_DRAFT_MARGIN_GIB = 2.0                             # more of Metal's working set left free with the Flash-Next draft
+                                                       # layer (its graph and the verify windows' buffers): on the M1
+                                                       # Ultra Swift's server ran Metal out of memory with a 39 GiB pool
+                                                       # and Unsloth's UD-IQ4_XS took a bus error with 38; 37 and 36 ran
 def mac_pool_gib(mem_gib: float, experts_gib: float = MAC_EXPERTS_GIB, dense_gib: float = MAC_DENSE_GIB,
-                 avail_gib: float = 0.0, kv_gib: float = 0.0) -> int | None:
+                 avail_gib: float = 0.0, kv_gib: float = 0.0, draft_gib: float = 0.0) -> int | None:
     """The expert pool for a Mac with this much RAM: None when every expert fits (no pool), else whole GiB.  A model whose
     other weights are larger than Ornith's (GLM-5.3-Flash: 9.8 GiB) leaves the pool that much less; and what the other
     programs leave (avail_gib, when known) caps it (GLM-5.3-Flash on a 64 GB M1 Ultra whose other programs held ~20 GB:
-    a 35 GiB pool ran it out of memory, 20.9 GiB left 8 GB)."""
+    a 35 GiB pool ran it out of memory, 20.9 GiB left 8 GB).  draft_gib: a separate draft layer (the Flash-Next
+    families'), held with the other weights, and MAC_DRAFT_MARGIN_GIB more of the working set left free."""
+    dense_gib += draft_gib
     pool = min(mem_gib - MAC_KEEP_GIB - max(0.0, dense_gib - MAC_DENSE_GIB),
-               MAC_GPU_SHARE * mem_gib - dense_gib - kv_gib - MAC_GPU_MARGIN_GIB)   # (above it: a bus error, measured)
+               MAC_GPU_SHARE * mem_gib - dense_gib - kv_gib - MAC_GPU_MARGIN_GIB   # (above it: a bus error, measured)
+               - (MAC_DRAFT_MARGIN_GIB if draft_gib else 0.0))
     if avail_gib > 0:
         pool = min(pool, avail_gib - dense_gib - kv_gib - MAC_AVAIL_MARGIN_GIB)
     return None if pool >= experts_gib else max(int(pool), 3)
@@ -6168,16 +6175,46 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
             quiet=True)
     ok(str(pack / "tokenizer"))
 
-    step(5, "the config")
+    draft = None
+    if mac and family in FAMILIES and not own_mtp:
+        # the Flash-Next families' files have no MTP layer: Strata's own draft layer, as its setup makes it on a PC
+        # (the ~5 GB of MTP tensors from the original Qwen checkpoint, checked, the experts packed Q2_0: 0.9 GB).
+        # Measured on an M4 Air (32 GB, IQ3_XXS, --mtp 3): 8.7-8.8 tok/s against 7.6 without; Q4_0 (1.6 GB): 7.6, its
+        # pool a GiB smaller.  On the M1 Ultra, Unsloth's UD-IQ4_XS: 19.0 tok/s (36 GiB pool) against 12.4 (39 GiB)
+        step(5, "the MTP draft layer")
+        mtp = data / "mtp"
+        draft = mtp / "mtp-q2_0.gguf"
+        report = draft.with_name(draft.name + ".report.json")          # the packer writes it last
+        corrupt = report.exists() and mtp_corrupt(mtp)
+        if corrupt:
+            warn("some MTP tensors are not the checkpoint's (a download mirror that ignored range requests, #327): "
+                 "fetching them again and rebuilding the draft layer")
+        if corrupt or not report.exists():
+            say("  The MTP draft layer (it lets the model write several tokens a step) comes from the original Qwen")
+            say("  checkpoint: only its ~5 GB of MTP tensors are downloaded.")
+            env = dict(os.environ, STRATA_GGUF_PY=str(get_llama_cpp() / "gguf-py"))
+            run([sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)],
+                env={**env, "STRATA_SOURCE": model_source()})
+            run([sys.executable, str(ROOT / "tools" / "mtp_pack.py"), "--src", str(mtp), "--experts", "q2_0",
+                 "--out", str(draft)], env=env)
+        ok(f"MTP draft layer: {draft}")
+
+    step(6 if draft else 5, "the config")
     # the context: --context, the family's, else on a Mac 64K when every expert fits beside its KV cache, else 32K; at
     # most 16K where the memory is under 16 GB (a Jetson, an 8 GB Mac: the KV cache takes the experts' memory)
     pool, ctx = None, a.context or fam.get("context") or 32768
     if mac:
         w, kvt, avail = weights_gib(paths), kv_bytes_per_token(paths), mac_available_gib()
+        draft_gib = draft.stat().st_size / 2**30 if draft else 0.0
         fixed = a.context or fam.get("context")
         for c in ((fixed,) if fixed else (65536, 32768)):
             c = min(c, 16384) if ram < 16 and not a.context else c
-            pool, ctx = mac_pool_gib(ram, *w, avail, kvt * c / 2**30), c
+            pool, ctx = mac_pool_gib(ram, *w, avail, kvt * c / 2**30, draft_gib), c
+            if draft and pool is not None and mac_pool_gib(ram, *w, avail, kvt * c / 2**30) is None:
+                # every expert fits only without the draft layer: faster so (the M1 Ultra, Flash-Next IQ3_XXS: 29.7
+                # tok/s, its server 29.2, against 24.3 / 19.4 drafting from a 37 GiB pool)
+                draft, draft_gib, pool = None, 0.0, None
+                ok("every expert fits in memory without the draft layer: no drafting (faster here)")
             if pool is None:
                 break
     if unified and ram < 16 and not a.context:
@@ -6193,6 +6230,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         ok(f"{ctx // 1024}K context")
     if own_mtp:                                          # the 35B-A3B families draft with the file's own MTP layer
         args += ["--mtp", "4", "--draft-vocab", str(ROOT / "data" / DRAFT_VOCABS[a.draft_vocab or "en"])]
+    if draft:                                            # (--mtp 2 measured the same as 3 on the M4 Air)
+        args += ["--mtp", "3", "--mtp-gguf", str(draft)]
     args += fam.get("engine_args", [])
     cfg_name = "ornith-mac" if mac and q == MAC_MODEL else tag   # (Ornith's Mac config keeps its first name)
     cfg_path = name_config(config_path_for(a.config_name, tag) if a.config_name else

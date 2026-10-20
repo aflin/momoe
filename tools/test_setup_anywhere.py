@@ -7,6 +7,7 @@ expert pool sized to the model.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import unittest
@@ -200,6 +201,93 @@ class Routing(unittest.TestCase):
     def test_a_card_takes_a_ggml_family(self):
         calls = self.run_main("linux", self.CARD, ["--family", "lfm25"])
         self.assertEqual(calls[0][3], "lfm25")
+
+
+class MacDraft(unittest.TestCase):
+    """On a Mac the Flash-Next families draft with Strata's draft layer (fetched once, packed Q2_0), held beside the
+    other weights: the expert pool is that much smaller.  The families with their own MTP layer fetch nothing."""
+    KV = 0.75 * 2**30 / 32768                          # Flash-Next IQ3_XXS: 0.75 GiB at 32K
+
+    def run_setup(self, family, draft_ready, mem=32, weights=(40.0, 3.95), avail=24.0):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        data = Path(tmp.name)
+        draft = data / "mtp" / "mtp-q2_0.gguf"
+        real_exists = Path.exists
+
+        def exists(p):                                  # the MTP folder as it is; everything else (engine, files) there
+            return real_exists(p) if str(p).startswith(str(data / "mtp")) else True
+
+        def fake_run(cmd, **kw):                        # the packer leaves the draft layer and, last, its report
+            if any(str(c).endswith("mtp_pack.py") for c in cmd):
+                draft.parent.mkdir(parents=True, exist_ok=True)
+                with open(draft, "wb") as f:
+                    f.truncate(889017216)
+                draft.with_name(draft.name + ".report.json").write_text("{}")
+        if draft_ready:
+            fake_run(["mtp_pack.py"])
+        written, ran = {}, []
+        a = mock.Mock(gpu=None, gpus=None, family=family, model=None, context=None, host=None, api_key=None,
+                      config_name=None, no_start=True, yes=True, draft_vocab=None, models_dir=str(data / "models"),
+                      helper_tier=False, layer_split=None, backend=None, vision=None, kv=None)
+        patches = [mock.patch.object(setup.sys, "platform", "darwin"), mock.patch.object(setup, "WIN", False),
+                   mock.patch.object(setup.subprocess, "run", return_value=mock.Mock(stdout="Apple M4", returncode=0)),
+                   mock.patch.object(setup.platform, "machine", return_value="arm64"),
+                   mock.patch.object(setup, "mac_memory_gib", return_value=mem),
+                   mock.patch.object(setup, "say"), mock.patch.object(setup, "ok"), mock.patch.object(setup, "warn"),
+                   mock.patch.object(setup, "step"), mock.patch.object(setup, "pip_install"),
+                   mock.patch.object(setup, "run", side_effect=lambda cmd, **kw: ran.append(cmd) or fake_run(cmd)),
+                   mock.patch.object(setup.Path, "exists", autospec=True, side_effect=exists),
+                   mock.patch.object(setup, "done", return_value=True), mock.patch.object(setup, "verify_sha256"),
+                   mock.patch.object(setup, "download", side_effect=AssertionError("a download in a test")),
+                   mock.patch.object(setup, "check_shards"), mock.patch.object(setup, "mtp_corrupt", return_value=False),
+                   mock.patch.object(setup, "get_llama_cpp", return_value=Path("/l")),
+                   mock.patch.object(setup, "weights_gib", return_value=weights),
+                   mock.patch.object(setup, "kv_bytes_per_token", return_value=self.KV),
+                   mock.patch.object(setup, "mac_available_gib", return_value=avail),
+                   mock.patch.object(setup, "name_config", side_effect=lambda p, a: p),
+                   mock.patch.object(setup, "write_setup_config", side_effect=lambda p, c: written.update(c))]
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            setup.momoe_setup(a, data, 8080, family)
+        return written["args"], [Path(str(c[1])).name for c in ran if str(c[1]).endswith(".py")], draft   # (not the build)
+
+    def test_flash_next_fetches_and_drafts(self):
+        args, ran, draft = self.run_setup("qwen", False)
+        self.assertEqual(ran, ["mtp_fetch.py", "mtp_pack.py"])
+        i = args.index("--mtp-gguf")
+        self.assertEqual((args[i - 2:i], args[i + 1]), (["--mtp", "3"], str(draft)))
+        # the pool: the draft layer's 0.83 GiB counted with the other weights (13 GiB without it on this Mac)
+        pool = int(args[args.index("--pool-gib") + 1])
+        self.assertEqual(pool, setup.mac_pool_gib(32, 40.0, 3.95, 24.0, 0.75, 889017216 / 2**30))
+        self.assertEqual((pool, setup.mac_pool_gib(32, 40.0, 3.95, 24.0, 0.75)), (12, 13))
+
+    def test_every_expert_without_drafting_wins(self):
+        # the M1 Ultra (64 GB, ~57 GB free), Flash-Next IQ3_XXS: every expert fits only without the draft layer, and
+        # that measured faster (29.7 tok/s against 24.3 drafting from a 37 GiB pool)
+        args, ran, draft = self.run_setup("qwen", True, mem=64, weights=(39.97, 3.95), avail=57.0)
+        self.assertNotIn("--mtp-gguf", args)
+        self.assertNotIn("--pool-gib", args)
+
+    def test_drafting_from_a_pool_leaves_room(self):
+        # Unsloth's UD-IQ4_XS on the M1 Ultra: never every expert; the draft layer and MAC_DRAFT_MARGIN_GIB leave a
+        # 36 GiB pool (38 took a bus error; 36 ran: 19.0 tok/s against 12.4 without drafting from 39)
+        args, ran, draft = self.run_setup("unsloth", True, mem=64, weights=(55.43, 4.98), avail=57.0)
+        self.assertIn(str(draft), args)
+        self.assertEqual(args[args.index("--pool-gib") + 1], "36")
+        self.assertEqual(setup.mac_pool_gib(64, 55.43, 4.98, 57.0, 0.75), 39)        # (without drafting)
+
+    def test_a_draft_layer_already_here_is_used(self):
+        args, ran, draft = self.run_setup("swift", True)
+        self.assertEqual(ran, [])
+        self.assertIn(str(draft), args)
+
+    def test_own_mtp_fetches_nothing(self):
+        args, ran, _ = self.run_setup("ornith", False)
+        self.assertEqual(ran, [])
+        self.assertNotIn("--mtp-gguf", args)
 
 
 if __name__ == "__main__":

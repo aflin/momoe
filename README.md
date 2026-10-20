@@ -75,7 +75,7 @@ The machines the models were tested on:
 | **Jetson** | NVIDIA Jetson Orin Nano Super developer kit: 8 GB shared by the CPU and the GPU (7.3 GiB usable, about 5.9 GiB free beside its desktop), its 15 W power mode, an NVMe SSD |
 | **M1 Ultra** | Mac Studio M1 Ultra, 64 GB |
 | **M4 Air** | MacBook Air M4, 32 GB |
-| **M4 Air as an 8 GB Mac** | the same MacBook with 10 GiB of its memory wired away (`mlock`), which left about 5 GB available, as on an 8 GB Mac |
+| **M4 Air as an 8 GB Mac** | the same MacBook with 10 GiB of its memory wired away (`mlock`): RAM an 8 GB Mac does not have |
 
 ### Which model runs where
 
@@ -86,28 +86,31 @@ tokens are within a few hundredths of each other, which was checked); and the se
 
 | Model, size | PC | Spark | Jetson | M1 Ultra | M4 Air |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.8-Flash-Next IQ3_XXS | 57.9* | 31.8 | - | 28.1 | 7.5 |
-| Flash-Next Coder IQ1_M | 54.8* | 28.4 | - | 25.5 ⁱ | - |
-| Swift 1.5 IQ3_XXS | 63.4* | 30.3 | - | 25.7 ⁱ | - |
-| Flash-Next (Unsloth) UD-IQ4_XS | 12.4* | 24.5 | - | 12.0 ⁱ | - |
-| Qwen3.6-35B-A3B (Unsloth) UD-IQ4_XS | 158.7* | 61.0* | - | 110.8* | - |
-| Qwen3.6-35B-A3B (bartowski) IQ4_XS | 157.5* | 77.1* | - | 96.4* | - |
-| Ornith-1.5-35B-A3B IQ4_XS | 99.0* | 68.2* | - | 67.5 | 31.1* (as a 16 GB Mac: 9.7-13.1) |
-| KAT-Coder-V2.5-Dev i-quality-v2 | 126.2* | 57.3* | - | 82.5* | - |
-| Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 | 27.4 | - | 33.7 (UD-Q3_K_XL) | - |
-| GLM-5.3-Flash UD-IQ3_XXS | does not fit a 12 GB card | 18.0* | - | 4.0* | - |
-| LFM2.5-24B-A2B | 75.9 (UD-Q4_K_XL) | 126.0 | 6.9 | 70.5 | 12.1 (as an 8 GB Mac) |
-| LFM2.5-8B-A1B UD-Q4_K_XL | 255 | 157.1 | 16.6 | 154.5 | 41.5 (as an 8 GB Mac) |
+| Qwen3.8-Flash-Next IQ3_XXS | 57.9* | 31.8 | - | 29.7 | 7.9* |
+| Flash-Next Coder IQ1_M | 54.8* | 28.4 | - | 51.0* | - |
+| Swift 1.5 IQ3_XXS | 63.4* | 30.3 | - | 29.0 | - |
+| Flash-Next (Unsloth) UD-IQ4_XS | 12.4* | 24.5 | - | 19.0* | - |
+| Qwen3.6-35B-A3B (Unsloth) UD-IQ4_XS | 158.7* | 61.0* | - | 113.4* | - |
+| Qwen3.6-35B-A3B (bartowski) IQ4_XS | 157.5* | 77.1* | - | 98.1* | - |
+| Ornith-1.5-35B-A3B IQ4_XS | 128.8* | 68.2* | - | 70.7* | 26.9* (as a 16 GB Mac, earlier: 9.7-13.1) |
+| KAT-Coder-V2.5-Dev i-quality-v2 | 126.2* | 57.3* | - | 88.3* | - |
+| Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 | 27.4 | - | 34.0 (UD-Q3_K_XL) | - |
+| GLM-5.3-Flash UD-IQ3_XXS | does not fit a 12 GB card | 18.0* | - | 4.5* | - |
+| LFM2.5-24B-A2B | 75.9 (UD-Q4_K_XL) | 126.0 | 6.9 | 57.4 | 11.9 (as an 8 GB Mac) |
+| LFM2.5-8B-A1B UD-Q4_K_XL | 255 | 157.1 | 16.6 | 120.3 | 43.1 (as an 8 GB Mac) |
 | Flash-Next NVFP4 | Strata's own packs: a PC with an NVIDIA card only, not tested in MoMoE | | | | |
 
 \* With drafting: the model's own multi-token-prediction (MTP) layer proposes up to 3 or 4 tokens ahead and the model
 checks them in one pass, keeping only what it would have written itself. Numbers without \* are without drafting:
-the Flash-Next family on the Spark and the Macs and Ornith on the M1 Ultra were measured without it, LFM has no
-MTP layer, and MoMoE does not yet draft with Bolt's. llama.cpp's numbers are all without drafting.
+the Flash-Next family on the Spark, and Flash-Next IQ3_XXS and Swift on the M1 Ultra (where every expert fits only
+without the draft layer, which measured faster) were measured without it, LFM has no MTP layer, and MoMoE does not yet draft with Bolt's. llama.cpp's numbers are all without drafting.
 
-ⁱ Measured while macOS had moved the engine, started in the background over SSH, to the efficiency cores (graph
-building ~4x slower; the same build wrote 154.5 tok/s on LFM2.5-8B before and 65 then): likely about half of what it
-does when started in the foreground. A background service would need launchd settings that keep it from being demoted.
+On the Macs, `momoe-metal` keeps one thread waiting on the CPU's wait-for-event instruction while a request runs.
+Without it, macOS held the engine's main thread on the efficiency cores and the GPU's clock low, at random from run to
+run and on every request through the server (LFM2.5-8B on the M1 Ultra, through `momoe start`: 64-69 tok/s; with it
+120-128, after pauses of 0-60 s; llama.cpp's server 176-182). Thread priorities and launchd's `Interactive` did not
+change it. The LFM numbers on the M1 Ultra are lower than the 154.5 and 70.5 shown here before: those runs happened to
+be in the fastest state, which no run reaches reliably yet.
 
 Which engine: on the PC, Strata's engine for the Qwen3.8-Flash-Next and Qwen3.6 families (Ornith with MoMoE's ggml
 engine: 63.9) and MoMoE's ggml engine (`momoe-cuda`) for Bolt, GLM and LFM; `momoe-cuda` for everything on the Spark
@@ -122,12 +125,12 @@ and the Jetson; `momoe-metal` on the Macs.
 | LFM2.5-8B-A1B UD-IQ3_XXS | Jetson | 18.7 | 20.5 (all on the GPU) |
 | LFM2.5-24B-A2B UD-Q4_K_XL | PC | 75.9 | 105.1 (10 layers' experts on the CPU, the best fit) |
 | LFM2.5-8B-A1B UD-Q4_K_XL | PC | 255 | 305.8 (all on the card) |
-| LFM2.5-8B-A1B UD-Q4_K_XL | M1 Ultra | 154.5 | 169 |
-| LFM2.5-24B-A2B UD-IQ3_XXS | M1 Ultra | 70.5 | 108.7 |
-| Qwen3.6-35B-A3B (Unsloth) UD-IQ4_XS | M1 Ultra | 110.8* | 90.2-91.2 |
-| Qwen3.6-35B-A3B (bartowski) IQ4_XS | M1 Ultra | 96.4* | 96.8 |
-| KAT-Coder-V2.5-Dev i-quality-v2 | M1 Ultra | 82.5* | 87.5 |
-| Nemotron 3.5 Bolt UD-Q3_K_XL | M1 Ultra | 33.7 | 38.5 (it cannot read a prompt: its Metal build has no kernel for 9 experts a token) |
+| LFM2.5-8B-A1B UD-Q4_K_XL | M1 Ultra | 120.3 / 120-128 (server) | 169-190 / 176-182 (server) |
+| LFM2.5-24B-A2B UD-IQ3_XXS | M1 Ultra | 57.4 | 108.7 |
+| Qwen3.6-35B-A3B (Unsloth) UD-IQ4_XS | M1 Ultra | 113.4* | 90.2-91.2 |
+| Qwen3.6-35B-A3B (bartowski) IQ4_XS | M1 Ultra | 98.1* | 96.8 |
+| KAT-Coder-V2.5-Dev i-quality-v2 | M1 Ultra | 88.3* | 87.5 |
+| Nemotron 3.5 Bolt UD-Q3_K_XL | M1 Ultra | 34.0 | 38.5 (it cannot read a prompt: its Metal build has no kernel for 9 experts a token) |
 | Nemotron 3.5 Bolt UD-IQ3_XXS | PC | 30.0 / 30.6 (server, greedy / sampled) | 26.2 / 26.1 |
 | GLM-5.3-Flash UD-IQ3_XXS | Spark | 18.0* / 15.0* / 14.6* (server, greedy / sampled); 13.3 | 1.3 (a 48-token check: every expert on the CPU, cold, not a speed test) |
 | GLM-5.3-Flash UD-IQ4_XS | Spark | 11.7* / 10.4* (server); 9.3 | 2.3 / 2.5 |
@@ -139,7 +142,7 @@ its graph again for every token (up to a fifth of a token's time on the M1 Ultra
 layer. MoMoE gains where the experts do not fit: the Jetson, GLM on the Spark, Bolt on the PC.
 
 Reading prompts on the PC, with Strata's engine (4K / 16K tokens): Flash-Next IQ3_XXS 1,178 / 2,133 tok/s; the Coder
-1,931 / 2,615; Swift 1,196 / 2,163; Unsloth's UD-IQ4_XS 67 / 91; the Qwen3.6 family 3,001-3,767 / 3,974-4,504.
+1,931 / 2,615; Swift 1,196 / 2,163; Unsloth's UD-IQ4_XS 67 / 91; the Qwen3.6 family 3,081-3,767 / 3,974-4,521.
 
 How these were measured (2026-10-19 unless named; build `momoe-cuda` / `momoe-metal` with ggml from llama.cpp b11724):
 - **Strata's engine on the PC:** `tools/strata_bench.py`, three runs, medians: "chat decode" in the table.
@@ -151,10 +154,15 @@ How these were measured (2026-10-19 unless named; build `momoe-cuda` / `momoe-me
   fast, more with drafting.
 - **The Jetson:** 16K context. llama.cpp b11724, `llama-bench` tg128.
 - **The Macs:** setup's configs: every expert in memory where it fits beside the KV cache (Flash-Next IQ3_XXS and Swift
-  at 32K context, the others at 64K), else an expert pool and the rest from the SSD (Unsloth's Flash-Next: 39 GiB on the
-  M1 Ultra; GLM: 29 GiB; Flash-Next IQ3_XXS on the M4 Air: 14 GiB, from the memory free when setup ran). The files larger than Metal's working set (48 GiB on the M1 Ultra) were not run in llama.cpp:
-  that took a MacBook down. The 8 GB-Mac rows: setup's 8 GB config (a 3 GiB pool, 16K context); with all 32 GB the
-  same runs wrote 42.8 and 14.8 tok/s. It does not simulate an 8 GB Mac's smaller Metal limit.
+  at 32K context, the others at 64K), else an expert pool and the rest from the SSD (Unsloth's Flash-Next: 36 GiB on the
+  M1 Ultra; GLM: 29 GiB; on the M4 Air, Flash-Next IQ3_XXS 11 GiB and Ornith 14 GiB, from the memory free when setup
+  ran, with Firefox open). The Flash-Next family drafts with Strata's draft layer (its ~5 GB of MTP tensors from Qwen's
+  checkpoint, packed Q2_0, as Strata's setup does on a PC) unless every expert fits only without it (Flash-Next IQ3_XXS
+  on the M1 Ultra: 29.7 tok/s without it, 24.3 drafting from a 37 GiB pool; Unsloth's UD-IQ4_XS: 19.0 drafting from 36
+  GiB, 12.4 without from 39). The files larger than Metal's working set (48 GiB on the M1 Ultra) were not run in
+  llama.cpp: that took a MacBook down. The 8 GB-Mac rows: setup's 8 GB config (a 3 GiB pool, 16K context) with 10 GiB
+  wired away; with all 32 GB the same runs wrote 43.3 and 12.0 tok/s (14.8 for the 24B before; the same with the
+  wait-for-event thread off). It does not simulate an 8 GB Mac's smaller Metal limit.
 - **Before today:** Ornith on the M4 Air, its 16 GB simulation and llama.cpp beside them are in [design/mac-port.md](design/mac-port.md).
 
 ### Two cards: layer split and helper tier
