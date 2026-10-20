@@ -6481,8 +6481,10 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     size = fam["sha256"][gguf.name][0]
     part = gguf.with_name(gguf.name + ".part")
     left = 0 if gguf.exists() and done(gguf) else (size - (part.stat().st_size if part.is_file() else 0)) / 1e9
+    if left and free_gb(folder) < left:
+        fail(f"not enough free disk space in {folder}: need ~{left:.0f} GB, {free_gb(folder):.0f} GB free", "use --models-dir on a bigger drive")
     if left and free_gb(folder) < left + 1:
-        fail(f"not enough free disk space in {folder}: need ~{left + 1:.0f} GB", "use --models-dir on a bigger drive")
+        warn(f"little free disk space in {folder}: {free_gb(folder):.1f} GB free for about {left:.1f} GB. Setup goes on and should fit")
 
     step(3, "Python packages")
     pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
@@ -6618,8 +6620,10 @@ def preview_family(a) -> int:
     left = sum(fam["sha256"][f.name][0] - (f.with_name(f.name + ".part").stat().st_size
                                            if f.with_name(f.name + ".part").is_file() else 0)
                for f in files if not (f.exists() and done(f))) / 1e9
+    if left and free_gb(folder) < left:
+        fail(f"not enough free disk space in {folder}: need ~{left:.0f} GB, {free_gb(folder):.0f} GB free", "use --models-dir on a bigger drive")
     if left and free_gb(folder) < left + 1:
-        fail(f"not enough free disk space in {folder}: need ~{left + 1:.0f} GB", "use --models-dir on a bigger drive")
+        warn(f"little free disk space in {folder}: {free_gb(folder):.1f} GB free for about {left:.1f} GB. Setup goes on and should fit")
     step(5, f"downloading {fam['title']} {model}")
     for f in files:
         url = (fam["mmproj_hf"] if f.name == fam["mmproj"] else fam["hf"]) + f.name
@@ -7456,13 +7460,19 @@ def main() -> int:
     mtp_have = find_in(roots, "mtp/rt/experts.bin") is not None
     q2_avx = model == "Q2_0" and avx512 and family == "qwen"
     own_mtp = bool(fam.get("own_mtp"))                # Qwen3.6: the draft layer is in the model file, nothing fetched
-    need = to_fetch + (1 if own_mtp else 2 if mtp_have else 8) + \
+    margin = 1 if own_mtp else 2 if mtp_have else 8   # working room: a guess, not bytes that will be written
+    real = to_fetch + \
         (40 if q2_avx and not pack_bin else 0) + (1 if vision != "none" else 0) + \
         (MODELS[model]["arena_gb"] + 1 if low_ram and not q2_avx and not pack_bin else 0)
-    if free_gb(models_dir) < need:
-        fail(f"not enough free disk space in {models_dir}: need ~{need:.0f} GB" +
+    need = real + margin
+    free_now = free_gb(models_dir)
+    if free_now < real:
+        fail(f"not enough free disk space in {models_dir}: need ~{real:.0f} GB, {free_now:.0f} GB free" +
              (f" ({on_disk:.0f} GB of the model is already there)" if on_disk >= 1 and not have_model else ""),
              "use --models-dir on a bigger drive")
+    if free_now < need:
+        warn(f"little free disk space in {models_dir}: {free_now:.0f} GB free for about {real:.0f} GB of files. "
+             "Setup goes on and should fit; free up space if it stops")
 
     # ---- 3. python packages
     step(3, "Python packages")
