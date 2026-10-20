@@ -234,7 +234,7 @@ class Base(unittest.TestCase):
             mock.patch.object(setup, "hipblaslt_table", lambda *a, **k: None),
             mock.patch.object(setup, "download", fake_download),
             mock.patch.object(setup, "check_shards", lambda shards: None),
-            mock.patch.object(setup, "verify_sha256", lambda s, size, sha: self.verified.append((s.name, size, sha))),
+            mock.patch.object(setup, "verify_sha256", lambda s, size, sha, own=False: self.verified.append((s.name, size, sha))),
             mock.patch.object(setup, "run", lambda cmd, *a, **k: self.runs.append([str(x) for x in cmd])),
             mock.patch.object(setup, "refresh_draft_vocab", lambda *a, **k: None),
             mock.patch.object(setup, "mtp_corrupt", lambda *a, **k: False),
@@ -352,11 +352,16 @@ class Install(Base):
         self.assertNotIn("--vision cpu", out)                       # the prompt chunks keep their size (measured)
 
     def test_disk_space_counts_no_mtp(self):
-        code, out, cfg = self.main(["--family", "qwen36", "--model", "UD-IQ4_XS"], free=19.0)
+        # the file itself (18.2 GB) must fit; the 1 GB of working room on top of it (no MTP fetched) only warns
+        code, out, cfg = self.main(["--family", "qwen36", "--model", "UD-IQ4_XS"], free=18.0)
         self.assertEqual(code, 1)
         self.assertIn("not enough free disk space", out)
+        code, out, cfg = self.main(["--family", "qwen36", "--model", "UD-IQ4_XS"], free=19.0)
+        self.assertEqual(code, 0, out)
+        self.assertIn("little free disk space", out)
         code, out, cfg = self.main(["--family", "qwen36", "--model", "UD-IQ4_XS"], free=19.5)   # 18.2 + 1
         self.assertEqual(code, 0, out)
+        self.assertNotIn("little free disk space", out)
 
 
 class Suggestion(Base):

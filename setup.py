@@ -2308,7 +2308,7 @@ def gguf_dir_problem(folder: Path, first: Path, fam: dict, model: str) -> tuple 
     return f"{folder} has no {fam['title']} {model} file", hint
 
 
-def verify_sha256(s: Path, size: int, sha: str) -> None:
+def verify_sha256(s: Path, size: int, sha: str, own: bool = False) -> None:
     """A shard's size and SHA-256 against the pinned values (the Unsloth file); the result is kept in its finish mark,
     so the ~5 minutes of hashing 111 GB happen once.  A wrong file is deleted, so the next run downloads it again."""
     m = s.with_name(s.name + ".done")
@@ -2316,6 +2316,9 @@ def verify_sha256(s: Path, size: int, sha: str) -> None:
         return
     have = s.stat().st_size if s.exists() else -1
     if have != size:
+        if own:                                        # --gguf-dir: the person's own file is never deleted by setup
+            fail(f"{s.name} is {have:,} bytes; the published file is {size:,}",
+                 "it may be cut short or another version; your file was left as it is. Copy the whole published file into the folder")
         fail(f"{s.name} is {have:,} bytes, not {size:,}", "delete it and run setup again (the download restarts)")
     say(f"  checking {s.name} (SHA-256, {size / 1e9:.1f} GB) ...")
     h = hashlib.sha256()
@@ -2326,6 +2329,9 @@ def verify_sha256(s: Path, size: int, sha: str) -> None:
                 break
             h.update(b)
     if h.hexdigest() != sha:
+        if own:
+            fail(f"{s.name} does not match the published file (SHA-256 {h.hexdigest()}, expected {sha})",
+                 "it may be damaged or another version; your file was left as it is. Copy the whole published file into the folder")
         s.unlink(missing_ok=True)
         m.unlink(missing_ok=True)
         fail(f"{s.name} has the wrong SHA-256 ({h.hexdigest()}, expected {sha}): deleted",
@@ -6507,7 +6513,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         if a.gguf_dir:
             fail(f"{gguf} is missing", f"put {gguf.name} in {folder}, or drop --gguf-dir to download it")
         download(fam["hf"] + gguf.name, gguf)
-    verify_sha256(gguf, *fam["sha256"][gguf.name])
+    verify_sha256(gguf, *fam["sha256"][gguf.name], own=bool(a.gguf_dir))
     ok(f"model file: {gguf}")
     mmproj = folder / fam["mmproj"]
     if vision != "none":                               # the image encoder: Unsloth's mmproj, pinned, size + SHA-256 checked
@@ -6517,7 +6523,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
             if a.gguf_dir:
                 fail(f"{mmproj} is missing", f"put {mmproj.name} in {folder}, or drop --gguf-dir to download it")
             download(fam["mmproj_hf"] + mmproj.name, mmproj, "vision encoder")
-        verify_sha256(mmproj, *fam["sha256"][mmproj.name])
+        verify_sha256(mmproj, *fam["sha256"][mmproj.name], own=bool(a.gguf_dir))
         ok(f"vision encoder: {mmproj}")
 
     step(6, "preparing the model for Momoe")
@@ -7536,7 +7542,7 @@ def main() -> int:
     check_shards(shards)
     for s in shards:                                   # the Unsloth files: pinned sizes and SHA-256
         if s.name in fam.get("sha256", {}):
-            verify_sha256(s, *fam["sha256"][s.name])
+            verify_sha256(s, *fam["sha256"][s.name], own=bool(a.gguf_dir))
     ok("model files present")
     mmproj = Path(a.models_dir) / (fam["mmproj"] or "none")
     if fam["mmproj"] and not mmproj.exists():
