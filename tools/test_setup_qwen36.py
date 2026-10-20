@@ -388,7 +388,7 @@ class Suggestion(Base):
         self.assertEqual(self.cfg_path.name, "strata-qwen36-ud-iq3_s.json")
         self.assertIn("--mmap-experts", cfg["args"])
         self.assertIn([sys.executable, str(self.t / "tools" / "iq_pack.py"), "--gguf",
-                       arg(cfg, "--native"), "--out", arg(cfg, "--pack"), "--experts-bin"], self.runs)
+                       arg(cfg, "--native"), "--out", arg(cfg, "--pack"), "--experts-bin", "--compat-bf16"], self.runs)   # #3193
 
     def test_24_gb(self):
         code, out, cfg = self.main([], ram=RAM24)

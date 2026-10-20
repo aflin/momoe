@@ -16,7 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "metal"))
 import setup  # noqa: E402
-import setup_mac as M  # noqa: E402
+try:
+    import setup_mac as M  # noqa: E402
+except ImportError:      # (Momoe: upstream's setup_mac.py imports Strata Control, which Momoe does not have; skipped below)
+    M = None
 
 
 def fake_run(values: dict, clt_rc=0):

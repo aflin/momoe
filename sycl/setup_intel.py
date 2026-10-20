@@ -386,7 +386,7 @@ def install(argv) -> None:
     S.amd_problem = lambda g: None
     S.hip_vision = intel_vision                         # pictures on by default, read on the CPU (setup's hip_reader settles it)
 
-    def build_engine_hip(gpu, llama, vision="none"):
+    def build_engine_hip(gpu, llama, vision="none", more=False):   # (Momoe: setup.py's more= - not used here)
         """No engine to compile here (the SYCL build is separate); the picture readers are: the portable CPU reader, once, and for
         --vision gpu the SYCL GPU reader (a few minutes, once; it needs the oneAPI compiler on this PC, else the CPU reader stays)."""
         if vision != "none":
