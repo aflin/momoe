@@ -24,6 +24,7 @@ import json
 import os
 import struct
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -115,20 +116,41 @@ SHA256 = {
 }
 
 
+# Hugging Face answers a /resolve/ address with a redirect to a signed CDN address (valid for about an hour).  Every range of a
+# tensor used to go through that redirect and a fresh connection to it; the CDN address of the first answer is reused now
+# (and forgotten after any error, so the next try asks again).
+CDN_TTL = 600
+_cdn = {}
+_cdn_lock = threading.Lock()
+
+
+def _final(url):
+    with _cdn_lock:
+        hit = _cdn.get(url)
+    return hit[0] if hit and hit[1] > time.monotonic() else url
+
+
 def get(url, start=None, end=None, retries=4):
     for attempt in range(retries):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "strata-mtp-fetch"})
+            used = _final(url)
+            req = urllib.request.Request(used, headers={"User-Agent": "strata-mtp-fetch"})
             if start is not None:
                 req.add_header("Range", "bytes=%d-%d" % (start, end))
             with urllib.request.urlopen(req, timeout=120) as r:
                 if start is not None:
                     check_range(r.status, r.headers.get("Content-Range"), start, end)
                 data = r.read()
+                landed = getattr(r, "geturl", lambda: url)()
             if start is not None and len(data) != end - start + 1:
                 raise IOError("short range read: %d of %d" % (len(data), end - start + 1))
+            if used == url and landed and landed != url:
+                with _cdn_lock:
+                    _cdn[url] = (landed, time.monotonic() + CDN_TTL)
             return data
         except Exception as e:  # network errors are retried, then surfaced
+            with _cdn_lock:
+                _cdn.pop(url, None)
             if attempt == retries - 1:
                 raise
             time.sleep(2 ** attempt)
@@ -136,11 +158,11 @@ def get(url, start=None, end=None, retries=4):
 
 
 def connections():
-    """Ranges read at once: STRATA_DL_CONNECTIONS (the setting of setup's downloads), else 8; 1 reads them one by one."""
+    """Ranges read at once: STRATA_DL_CONNECTIONS (the setting of setup's downloads), else 16; 1 reads them one by one."""
     try:
-        n = int((os.environ.get("STRATA_DL_CONNECTIONS") or "").strip() or 8)
+        n = int((os.environ.get("STRATA_DL_CONNECTIONS") or "").strip() or 16)
     except ValueError:
-        n = 8
+        n = 16
     return max(1, min(n, 32))
 
 
@@ -158,10 +180,13 @@ def ranged(url, start, last, chunk, workers):
         return
     todo = iter(spans)
     window = collections.deque()
+    # the ranges are handed on in order, so one slow range holds the oldest slot; the connections that are done go on with
+    # the next ranges meanwhile (up to `depth` ahead, at most ~512 MiB in memory) instead of waiting for it
+    depth = max(workers, min(3 * workers, (512 << 20) // max(chunk, 1)))
     with concurrent.futures.ThreadPoolExecutor(min(workers, len(spans))) as ex:
         for a, b in todo:
             window.append(ex.submit(get, url, a, b))
-            if len(window) >= workers:
+            if len(window) >= depth:
                 break
         while window:
             data = window.popleft().result()
@@ -222,8 +247,11 @@ def inventory(out):
     index = json.loads(get(REPO + "model.safetensors.index.json"))["weight_map"]
     mtp = {k: v for k, v in index.items() if k.startswith("mtp.")}
     rows, total = [], 0
-    for shard in sorted(set(mtp.values())):
-        base, header = shard_header(shard)
+    shards = sorted(set(mtp.values()))
+    # one small request pair per shard (28 of them): side by side, not one after the other (28 s -> 4 s)
+    with concurrent.futures.ThreadPoolExecutor(max(1, min(connections(), 8, len(shards)))) as ex:
+        headers = list(ex.map(shard_header, shards))
+    for shard, (base, header) in zip(shards, headers):
         for name, meta in header.items():
             if name in mtp and mtp[name] == shard:
                 a, b = meta["data_offsets"]
@@ -265,7 +293,7 @@ def fetch(out, only):
     os.makedirs(tdir, exist_ok=True)
     manifest = []
     workers = connections()
-    chunk = (32 if workers > 1 else 64) << 20
+    chunk = (16 if workers > 1 else 64) << 20
     for r in rows:
         if only and only not in r["name"]:
             continue

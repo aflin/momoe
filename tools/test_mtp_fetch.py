@@ -145,7 +145,60 @@ class Ranges(FetchCase):
         with mock.patch.dict(M.os.environ, {"STRATA_DL_CONNECTIONS": "1"}):
             self.assertEqual(M.connections(), 1)
         with mock.patch.dict(M.os.environ, {"STRATA_DL_CONNECTIONS": ""}):
-            self.assertEqual(M.connections(), 8)
+            self.assertEqual(M.connections(), 16)
+
+    def test_the_cdn_address_is_reused_and_forgotten_after_an_error(self):
+        """HF redirects /resolve/ to a signed CDN address: only the first range goes through the redirect (the rest of a
+        tensor's ranges use the CDN address), and any error makes the next try ask the original address again."""
+        asked = []
+
+        def opener(req, timeout=None):
+            asked.append(req.full_url)
+            a, b = (int(x) for x in req.headers["Range"].split("=")[1].split("-"))
+            r = Response(bytes(b - a + 1), 206, {"Content-Range": "bytes %d-%d/1000" % (a, b)})
+            r.geturl = lambda: "https://cdn.example/x?sig=1"
+            return r
+
+        M._cdn.clear()
+        with mock.patch.object(M.urllib.request, "urlopen", opener):
+            for a in (0, 100, 200):
+                M.get("https://hf.example/f", a, a + 99)
+            self.assertEqual(asked, ["https://hf.example/f"] + ["https://cdn.example/x?sig=1"] * 2)
+            asked.clear()
+            fails = [True]
+
+            def flaky(req, timeout=None):
+                if fails.pop() if fails else False:
+                    raise IOError("expired")
+                return opener(req, timeout)
+
+            with mock.patch.object(M.urllib.request, "urlopen", flaky), mock.patch.object(M.time, "sleep", lambda s: None),                     contextlib.redirect_stderr(io.StringIO()):
+                M.get("https://hf.example/f", 300, 399)
+            self.assertEqual(asked, ["https://hf.example/f"])               # the cached address failed: the original is asked again
+        M._cdn.clear()
+
+    def test_a_slow_first_range_does_not_stop_the_ones_behind_it(self):
+        import threading
+        gate = threading.Event()
+        started = []
+
+        def get(url, a, b):
+            started.append(a)
+            if a == 0:
+                gate.wait(5)
+            return bytes(b - a + 1)
+
+        def release():                                   # lets the first range go once the later ones have been started
+            for _ in range(200):
+                if len(started) >= 9:
+                    break
+                M.time.sleep(0.01)
+            gate.set()
+
+        threading.Thread(target=release, daemon=True).start()
+        with mock.patch.object(M, "get", get):
+            list(M.ranged("u", 0, 40 * 1000 - 1, 1000, 4))
+        self.assertGreaterEqual(len(started), 9)                           # four connections, nine ranges started before range 0 ended
 
     def test_a_failing_range_stops_the_parallel_read(self):
         def get(url, a, b):

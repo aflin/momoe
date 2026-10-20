@@ -2131,17 +2131,19 @@ def drop_archive(z: Path) -> None:
 # each connection): download() takes the file in DL_CHUNK pieces over several connections, writes each piece at its own offset,
 # and keeps the finished pieces in <name>.part.chunks so a stopped download continues where it was.  Anything that is not a
 # ranged file of known length (no Range support, no length, a small file) is one stream, as before.
-DL_CONNECTIONS = 8              # STRATA_DL_CONNECTIONS=1 restores one stream (for testers)
-DL_CHUNK = 32 << 20             # bytes per ranged request; a failed request loses at most this much
+DL_CONNECTIONS = 16             # STRATA_DL_CONNECTIONS=1 restores one stream (for testers)
+DL_CHUNK = 32 << 20             # bytes per piece: what the piece list records and what a failed request loses at most
+DL_RUN = 4                      # pieces one request asks for (4 x 32 MiB): a new connection per piece spends its first seconds
+                                # in TCP slow start (measured: 8 connections 66 MB/s with a request per piece, 73 with 128 MiB)
+
+
 def _urlopen(req, timeout=None):
     """Every download's request (upstream routes it through Strata Control's network policy, which Momoe does not have)."""
     return urllib.request.urlopen(req, timeout=timeout)
-
-
 DL_MIN_PARALLEL = 256 << 20     # smaller files are one stream
-DL_CHUNK_TRIES = 5              # tries per piece (1, 2, 4, 8 s apart) before the round is given up and run again
+DL_CHUNK_TRIES = 5              # tries per request (1, 2, 4, 8 s apart) before the round is given up and run again
 DL_ROUNDS = 30                  # rounds (10 s apart) before the download is given up, like the 30 tries of one stream
-DL_BACKOFF = 1.0                # seconds before the second try of a piece, doubled each time (tests set 0)
+DL_BACKOFF = 1.0                # seconds before the second try of a request, doubled each time (tests set 0)
 DL_SAVE_EVERY = 5.0             # seconds between writes of the progress file
 
 
@@ -2217,8 +2219,8 @@ class _Source:
 class _Pieces:
     """The shared state of one parallel download: finished pieces, bytes of the pieces in flight, the stop flags."""
 
-    def __init__(self, total: int, done: set):
-        self.total, self.n = total, -(-total // DL_CHUNK)
+    def __init__(self, total: int, done: set, conns: int = 1):
+        self.total, self.n, self.conns = total, -(-total // DL_CHUNK), conns
         self.done, self.flight = set(done), {}
         self.lock = threading.Lock()
         self.stop = threading.Event()                    # the whole download stops (Ctrl-C, a fatal error)
@@ -2327,16 +2329,32 @@ def _single_ready(part: Path):
     side.unlink(missing_ok=True)
 
 
-def _fetch_piece(src: _Source, st: _Pieces, f, i: int):
-    start = i * DL_CHUNK
-    end = start + st.size(i) - 1
+def _take_run(st: _Pieces, todo: list) -> list:
+    """The next request's pieces: up to DL_RUN neighbours from the front of `todo`; fewer near the end, so the last pieces
+    are spread over every connection and no single slow one holds the finish."""
+    with st.lock:
+        if not todo:
+            return []
+        n = max(1, min(DL_RUN, len(todo) // (2 * st.conns)))
+        run = [todo.pop(0)]
+        while len(run) < n and todo and todo[0] == run[-1] + 1:
+            run.append(todo.pop(0))
+        return run
+
+
+def _fetch_run(src: _Source, st: _Pieces, f, run: list):
+    """One ranged request for the neighbouring pieces in `run`, written at their offsets; each piece counts as finished
+    when its last byte is down.  A connection that breaks continues from the byte it reached, not from the piece start."""
+    start = run[0] * DL_CHUNK
+    end = min((run[-1] + 1) * DL_CHUNK, st.total) - 1
     pos, tries = start, 0
     with st.lock:
-        st.flight[i] = 0
+        for i in run:
+            st.flight[i] = 0
     while True:
         if st.stop.is_set():
             return
-        url, err, wait = None, None, DL_BACKOFF * 2 ** tries
+        url, err, got, wait, ra = None, None, False, None, 0.0
         try:
             url = src.get()
             req = urllib.request.Request(url, headers={"User-Agent": "strata-setup", "Range": f"bytes={pos}-{end}"})
@@ -2346,7 +2364,9 @@ def _fetch_piece(src: _Source, st: _Pieces, f, i: int):
                 while pos <= end:
                     if st.stop.is_set():
                         return
-                    b = r.read(min(1 << 20, end + 1 - pos))
+                    cur = pos // DL_CHUNK
+                    cur_end = min((cur + 1) * DL_CHUNK, st.total)             # one past the piece's last byte
+                    b = r.read(min(1 << 20, cur_end - pos))
                     if not b:
                         raise IOError("the connection closed early")
                     try:
@@ -2355,8 +2375,16 @@ def _fetch_piece(src: _Source, st: _Pieces, f, i: int):
                     except OSError as e:
                         raise _DiskError(str(e)) from e
                     pos += len(b)
-                    st.add(i, len(b))
-            st.finish(i)
+                    got = True
+                    st.add(cur, len(b))
+                    if pos == cur_end:
+                        st.finish(cur)
+                        if pos <= end and st.abort_round.is_set():            # a piece failed for good: stop at a piece edge
+                            with st.lock:
+                                for i in run:
+                                    if i not in st.done and st.flight.get(i) == 0:
+                                        st.flight.pop(i, None)
+                            return
             return
         except (_NoRange, _DiskError):
             raise
@@ -2372,26 +2400,25 @@ def _fetch_piece(src: _Source, st: _Pieces, f, i: int):
                     pass
             elif e.code in (429, 503):
                 try:
-                    wait = max(wait, min(float(e.headers.get("Retry-After") or 0), 60))
+                    ra = min(float(e.headers.get("Retry-After") or 0), 60)
                 except (TypeError, ValueError):
                     pass
         except (OSError, http.client.HTTPException) as e:
             err = e
-        tries += 1
+        tries = 1 if got else tries + 1                              # a try that moved forward is not a failed one
         if tries >= DL_CHUNK_TRIES:
             raise _PieceFailed(str(err))
-        st.stop.wait(wait)
+        st.stop.wait(max(DL_BACKOFF * 2 ** (tries - 1), ra) if wait is None else wait)
 
 
 def _piece_worker(src: _Source, st: _Pieces, todo: list, part: Path):
     try:
         with open(part, "r+b", buffering=0) as f:
             while not (st.stop.is_set() or st.abort_round.is_set()):
-                with st.lock:
-                    if not todo:
-                        return
-                    i = todo.pop(0)
-                _fetch_piece(src, st, f, i)
+                run = _take_run(st, todo)
+                if not run:
+                    return
+                _fetch_run(src, st, f, run)
     except _PieceFailed as e:
         st.errors.append(e)
         st.abort_round.set()
@@ -2414,7 +2441,7 @@ def parallel_download(url: str, part: Path, total: int, label: str, conns: int, 
     except (OSError, http.client.HTTPException):
         return False                                    # the one-stream path has its own retries and messages
     done = _load_pieces(part, total)
-    st = _Pieces(total, done)
+    st = _Pieces(total, done, conns)
     part.parent.mkdir(parents=True, exist_ok=True)
     if not part.exists():
         part.touch()
@@ -2515,6 +2542,18 @@ def download_single(url: str, part: Path, total: int, label: str):
             time.sleep(10)
 
 
+def range_total(url: str) -> int:
+    """The file's length from a one-byte ranged GET (Content-Range: bytes 0-0/N), for a server whose HEAD gives none
+    (ModelScope's: #1915); 0 when it does not say.  With the length known the file comes over several connections."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "strata-setup", "Range": "bytes=0-0"})
+        with _urlopen(req, timeout=60) as r:
+            m = re.match(r"\s*bytes 0-0/(\d+)\s*$", r.headers.get("Content-Range") or "")
+            return int(m.group(1)) if r.status == 206 and m else 0
+    except (OSError, http.client.HTTPException):
+        return 0
+
+
 def download(url, dst: Path, what=None):
     """Resumable HTTP(S) download with a progress line; `file://` and plain paths are copied (tests, mirrors).
     A finished file gets a <name>.done mark, so a later run skips it without asking the server."""
@@ -2559,6 +2598,8 @@ def download(url, dst: Path, what=None):
                 fail(f"cannot reach {url.split('/')[2]} ({e})",
                      "check your internet connection and run it again" + source_hint(url))
             time.sleep(5)
+    if not total:
+        total = range_total(url)
     if dst.exists() and total and dst.stat().st_size == total:    # finished by an older setup (no mark yet)
         mark(dst)
         ok(f"{what or dst.name} already downloaded")
