@@ -704,7 +704,7 @@ class Strata:
 
         def low_fits(m):
             try:
-                return S.low_ram_fits(m, ram, vram) if S else ram - 6 + max(0.0, vram - 5) >= models[m]["arena_gb"]
+                return S.low_ram_fits(m, ram, vram) if S else ram - 6 + max(0.0, vram - 5 - 1.0) >= models[m]["arena_gb"]
             except Exception:                           # noqa: BLE001
                 return False
         notes = []

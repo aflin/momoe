@@ -4181,32 +4181,37 @@ def low_ram_needed(model, ram) -> bool:
     return ram < MODELS[model]["arena_gb"] + LOW_RAM_HEADROOM_GB
 
 
-def low_ram_gpu_gb(model, vram_gb, ctx=32768, kv="int8") -> float:
+#: The draft layer (MTP) takes about 1 GB of graphics memory: its 786 MiB of files plus the draft head's ~218 MiB
+#: (phaseA-tests/notes-021-settings.md).  It comes out of the expert cache, so every fit check counts it while MTP is on.
+MTP_VRAM_GB = 1.0
+
+
+def low_ram_gpu_gb(model, vram_gb, ctx=32768, kv="int8", mtp=True) -> float:
     """About how many GB of the model's experts the GPU's cache holds: its VRAM minus ~5 GB for the dense weights,
     buffers and a 32K context's KV cache, minus the KV cache of a longer context (in VRAM in the low-RAM mode: its RAM
-    has no room for KV streaming)."""
+    has no room for KV streaming), minus ~1 GB for the draft layer (MTP) when it is on."""
     kv_tok = 13 * KV_CELL_BYTES.get(kv, 1056)           # bytes per context token: 12 QSA layers + the draft layer
     longer = max(0, ctx - 32768) * kv_tok / 1e9
-    return max(0.0, min(MODELS[model]["arena_gb"], vram_gb - 5 - longer))
+    return max(0.0, min(MODELS[model]["arena_gb"], vram_gb - 5 - (MTP_VRAM_GB if mtp else 0.0) - longer))
 
 
-def low_ram_gpu_share(model, vram_gb, ctx=32768, kv="int8") -> float:
+def low_ram_gpu_share(model, vram_gb, ctx=32768, kv="int8", mtp=True) -> float:
     """About how much of the model's experts the GPU holds."""
-    return low_ram_gpu_gb(model, vram_gb, ctx, kv) / MODELS[model]["arena_gb"]
+    return low_ram_gpu_gb(model, vram_gb, ctx, kv, mtp) / MODELS[model]["arena_gb"]
 
 
-def low_ram_resident(model, ram, vram_gb, ctx=32768, kv="int8") -> bool:
+def low_ram_resident(model, ram, vram_gb, ctx=32768, kv="int8", mtp=True) -> bool:
     """In the low-RAM mode: the experts the GPU does not hold fit the RAM with the usual room beside them, so they are
     copied into RAM once (the resident variant, `--resident-experts`) instead of being read through the OS file cache
     (plain `--mmap-experts`, which a PC this short of RAM keeps re-reading from the SSD)."""
-    rest = MODELS[model]["arena_gb"] - low_ram_gpu_gb(model, vram_gb, ctx, kv)
+    rest = MODELS[model]["arena_gb"] - low_ram_gpu_gb(model, vram_gb, ctx, kv, mtp)
     return ram >= rest + LOW_RAM_HEADROOM_GB
 
 
-def low_ram_fits(model, ram, vram_gb) -> bool:
+def low_ram_fits(model, ram, vram_gb, mtp=True) -> bool:
     """In the low-RAM mode: the experts the GPU does not hold fit the RAM left beside the rest (as file cache)."""
     arena = MODELS[model]["arena_gb"]
-    return ram - 6 + max(0.0, vram_gb - 5) >= arena
+    return ram - 6 + max(0.0, vram_gb - 5 - (MTP_VRAM_GB if mtp else 0.0)) >= arena
 
 
 def low_ram_wanted(model, ram, choice="auto") -> bool:
@@ -7374,12 +7379,13 @@ def main() -> int:
     if low_ram and not fam.get("ready"):               # NVFP4's packs: the RAM-budget mode instead (step 7)
         arena = MODELS[model]["arena_gb"]
         vram = low_ram_vram(gpu) - (VISION[vision]["reserve_mib"] / 1024 if vision != "none" else 0)
-        share = low_ram_gpu_share(model, vram, ctx, kv)
-        rest = arena - low_ram_gpu_gb(model, vram, ctx, kv)
-        resident = a.low_ram == "resident" or (a.low_ram != "mmap" and low_ram_resident(model, ram, vram, ctx, kv))
+        with_mtp = getattr(a, "mtp", None) != "off"     # the draft layer's ~1 GB comes out of the expert cache (Momoe: always on)
+        share = low_ram_gpu_share(model, vram, ctx, kv, with_mtp)
+        rest = arena - low_ram_gpu_gb(model, vram, ctx, kv, with_mtp)
+        resident = a.low_ram == "resident" or (a.low_ram != "mmap" and low_ram_resident(model, ram, vram, ctx, kv, with_mtp))
         if multi:      # every chosen card's share (the image encoder on the main one); #364 #384: the mapped variant
-            held = min(arena, low_ram_gpu_gb(model, vram, ctx, kv) +
-                       sum(low_ram_gpu_gb(model, low_ram_vram(x), ctx, kv) for x in chosen[1:]))
+            held = min(arena, low_ram_gpu_gb(model, vram, ctx, kv, with_mtp) +
+                       sum(low_ram_gpu_gb(model, low_ram_vram(x), ctx, kv, with_mtp) for x in chosen[1:]))
             share, rest = held / arena, arena - held
             # #642: the resident variant on a split, by the same rule as on one card - what no card holds fits the RAM
             resident = resident_split() and (a.low_ram == "resident" or
