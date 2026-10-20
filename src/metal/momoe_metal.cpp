@@ -4007,8 +4007,18 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
 static int g_built = 0;                                      // forward graphs built and the time it took (the stats
 static double g_built_s = 0;                                 // line's)
 
-#if !defined(MOMOE_CUDA)
-// momoe-metal: graphs kept and computed again, as llama.cpp reuses its graph.  Building a graph a token kept the GPU
+// momoe-cuda: not for Nemotron with experts on the CPU (--hybrid: its decode graph is kept by forward_decode, the
+// experts through mailboxes), nor across two cards (--layer-split, --helper-tier: not measured)
+static bool reuse_backend_ok(const Engine & e) {
+#if defined(MOMOE_CUDA)
+    return !(e.m.nemo && e.hybrid) && !e.helper && e.split.empty();
+#else
+    (void) e;
+    return true;
+#endif
+}
+
+// graphs kept and computed again, as llama.cpp reuses its graph (momoe-metal, momoe-cuda).  Building a graph a token kept the GPU
 // waiting (LFM2.5-8B on the M1 Ultra: 0.85 ms of a token's 8.3), and macOS then ran it at ~850 MHz, not ~1,250 (120
 // tok/s; reused: 186, llama.cpp 175-185).  Only with every expert in its slot (no stops, no callback); each kept graph
 // has its own scheduler, so a drafting window, its rollback and the next window keep theirs.  A graph is found by
@@ -4025,7 +4035,8 @@ static GraphCache g_gc[16];
 
 static GraphCache * graph_cache(Engine & e, int T, int p0, int n_kv, const Out * out) {
     static const bool off = getenv("MOMOE_NO_GRAPH_REUSE") || getenv("MOMOE_TOP") || getenv("MOMOE_FORCE_CB");
-    if (off || !e.preloaded || e.pause || e.nostall || e.reserve_only || debug_on() || T > e.max_window + 1) return nullptr;
+    if (off || !e.preloaded || e.pause || e.nostall || e.reserve_only || debug_on() || T > e.max_window + 1 ||
+        !reuse_backend_ok(e)) return nullptr;
     Inputs sh{};
     kpool_shape(e, sh, p0, T);
     const std::array<int, 14> key = {T, n_kv, sh.n_new, sh.n_new && e.m.glm5 ? sh.j_first : -1, sh.n_pool, sh.sel, sh.n_sel,
@@ -4049,10 +4060,6 @@ static GraphCache * graph_cache(Engine & e, int T, int p0, int n_kv, const Out *
         lru->sched = ggml_backend_sched_new(e.sched_backends.data(), nullptr, (int) e.sched_backends.size(), 32768, false, true);
     return lru;
 }
-#else
-struct GraphCache { bool ready; Built b; ggml_backend_sched_t sched; };
-static GraphCache * graph_cache(Engine &, int, int, int, const Out *) { return nullptr; }
-#endif
 
 static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = nullptr) {
     Model & m = e.m;
@@ -4062,7 +4069,7 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
     const double tb0 = now_s();
     const int n_kv = std::min(e.n_ctx, ((p0 + T + 255) / 256) * 256);
     Built lb;
-    GraphCache * gc = graph_cache(e, T, p0, n_kv, out);     // Metal: a graph kept for these shapes (else built here)
+    GraphCache * gc = graph_cache(e, T, p0, n_kv, out);     // a graph kept for these shapes (else built here)
     Built & b = gc ? gc->b : lb;
     const bool built = gc && gc->ready;
     if (!built) {
@@ -4505,11 +4512,11 @@ struct MtpGraph {
     ggml_backend_sched_t sched = nullptr;
     uint64_t used = 0;
 };
-#if !defined(MOMOE_CUDA)
 static MtpGraph g_mtpg[4];
 static MtpGraph * mtp_graph(Engine & e, int T, int n_kv) {
     static const bool off = getenv("MOMOE_NO_GRAPH_REUSE") || getenv("MOMOE_FORCE_CB");
-    if (off || e.m.glm5 || !e.preloaded || e.pause || e.nostall || debug_on() || T > e.max_window + 1) return nullptr;
+    if (off || e.m.glm5 || !e.preloaded || e.pause || e.nostall || debug_on() || T > e.max_window + 1 ||
+        !reuse_backend_ok(e)) return nullptr;
     static uint64_t clock = 0;
     MtpGraph * lru = &g_mtpg[0];
     for (MtpGraph & g : g_mtpg) {
@@ -4529,9 +4536,6 @@ static MtpGraph * mtp_graph(Engine & e, int T, int n_kv) {
     lru->used = ++clock;
     return lru;
 }
-#else
-static MtpGraph * mtp_graph(Engine &, int, int) { return nullptr; }
-#endif
 
 static int mtp_forward(Engine & e, const float * h, const int32_t * toks, int T, int p0, std::vector<float> & h_out,
                        float * prob = nullptr) {
@@ -4539,7 +4543,7 @@ static int mtp_forward(Engine & e, const float * h, const int32_t * toks, int T,
     const double tm0 = now_s();
     Layer & L = m.mtp;
     const int n_kv = std::min(e.n_ctx, ((p0 + T + 255) / 256) * 256);
-    MtpGraph * G = mtp_graph(e, T, n_kv);                   // Metal: a graph kept for these shapes (else built here)
+    MtpGraph * G = mtp_graph(e, T, n_kv);                   // a graph kept for these shapes (else built here)
     ggml_context * c = nullptr;
     ggml_cgraph * gf = nullptr;
     Inputs in{};
@@ -4591,7 +4595,13 @@ static int mtp_forward(Engine & e, const float * h, const int32_t * toks, int T,
         sh = ggml_mul(c, ggml_mul_mat(c, L.down_sh, sh), ggml_sigmoid(c, ggml_mul_mat(c, L.gate_inp_sh, pn)));
         return ggml_add(c, moe, sh);
     };
-    ggml_tensor * en = norm(c, ggml_get_rows(c, m.tok_embd, in.tokens), L.enorm, m.rms_eps);
+    ggml_tensor * te = ggml_get_rows(c, m.tok_embd, in.tokens);
+    ggml_tensor * te_cpu = nullptr, * te_gpu = nullptr;      // momoe-cuda: the rows looked up on the CPU, as forward()'s
+    if (!kHostMem && m.tok_embd->buffer && ggml_backend_buffer_is_host(m.tok_embd->buffer)) {   // (else the scheduler
+        te_cpu = te;                                         // copied the whole table to the GPU every draft: 540 MB,
+        te = te_gpu = ggml_scale(c, te, 1.0f);               // ~10 ms on the Spark for Qwen3.6)
+    }
+    ggml_tensor * en = norm(c, te, L.enorm, m.rms_eps);
                                                              // hl: the next draft's input; head_in: the head's
     if (m.glm5) kpool_new(e, c, in, p0, T);                  // (its MLA block's own k-pool selection)
     if (m.glm5) {
@@ -4664,6 +4674,10 @@ static int mtp_forward(Engine & e, const float * h, const int32_t * toks, int T,
     ggml_backend_sched_t sc = G ? G->sched : e.sched;
     ggml_backend_sched_reset(sc);
     if (!G) ++g_sched_gen;
+    if (te_gpu) {
+        ggml_backend_sched_set_tensor_backend(sc, te_cpu, e.cpu);
+        ggml_backend_sched_set_tensor_backend(sc, te_gpu, e.metal);
+    }
     if (!ggml_backend_sched_alloc_graph(sc, gf)) die("cannot allocate the MTP graph");
     if (G) {
         G->c = c;
@@ -5215,6 +5229,7 @@ int main(int argc, char ** argv) {
     int n_gen = 32, slots = 0, mtp_k = 0;
     float spec_min_p = 0.5f;                                 // a draft only while the MTP layer is this sure
     bool pre = false, nocache = false, bench_window = false, serve = false;
+    bool cuda_graphs_off = false;                            // (momoe-cuda: GGML_CUDA_DISABLE_GRAPHS set here)
     const char * nostall_arg = nullptr;                      // --nostall sub|drop (see Engine::nostall)
     int nostall_every = 0;                                   // --nostall-every N
     const char * profile = nullptr;
@@ -5324,9 +5339,10 @@ int main(int argc, char ** argv) {
                && e.pool.n_slots < e.m.n_exp_all) {         // (a device pool: the readers' copies would wait behind
         rmb_init(e);                                         // the mailbox's wait, measured: never with one)
         if (!getenv("MOMOE_CUDA_GRAPHS")) setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0);
-    } else if (!getenv("MOMOE_CUDA_GRAPHS"))                 // CUDA graphs for the mailbox's one-graph token only: with
-        setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0);         // the stops' many splits, instantiating them ran out of
-                                                            // VRAM (12 GB card; MOMOE_CUDA_GRAPHS=1: on anyway)
+    } else if (!getenv("MOMOE_CUDA_GRAPHS") && !getenv("GGML_CUDA_DISABLE_GRAPHS")) {   // CUDA graphs for the
+        setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0);         // mailbox's one-graph token only: with the stops' many
+        cuda_graphs_off = true;                             // splits, instantiating them ran out of VRAM (12 GB card;
+    }                                                       // MOMOE_CUDA_GRAPHS=1: on anyway); and for kept graphs
 #endif
     if (mtp_k > 0 && !e.m.has_mtp) die("--mtp: this model file has no MTP layer");
     e.readers.device = e.device;
@@ -5350,6 +5366,10 @@ int main(int argc, char ** argv) {
         preload(e);
         e.predict = e.predict2 = false;                      // (nothing to read ahead: the graphs
     }                                                        // skip the next layers' routers)
+#if defined(MOMOE_CUDA)
+    if (cuda_graphs_off && e.preloaded && reuse_backend_ok(e) && !getenv("MOMOE_NO_GRAPH_REUSE") && !debug_on())
+        unsetenv("GGML_CUDA_DISABLE_GRAPHS");               // kept graphs (no stops: one split each): replayed as CUDA
+#endif                                                       // graphs
     else if (profile) pin_profile(e, profile, getenv("MOMOE_PIN_FRAC") ? atof(getenv("MOMOE_PIN_FRAC")) : 0.6);
     e.pause = !kHostMem ? false : !debug_on() && !getenv("MOMOE_NO_PAUSE") && (!pre || getenv("MOMOE_FORCE_PAUSE"));
 #if !defined(MOMOE_CUDA)
