@@ -39,9 +39,11 @@ stop at; --yes alone is not.
 from __future__ import annotations
 
 import argparse
+import calendar
 import ctypes
 import glob
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -52,8 +54,10 @@ import struct
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -2123,6 +2127,394 @@ def drop_archive(z: Path) -> None:
     z.with_name(z.name + ".done").unlink(missing_ok=True)
 
 
+# Parallel ranged downloads (0.2.0).  One TCP stream often cannot fill a fast line (a long or lossy route, a CDN that limits
+# each connection): download() takes the file in DL_CHUNK pieces over several connections, writes each piece at its own offset,
+# and keeps the finished pieces in <name>.part.chunks so a stopped download continues where it was.  Anything that is not a
+# ranged file of known length (no Range support, no length, a small file) is one stream, as before.
+DL_CONNECTIONS = 8              # STRATA_DL_CONNECTIONS=1 restores one stream (for testers)
+DL_CHUNK = 32 << 20             # bytes per ranged request; a failed request loses at most this much
+def _urlopen(req, timeout=None):
+    """Every download's request (upstream routes it through Strata Control's network policy, which Momoe does not have)."""
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+DL_MIN_PARALLEL = 256 << 20     # smaller files are one stream
+DL_CHUNK_TRIES = 5              # tries per piece (1, 2, 4, 8 s apart) before the round is given up and run again
+DL_ROUNDS = 30                  # rounds (10 s apart) before the download is given up, like the 30 tries of one stream
+DL_BACKOFF = 1.0                # seconds before the second try of a piece, doubled each time (tests set 0)
+DL_SAVE_EVERY = 5.0             # seconds between writes of the progress file
+
+
+def dl_connections() -> int:
+    """How many connections a big download uses: STRATA_DL_CONNECTIONS, else DL_CONNECTIONS (1 = one stream)."""
+    raw = (os.environ.get("STRATA_DL_CONNECTIONS") or "").strip()
+    try:
+        n = int(raw) if raw else DL_CONNECTIONS
+    except ValueError:
+        n = DL_CONNECTIONS
+    return max(1, min(n, 32))
+
+
+class _NoRange(Exception):
+    """The server does not answer a byte range with that range (no 206, or another range): one stream instead."""
+
+
+class _DiskError(Exception):
+    """The .part file cannot be written (disk full, no permission): retrying would not help."""
+
+
+class _PieceFailed(Exception):
+    """A piece failed DL_CHUNK_TRIES times."""
+
+
+def _url_ttl(url: str):
+    """Seconds a signed URL (the CDN's, after the redirect) is still valid by its own query, else None."""
+    q = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    try:
+        if "Expires" in q:
+            ttl = float(q["Expires"][0]) - time.time()
+        elif "X-Amz-Expires" in q and "X-Amz-Date" in q:
+            t0 = calendar.timegm(time.strptime(q["X-Amz-Date"][0], "%Y%m%dT%H%M%SZ"))
+            ttl = t0 + float(q["X-Amz-Expires"][0]) - time.time()
+        else:
+            return None
+    except (ValueError, OverflowError):
+        return None
+    return ttl if 0 < ttl < 30 * 86400 else None       # a PC clock that is far off says nothing: a 403 re-resolves
+
+
+class _Source:
+    """The URL the pieces are read from: the redirect (Hugging Face answers with a signed, time-limited CDN address) is
+    resolved once and reused; it is resolved again a little before it expires and after a 401/403/410."""
+
+    def __init__(self, url: str, total: int):
+        self.url, self.total = url, total
+        self.final, self.deadline = None, None
+        self.lock = threading.Lock()
+
+    def resolve(self, stale=None) -> str:
+        with self.lock:
+            if stale is not None and self.final is not None and self.final != stale:
+                return self.final                        # another connection already got a fresh address
+            req = urllib.request.Request(self.url, headers={"User-Agent": "strata-setup", "Range": "bytes=0-0"})
+            with _urlopen(req, timeout=60) as r:
+                cr = (r.headers.get("Content-Range") or "").strip()
+                if r.status != 206 or cr not in (f"bytes 0-0/{self.total}", "bytes 0-0/*"):
+                    raise _NoRange(f"HTTP {r.status}, Content-Range {cr!r}")
+                r.read(1)
+                final = r.geturl() or self.url
+            ttl = _url_ttl(final)
+            self.final = final
+            self.deadline = time.monotonic() + max(ttl - 120, 0) if ttl else None
+            return final
+
+    def get(self) -> str:
+        with self.lock:
+            cur, expired = self.final, self.deadline is not None and time.monotonic() >= self.deadline
+        return self.resolve(stale=cur) if cur is None or expired else cur
+
+
+class _Pieces:
+    """The shared state of one parallel download: finished pieces, bytes of the pieces in flight, the stop flags."""
+
+    def __init__(self, total: int, done: set):
+        self.total, self.n = total, -(-total // DL_CHUNK)
+        self.done, self.flight = set(done), {}
+        self.lock = threading.Lock()
+        self.stop = threading.Event()                    # the whole download stops (Ctrl-C, a fatal error)
+        self.abort_round = threading.Event()             # a piece failed for good: end this round, run the next
+        self.fatal, self.errors = None, []
+
+    def size(self, i: int) -> int:
+        return min((i + 1) * DL_CHUNK, self.total) - i * DL_CHUNK
+
+    def add(self, i: int, n: int):
+        with self.lock:
+            self.flight[i] = self.flight.get(i, 0) + n
+
+    def finish(self, i: int):
+        with self.lock:
+            self.flight.pop(i, None)
+            self.done.add(i)
+
+    def have(self) -> int:
+        with self.lock:
+            return sum(self.size(i) for i in self.done) + sum(self.flight.values())
+
+    def snapshot(self) -> set:
+        with self.lock:
+            return set(self.done)
+
+
+def _ranges(done) -> list:
+    out = []
+    for i in sorted(done):
+        if out and out[-1][1] == i:
+            out[-1][1] = i + 1
+        else:
+            out.append([i, i + 1])
+    return out
+
+
+def _prefix_bytes(done: set, total: int) -> int:
+    """Bytes of the unbroken run of finished pieces from the start of the file."""
+    i = 0
+    while i in done:
+        i += 1
+    return min(i * DL_CHUNK, total)
+
+
+def _load_pieces(part: Path, total: int) -> set:
+    """The finished pieces of an earlier run.  <name>.part.chunks lists them; a .part without it comes from one stream
+    (an older setup, or STRATA_DL_CONNECTIONS=1): its bytes are a run from the start, so those pieces are finished."""
+    side = part.with_name(part.name + ".chunks")
+    n = -(-total // DL_CHUNK)
+    try:
+        size = part.stat().st_size if part.is_file() else None
+    except OSError:
+        size = None
+    if side.is_file():
+        try:
+            data = json.loads(side.read_text(encoding="utf-8"))
+            if data.get("v") == 1 and data.get("total") == total and data.get("chunk") == DL_CHUNK and size is not None:
+                done = {i for a, b in data["done"] for i in range(int(a), min(int(b), n))}
+                return {i for i in done if min((i + 1) * DL_CHUNK, total) <= size}
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        side.unlink(missing_ok=True)                    # not this file's list: start the file over
+        part.unlink(missing_ok=True)
+        return set()
+    if size is None:
+        return set()
+    if size > total:
+        part.unlink(missing_ok=True)
+        return set()
+    return set(range(n)) if size >= total else set(range(size // DL_CHUNK))
+
+
+def _save_pieces(part: Path, total: int, done: set):
+    """Flush the data first, then record the pieces: a list never names bytes the disk does not have."""
+    try:
+        with open(part, "r+b") as g:
+            os.fsync(g.fileno())
+        side = part.with_name(part.name + ".chunks")
+        tmp = side.with_name(side.name + ".tmp")
+        tmp.write_text(json.dumps({"v": 1, "total": total, "chunk": DL_CHUNK, "done": _ranges(done)}), encoding="utf-8")
+        os.replace(tmp, side)
+    except OSError:
+        pass                                            # only costs re-downloading a few pieces after a stop
+
+
+def _single_ready(part: Path):
+    """Before one stream continues a .part: keep only the unbroken run from the start of the file (what a parallel
+    download left may have gaps behind it) and drop the list."""
+    side = part.with_name(part.name + ".chunks")
+    if not side.is_file():
+        return
+    try:
+        data = json.loads(side.read_text(encoding="utf-8"))
+        keep = _prefix_bytes({i for a, b in data["done"] for i in range(int(a), int(b))}, int(data["total"]))
+        if data.get("chunk") != DL_CHUNK:
+            keep = 0
+    except (OSError, ValueError, TypeError, KeyError):
+        keep = 0
+    try:
+        if part.is_file():
+            with open(part, "r+b") as g:
+                g.truncate(min(keep, part.stat().st_size))
+    except OSError:
+        part.unlink(missing_ok=True)
+    side.unlink(missing_ok=True)
+
+
+def _fetch_piece(src: _Source, st: _Pieces, f, i: int):
+    start = i * DL_CHUNK
+    end = start + st.size(i) - 1
+    pos, tries = start, 0
+    with st.lock:
+        st.flight[i] = 0
+    while True:
+        if st.stop.is_set():
+            return
+        url, err, wait = None, None, DL_BACKOFF * 2 ** tries
+        try:
+            url = src.get()
+            req = urllib.request.Request(url, headers={"User-Agent": "strata-setup", "Range": f"bytes={pos}-{end}"})
+            with _urlopen(req, timeout=60) as r:
+                if r.status != 206 or not (r.headers.get("Content-Range") or "").strip().startswith(f"bytes {pos}-{end}/"):
+                    raise _NoRange(f"HTTP {r.status}")
+                while pos <= end:
+                    if st.stop.is_set():
+                        return
+                    b = r.read(min(1 << 20, end + 1 - pos))
+                    if not b:
+                        raise IOError("the connection closed early")
+                    try:
+                        f.seek(pos)
+                        f.write(b)
+                    except OSError as e:
+                        raise _DiskError(str(e)) from e
+                    pos += len(b)
+                    st.add(i, len(b))
+            st.finish(i)
+            return
+        except (_NoRange, _DiskError):
+            raise
+        except urllib.error.HTTPError as e:
+            err = e
+            if e.code in (401, 403, 410) and url is not None:       # the signed address ran out: ask for a new one
+                try:
+                    src.resolve(stale=url)
+                    wait = 0
+                except _NoRange:
+                    raise
+                except (OSError, http.client.HTTPException):
+                    pass
+            elif e.code in (429, 503):
+                try:
+                    wait = max(wait, min(float(e.headers.get("Retry-After") or 0), 60))
+                except (TypeError, ValueError):
+                    pass
+        except (OSError, http.client.HTTPException) as e:
+            err = e
+        tries += 1
+        if tries >= DL_CHUNK_TRIES:
+            raise _PieceFailed(str(err))
+        st.stop.wait(wait)
+
+
+def _piece_worker(src: _Source, st: _Pieces, todo: list, part: Path):
+    try:
+        with open(part, "r+b", buffering=0) as f:
+            while not (st.stop.is_set() or st.abort_round.is_set()):
+                with st.lock:
+                    if not todo:
+                        return
+                    i = todo.pop(0)
+                _fetch_piece(src, st, f, i)
+    except _PieceFailed as e:
+        st.errors.append(e)
+        st.abort_round.set()
+    except (_NoRange, _DiskError) as e:
+        st.fatal = st.fatal or e
+        st.stop.set()
+    except OSError as e:                                # the .part itself could not be opened
+        st.fatal = st.fatal or _DiskError(str(e))
+        st.stop.set()
+
+
+def parallel_download(url: str, part: Path, total: int, label: str, conns: int, name: str) -> bool:
+    """Fill `part` (total bytes) over `conns` ranged connections.  True when every byte is there; False when the server
+    does not do ranges (the caller reads the file in one stream)."""
+    src = _Source(url, total)
+    try:
+        src.resolve()
+    except _NoRange:
+        return False
+    except (OSError, http.client.HTTPException):
+        return False                                    # the one-stream path has its own retries and messages
+    done = _load_pieces(part, total)
+    st = _Pieces(total, done)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    if not part.exists():
+        part.touch()
+    last_print = last_save = 0.0
+
+    def report(force=False):
+        nonlocal last_print, last_save
+        now = time.time()
+        if now - last_print > 2 or force:
+            last_print = now
+            have = st.have()
+            print(f"\r  {label}: {have / 1e9:6.2f} / {total / 1e9:.2f} GB ({100 * have / total:.0f}%)   ", end="", flush=True)
+        if now - last_save > DL_SAVE_EVERY:
+            last_save = now
+            _save_pieces(part, total, st.snapshot())
+
+    try:
+        for rnd in range(DL_ROUNDS):
+            todo = [i for i in range(st.n) if i not in st.done]
+            if not todo:
+                break
+            st.abort_round.clear()
+            st.errors.clear()
+            threads = [threading.Thread(target=_piece_worker, args=(src, st, todo, part), daemon=True)
+                       for _ in range(min(conns, len(todo)))]
+            for t in threads:
+                t.start()
+            while any(t.is_alive() for t in threads):
+                for t in threads:
+                    t.join(0.25)
+                report()
+            if st.fatal is not None:
+                break
+            if st.errors:
+                print()
+                warn(f"download interrupted ({st.errors[0]}); retrying in 10 s ...")
+                _save_pieces(part, total, st.snapshot())
+                time.sleep(10)
+    except BaseException:
+        st.stop.set()                                   # Ctrl-C: let the connections stop, keep what is finished
+        _save_pieces(part, total, st.snapshot())
+        raise
+    report(force=True)
+    print()
+    if isinstance(st.fatal, _DiskError):
+        _save_pieces(part, total, st.snapshot())
+        fail(f"cannot write {part.name}: {st.fatal}", "free some disk space (or pick another --models-dir) and run it again")
+    if isinstance(st.fatal, _NoRange):
+        _save_pieces(part, total, st.snapshot())
+        return False                                    # the server stopped doing ranges: one stream from the unbroken start
+    if len(st.done) < st.n:
+        _save_pieces(part, total, st.snapshot())
+        have = st.have()
+        fail(f"could not finish downloading {name}: {have:,} of {total:,} bytes",
+             "check your internet connection and run it again (the download resumes where it stopped)")
+    try:
+        with open(part, "r+b") as g:
+            g.truncate(total)
+            os.fsync(g.fileno())
+    except OSError:
+        pass
+    part.with_name(part.name + ".chunks").unlink(missing_ok=True)
+    return True
+
+
+def download_single(url: str, part: Path, total: int, label: str):
+    """One stream with a Range resume from the size of `part` (the way every download worked before parallel pieces)."""
+    _single_ready(part)
+    have = part.stat().st_size if part.exists() else 0
+    for attempt in range(30):
+        if total and have >= total:                    # stopped after the last byte, before the rename: nothing to
+            break                                      # ask for (a range past the end is a 416, retried 30 times)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "strata-setup", "Range": f"bytes={have}-"})
+            with _urlopen(req, timeout=60) as r, open(part, "ab" if have else "wb") as f:
+                if have and r.status != 206:                     # the server ignored the range: start over
+                    f.seek(0)
+                    f.truncate()
+                    have = 0
+                last = 0.0
+                while True:
+                    b = r.read(8 << 20)
+                    if not b:
+                        break
+                    f.write(b)
+                    have += len(b)
+                    if time.time() - last > 2:
+                        last = time.time()
+                        size = f"{have / 1e9:6.2f} / {total / 1e9:.2f} GB ({100 * have / total:.0f}%)" if total \
+                            else f"{have / 1e6:7.1f} MB"
+                        print(f"\r  {label}: {size}   ", end="", flush=True)
+            print()
+            if not total or have >= total:
+                break
+        except (OSError, http.client.HTTPException) as e:
+            print()
+            warn(f"download interrupted ({e}); retrying in 10 s ...")
+            time.sleep(10)
+
+
 def download(url, dst: Path, what=None):
     """Resumable HTTP(S) download with a progress line; `file://` and plain paths are copied (tests, mirrors).
     A finished file gets a <name>.done mark, so a later run skips it without asking the server."""
@@ -2171,36 +2563,10 @@ def download(url, dst: Path, what=None):
         mark(dst)
         ok(f"{what or dst.name} already downloaded")
         return
-    have = part.stat().st_size if part.exists() else 0
-    for attempt in range(30):
-        if total and have >= total:                    # stopped after the last byte, before the rename: nothing to
-            break                                      # ask for (a range past the end is a 416, retried 30 times)
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "strata-setup", "Range": f"bytes={have}-"})
-            with urllib.request.urlopen(req, timeout=60) as r, open(part, "ab" if have else "wb") as f:
-                if have and r.status != 206:                     # the server ignored the range: start over
-                    f.seek(0)
-                    f.truncate()
-                    have = 0
-                last = 0.0
-                while True:
-                    b = r.read(8 << 20)
-                    if not b:
-                        break
-                    f.write(b)
-                    have += len(b)
-                    if time.time() - last > 2:
-                        last = time.time()
-                        size = f"{have / 1e9:6.2f} / {total / 1e9:.2f} GB ({100 * have / total:.0f}%)" if total \
-                            else f"{have / 1e6:7.1f} MB"
-                        print(f"\r  {what or dst.name}: {size}   ", end="", flush=True)
-            print()
-            if not total or have >= total:
-                break
-        except OSError as e:
-            print()
-            warn(f"download interrupted ({e}); retrying in 10 s ...")
-            time.sleep(10)
+    label = what or dst.name
+    conns = dl_connections()
+    if not (total >= DL_MIN_PARALLEL and conns > 1 and parallel_download(url, part, total, label, conns, dst.name)):
+        download_single(url, part, total, label)
     if total and part.stat().st_size != total:
         fail(f"could not finish downloading {dst.name}: {part.stat().st_size:,} bytes on disk, the server says {total:,}",
              "check your internet connection and run it again (the download resumes where it stopped)")
