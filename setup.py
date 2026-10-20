@@ -880,6 +880,8 @@ def name_config(default: Path, a) -> Path:
 
 def run(cmd, cwd=None, env=None, check=True, quiet=False):
     say("  > " + " ".join(str(c) for c in cmd))
+    env = dict(os.environ if env is None else env)
+    env.setdefault("STRATA_EXIT_WITH_PARENT", "1")     # tools/mtp_fetch.py ends when setup ends (#3257: a cancel left it writing)
     r = subprocess.run([str(c) for c in cmd], cwd=cwd, env=env,
                        stdout=subprocess.PIPE if quiet else None, stderr=subprocess.STDOUT if quiet else None,
                        text=True)
@@ -888,6 +890,25 @@ def run(cmd, cwd=None, env=None, check=True, quiet=False):
             say(r.stdout[-4000:])
         fail(f"command failed (exit {r.returncode}): {Path(str(cmd[0])).name}")
     return r
+
+
+def fetch_mtp(mtp: Path, env: dict, tries: int = 3):
+    """The ~5 GB of MTP tensors (tools/mtp_fetch.py).  A timeout or a dropped connection stops one run, not the install (#3214 #3193):
+    it is run again, and each run continues where the last one stopped.  The progress lines it prints are what the app shows."""
+    cmd = [sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)]
+    env = {**env, "STRATA_SOURCE": model_source()}
+    for n in range(1, tries + 1):
+        r = run(cmd, env=env, check=False)
+        rc = 0 if r is None else r.returncode              # (a test double answers None)
+        if rc == 0:
+            return
+        if n < tries:
+            warn(f"the draft layer's download stopped (exit {rc}); trying again, it continues where it stopped "
+                 f"({n + 1} of {tries})")
+            time.sleep(5)
+    fail(f"the draft layer's download keeps stopping (exit {rc}): the connection to Hugging Face is slow or drops",
+         "run setup again - what is downloaded is kept. If it still stops, set STRATA_SOURCE=modelscope (setup --source modelscope) "
+         "to read the same files from ModelScope")
 
 
 def out(cmd):
@@ -6611,8 +6632,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
             say("  The MTP draft layer (it lets the model write several tokens a step) comes from the original Qwen")
             say("  checkpoint: only its ~5 GB of MTP tensors are downloaded.")
             env = dict(os.environ, STRATA_GGUF_PY=str(get_llama_cpp() / "gguf-py"))
-            run([sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)],
-                env={**env, "STRATA_SOURCE": model_source()})
+            fetch_mtp(mtp, env)                                             # run again where it stopped (#3214)
             run([sys.executable, str(ROOT / "tools" / "mtp_pack.py"), "--src", str(mtp), "--experts", "q2_0",
                  "--out", str(draft)], env=env)
         ok(f"MTP draft layer: {draft}")
@@ -7996,7 +8016,7 @@ def main() -> int:
     if low_ram and not ready and not (pack / "experts.bin").exists():
         say(f"  Writing the experts into one file for the low-RAM mode (one time, {MODELS[model]['arena_gb']:.0f} GB) ...")
         run([sys.executable, str(ROOT / "tools" / "iq_pack.py"), "--gguf", str(shards[0]), "--out", str(pack),
-             "--experts-bin"], env=env)
+             "--experts-bin", *fam.get("pack_args", [])], env=env)       # #3193: Gyro needs --compat-bf16 here too
     ok(f"model prepared: {pack}")
     mtp = (find_in(roots, "mtp/rt/experts.bin") or data / "mtp/rt/experts.bin").parent.parent
     rt = mtp / "rt"
@@ -8017,8 +8037,7 @@ def main() -> int:
         if corrupt or not (rt / "experts.bin").exists():
             say("  The MTP draft layer (speculative decoding, ~2x faster output) comes from the original Qwen checkpoint:")
             say("  only its ~5 GB of MTP tensors are downloaded.")
-            run([sys.executable, str(ROOT / "tools" / "mtp_fetch.py"), "fetch", "--out", str(mtp)],
-                env={**env, "STRATA_SOURCE": model_source()})
+            fetch_mtp(mtp, env)                                             # run again where it stopped (#3214)
             run([sys.executable, str(ROOT / "tools" / "mtp_pack.py"), "--src", str(mtp), "--experts", "q2_0",
                  "--out", str(mtp / "mtp-q2_0.gguf")], env=env)
             run([sys.executable, str(ROOT / "tools" / "mtp_rt.py"), "--gguf", str(mtp / "mtp-q2_0.gguf"), "--out", str(rt)],

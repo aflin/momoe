@@ -130,7 +130,7 @@ def _final(url):
     return hit[0] if hit and hit[1] > time.monotonic() else url
 
 
-def get(url, start=None, end=None, retries=4):
+def get(url, start=None, end=None, retries=6):
     for attempt in range(retries):
         try:
             used = _final(url)
@@ -153,8 +153,88 @@ def get(url, start=None, end=None, retries=4):
                 _cdn.pop(url, None)
             if attempt == retries - 1:
                 raise
-            time.sleep(2 ** attempt)
+            time.sleep(min(2 ** attempt, 16))
             print("retry %s: %s" % (url, e), file=sys.stderr)
+
+
+class Progress:
+    """One line a couple of seconds, `MTP draft layer: 1.23 / 5.04 GB (24%)`: the form of setup's own download line, so the app's
+    progress parser (tools/strata_mcp.py install_progress) shows it.  `done` counts what an earlier run already has."""
+    LABEL = "MTP draft layer"
+
+    def __init__(self, total, done=0, every=2.0, out=None):
+        self.total, self.done, self.every, self.out = total, done, every, out or sys.stderr
+        self.last = 0.0
+        self.lock = threading.Lock()
+
+    def add(self, n):
+        with self.lock:
+            self.done += n
+            self.show()
+
+    def show(self, force=False):
+        now = time.monotonic()
+        if not force and now - self.last < self.every:
+            return
+        self.last = now
+        if self.total > 0:
+            done = max(0, min(self.done, self.total))
+            print("  %s: %6.2f / %.2f GB (%d%%)" % (self.LABEL, done / 1e9, self.total / 1e9, 100 * done // self.total),
+                  file=self.out, flush=True)
+
+
+def lock_folder(out, wait=900.0):
+    """Only one fetch writes a folder: a second one (a retry while the first still runs, #3257) waits for the first and then finds
+    its tensors done.  Returns the open lock file (keep it open), or exits when the first does not end in `wait` seconds."""
+    os.makedirs(out, exist_ok=True)
+    f = open(os.path.join(out, ".mtp_fetch.lock"), "a+b")
+    end = time.monotonic() + wait
+    told = False
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except OSError:
+            if time.monotonic() > end:
+                sys.exit("another MTP download is still writing %s: wait for it or end it (Task Manager: python.exe), then try again" % out)
+            if not told:
+                print("another MTP download is writing %s: waiting for it to end" % out, file=sys.stderr, flush=True)
+                told = True
+            time.sleep(2)
+
+
+def exit_with_parent():
+    """STRATA_EXIT_WITH_PARENT=1 (set by setup.py for the tools it runs): end when the process that started this one ends, so a cancelled
+    or killed setup does not leave a download running on its own (#3257: taskkill /T does not reach a grandchild whose parent is gone)."""
+    if (os.environ.get("STRATA_EXIT_WITH_PARENT") or "").strip() != "1":
+        return
+    parent = os.getppid()
+    if parent <= 1:
+        return
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
+        h = k32.OpenProcess(0x00100000, False, parent)       # SYNCHRONIZE: a handle keeps the answer true if the id is reused
+        if not h:
+            return                                           # no access (or already gone): nothing to watch
+        gone = lambda: k32.WaitForSingleObject(h, 0) == 0
+    else:
+        gone = lambda: os.getppid() != parent
+
+    def watch():
+        while not gone():
+            time.sleep(1.5)
+        print("the process that started this download has ended: stopping", file=sys.stderr, flush=True)
+        os._exit(1)
+    threading.Thread(target=watch, daemon=True).start()
 
 
 def connections():
@@ -294,36 +374,59 @@ def fetch(out, only):
     manifest = []
     workers = connections()
     chunk = (16 if workers > 1 else 64) << 20
-    for r in rows:
-        if only and only not in r["name"]:
-            continue
+    todo = [r for r in rows if not only or only in r["name"]]
+    have_all = 0
+    for r in todo:
+        tp = os.path.join(tdir, r["name"] + ".bin")
+        if os.path.exists(tp):
+            have_all += min(os.path.getsize(tp), r["bytes"])
+    progress = Progress(sum(r["bytes"] for r in todo), have_all)
+    progress.show(force=True)
+    for r in todo:
         path = os.path.join(tdir, r["name"] + ".bin")
         want = SHA256.get(r["name"]) if pinned() else None
         if os.path.exists(path) and not same and (
                 want is None or os.path.getsize(path) != r["bytes"] or sha256_of(path) != want):
             os.remove(path)
-        for attempt in range(2):
+        attempt, net_fails = 0, 0
+        while attempt < 2:
             have = os.path.getsize(path) if os.path.exists(path) else 0
             if have > r["bytes"]:
                 os.remove(path)
                 have = 0
-            with open(path, "ab") as f:
-                pos = r["start"] + have
-                for data in ranged(REPO + r["shard"], pos, r["end"], chunk, workers):
-                    f.write(data)
-                    pos += len(data)
-                    print("%s %.0f%%" % (r["name"], 100 * (pos - r["start"]) / r["bytes"]), file=sys.stderr)
+            try:
+                with open(path, "ab") as f:
+                    pos = r["start"] + have
+                    for data in ranged(REPO + r["shard"], pos, r["end"], chunk, workers):
+                        f.write(data)
+                        pos += len(data)
+                        progress.add(len(data))
+            except (OSError, urllib.error.URLError) as e:
+                # #3214: a timeout or a dropped connection mid-tensor ends only this try: what was written stays, the next try
+                # continues after it with fewer connections (a link that drops 16 at once often holds 4)
+                net_fails += 1
+                if net_fails > 3:
+                    sys.exit("%s: the download keeps failing (%s). Check the connection and try again - what is downloaded is kept; "
+                             "if Hugging Face is slow to reach, `--source modelscope` reads the same files elsewhere" % (r["name"], e))
+                workers = max(4, workers // 2)
+                print("%s: %s - continuing with %d connections (try %d)" % (r["name"], e, workers, net_fails + 1), file=sys.stderr, flush=True)
+                time.sleep(min(5 * net_fails, 20))
+                continue
             if os.path.getsize(path) != r["bytes"]:
                 sys.exit("%s: size %d != %d" % (path, os.path.getsize(path), r["bytes"]))
             digest = sha256_of(path)
             if want is None or digest == want:
                 break
+            progress.done -= os.path.getsize(path)
             os.remove(path)                         # wrong bytes (#327): the whole tensor again, once
-            if attempt:
+            attempt += 1
+            if attempt > 1:
                 sys.exit("%s: sha256 %s is not the checkpoint's %s - the download source sends wrong data (a mirror "
                          "that ignores Range requests?)" % (r["name"], digest, want))
             print("%s: wrong bytes (sha256 %s...), fetching it again" % (r["name"], digest[:12]), file=sys.stderr)
         manifest.append(dict(r, file=os.path.relpath(path, out), sha256=digest))
+        print("%s done" % r["name"], file=sys.stderr, flush=True)
+    progress.show(force=True)
     with open(os.path.join(out, "mtp-manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=1)
 
@@ -372,8 +475,12 @@ def main():
         for name in bad:
             print("MTP tensor missing or corrupt: %s" % name, file=sys.stderr)
         sys.exit(BAD if bad else 0)
+    exit_with_parent()
+    lock = lock_folder(a.out) if a.cmd == "fetch" else None
     resolve_repo()
     inventory(a.out) if a.cmd == "inventory" else fetch(a.out, a.only)
+    if lock:
+        lock.close()
 
 
 if __name__ == "__main__":

@@ -278,5 +278,107 @@ class Setup(unittest.TestCase):
                     self.assertIn("verify", run.call_args[0][0])
 
 
+
+
+class Progress(FetchCase):
+    """#3257: the fetch says how far it is in the form of setup's own download line, so the app can show it."""
+
+    def test_progress_lines_name_the_whole_download_and_end_at_100(self):
+        err = self.fetch(Mirror())
+        lines = [x for x in err.splitlines() if "MTP draft layer:" in x]
+        total = len(A) + len(B)
+        self.assertTrue(lines)
+        self.assertIn("/ %.2f GB" % (total / 1e9), lines[-1])
+        self.assertIn("(100%)", lines[-1])
+        import re
+        for x in lines:                                  # the shape tools/strata_mcp.py install_progress reads
+            self.assertTrue(re.match(r"\s*(\S.*?): +([\d.]+) / ([\d.]+) GB \((\d+)%\)", x), x)
+
+    def test_a_resumed_fetch_starts_from_what_is_already_there(self):
+        self.fetch(Mirror())
+        err = self.fetch(Mirror())
+        self.assertIn("(100%)", [x for x in err.splitlines() if "MTP draft layer:" in x][0])
+
+    def test_the_progress_figure_follows_the_job_in_strata_mcp(self):
+        import strata_mcp as MCP
+        got = MCP.install_progress(["=== Step 6: preparing the model for Strata ===",
+                                    "  MTP draft layer:   1.23 / 5.04 GB (24%)"])
+        self.assertEqual(got["download"], {"file": "MTP draft layer", "done_gb": 1.23, "total_gb": 5.04, "percent": 24})
+
+
+class Flaky(FetchCase):
+    def test_a_connection_that_drops_mid_tensor_does_not_end_the_run(self):
+        """#3214: every range of the tensor fails past get()'s own retries once: the tensor is tried again (fewer connections)."""
+        honest, fails = Mirror(), [0]
+
+        def mirror(req, timeout=None):
+            if req.get_header("Range") and req.full_url.endswith("model-2.safetensors") and fails[0] < 12:
+                a, b = map(int, req.get_header("Range").split("=")[1].split("-"))
+                if (a, b) == Mirror.span("model-2.safetensors", "mtp.b"):
+                    fails[0] += 1
+                    raise IOError("timed out")
+            return honest(req, timeout)
+
+        err = self.fetch(mirror)
+        self.assertEqual(self.tensor("mtp.b"), B)
+        self.assertIn("continuing with", err)
+
+    def test_a_link_that_never_works_ends_with_a_plain_sentence(self):
+        def mirror(req, timeout=None):
+            if req.get_header("Range") and req.full_url.endswith("model-2.safetensors"):
+                a, b = map(int, req.get_header("Range").split("=")[1].split("-"))
+                if (a, b) == Mirror.span("model-2.safetensors", "mtp.b"):
+                    raise IOError("timed out")
+            return Mirror()(req, timeout)
+
+        with self.assertRaisesRegex(SystemExit, "keeps failing"):
+            self.fetch(mirror)
+
+
+class OneAtATime(unittest.TestCase):
+    def test_a_second_fetch_in_the_same_folder_waits_for_the_first(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = M.lock_folder(d)
+            told = io.StringIO()
+            with mock.patch.object(M.time, "sleep", lambda s: None), contextlib.redirect_stderr(told), \
+                    self.assertRaisesRegex(SystemExit, "another MTP download"):
+                M.lock_folder(d, wait=0.0)
+            first.close()
+            M.lock_folder(d).close()                     # free again once the first ends
+
+    def test_a_download_ends_with_the_process_that_started_it(self):
+        """#3257: setup killed, its child must not go on: a grandchild whose parent is gone."""
+        import subprocess
+        import time
+        child_code = ("import sys,time; sys.path.insert(0, %r); import mtp_fetch as M; M.exit_with_parent(); "
+                      "print('up', flush=True); time.sleep(60)" % str(ROOT / "tools"))
+        parent_code = ("import subprocess,sys,os; env=dict(os.environ, STRATA_EXIT_WITH_PARENT='1'); "
+                       "p=subprocess.Popen([sys.executable,'-c',%r], env=env, stdout=subprocess.PIPE, text=True); "
+                       "print(p.pid, flush=True); p.stdout.readline(); print('ready', flush=True); sys.stdout.flush(); os._exit(0)" % child_code)
+        r = subprocess.Popen([sys.executable, "-c", parent_code], stdout=subprocess.PIPE, text=True)
+        pid = int(r.stdout.readline())
+        r.stdout.readline()
+        r.wait(30)
+        end = time.time() + 15
+        alive = True
+        while time.time() < end and alive:
+            time.sleep(0.5)
+            if os.name == "nt":
+                out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid], capture_output=True, text=True).stdout
+                alive = str(pid) in out
+            else:
+                try:
+                    os.kill(pid, 0)
+                    alive = True
+                except OSError:
+                    alive = False
+        if alive:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+            else:
+                os.kill(pid, 9)
+        self.assertFalse(alive, "the download kept running after its parent ended")
+
+
 if __name__ == "__main__":
     unittest.main()
