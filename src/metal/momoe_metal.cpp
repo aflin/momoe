@@ -2730,7 +2730,9 @@ static ggml_tensor * delta_net_layer(Engine & e, ggml_context * c, ggml_cgraph *
                                      ggml_row_size(r->type, (int64_t) hv * nv * T), 0);
     ggml_tensor * ns = ggml_view_4d(c, r, hv, hv, nv, 1, ggml_row_size(r->type, hv), ggml_row_size(r->type, (int64_t) hv * hv),
                                     ggml_row_size(r->type, (int64_t) hv * hv * nv), ggml_row_size(r->type, (int64_t) hv * nv * T));
-    ggml_build_forward_expand(gf, ggml_cpy(c, ns, s));
+    // into the state as one row [hv*hv*nv]: the shape ggml-metal's GATED_DELTA_NET + CPY fusion takes (the kernel then
+    // writes the state in place, no copy after it)
+    ggml_build_forward_expand(gf, ggml_cpy(c, ns, ggml_reshape_4d(c, L.ssm_state, (int64_t) hv * hv * nv, 1, 1, 1)));
     if (snap) {                                              // every token's state, most recent first
         const int64_t D = (int64_t) hv * hv * nv;
         ggml_tensor * all = ggml_view_2d(c, r, D, T, ggml_row_size(r->type, D), ggml_row_size(r->type, (int64_t) hv * nv * T));
@@ -2866,6 +2868,7 @@ static ggml_tensor * moe_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, i
     ggml_tensor * probs = ggml_soft_max(c, lg);                                         // [n_expert, T]
     const bool masked = !ns_paused(e, il);
     ggml_tensor * top = nullptr, * ids = nullptr, * w = nullptr;
+    bool direct = false;                                     // the choice straight to the experts (below)
     if (!masked) {
         // llama.cpp's order, so that the backends fuse the routing as there (CUDA's and Metal's topk-moe kernels): the
         // choice and its normalized weights first, then the next layers' predicted experts (see below) beside it
@@ -2875,18 +2878,31 @@ static ggml_tensor * moe_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, i
         w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
         w = ggml_reshape_3d(c, w, 1, m.n_used, T);
         ggml_build_forward_expand(gf, w);
-        top = ggml_cont(c, chosen);
-        for (int j = 1; j <= 2; ++j) {
-            ggml_tensor * in = j == 1 ? pred_in : pred_in2;
-            if (!in) continue;
-            ggml_tensor * pl = ggml_soft_max(c, ggml_mul_mat(c, m.layers[il + j].gate_inp, in));
-            top = ggml_concat(c, top, ggml_cont(c, ggml_argsort_top_k(c, pl, m.n_used)), 1);
+        // every expert in its slot and nothing reading the choice on the CPU (no pause, no callback): the view itself,
+        // as llama.cpp passes it, and the layer's experts as a view of the pool (no copy of the choice, no slot lookup:
+        // two small kernels a layer, 80 a token for Qwen3.6). MOMOE_NO_DIRECT=1: as before. (With more than 8 experts a
+        // token, ggml-metal sums them in a different order then: the same tokens, probabilities a little apart)
+        // (momoe-metal only: on momoe-cuda, with its CUDA graphs, it measured no faster, and its tokens parted)
+        static const bool force_cb = getenv("MOMOE_FORCE_CB") != nullptr || getenv("MOMOE_NO_DIRECT") != nullptr;
+        direct = !kHostMem ? false : e.preloaded && !e.pause && !e.ns_graph && !e.hybrid && !e.helper && !debug_on() && !force_cb && !pred_in
+                 && !pred_in2;
+        if (direct) {
+            ids = chosen;
+            e.topk[il] = nullptr;
+        } else {
+            top = ggml_cont(c, chosen);
+            for (int j = 1; j <= 2; ++j) {
+                ggml_tensor * in = j == 1 ? pred_in : pred_in2;
+                if (!in) continue;
+                ggml_tensor * pl = ggml_soft_max(c, ggml_mul_mat(c, m.layers[il + j].gate_inp, in));
+                top = ggml_concat(c, top, ggml_cont(c, ggml_argsort_top_k(c, pl, m.n_used)), 1);
+            }
+            ggml_format_name(top, "topk-%d", il);                // made resident here: a pause point (or the callback)
+            if (e.ns_graph) ggml_set_output(top);
+            e.topk[il] = top;
+            ggml_build_forward_expand(gf, top);
+            ids = pred_in ? ggml_view_2d(c, top, m.n_used, T, top->nb[1], 0) : top;       // [n_used, T]
         }
-        ggml_format_name(top, "topk-%d", il);                // made resident here: a pause point (or the callback)
-        if (e.ns_graph) ggml_set_output(top);
-        e.topk[il] = top;
-        ggml_build_forward_expand(gf, top);
-        ids = pred_in ? ggml_view_2d(c, top, m.n_used, T, top->nb[1], 0) : top;       // [n_used, T]
     } else {
         // --nostall: the next layer's router on this layer's hidden state predicts its experts: computed in the same
         // top-k, so the pause has both (the prediction is read while the GPU goes on) (and the one after it, on the
@@ -2918,11 +2934,14 @@ static ggml_tensor * moe_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, i
         w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
         w = ggml_reshape_3d(c, w, 1, m.n_used, T);
     }
-    ggml_tensor * slots = ggml_get_rows(c, L.slot_map, ggml_reshape_1d(c, ids, (int64_t) m.n_used * T));
-    slots = ggml_reshape_2d(c, slots, m.n_used, T);                                     // [n_used, T]
     ggml_tensor * x3 = ggml_reshape_3d(c, x, m.n_embd, 1, T);
     Group & G = e.pool.g[L.grp];
-    const bool big = staged(m.n_used, G.n_slots, T);         // the staging copy, by expert number (see STAGE_MIN_TOKENS)
+    const bool big = staged(m.n_used, G.n_slots, T) || direct;   // the staging copy, by expert number (see
+    ggml_tensor * slots = nullptr;                           // STAGE_MIN_TOKENS), or the layer's experts in a row
+    if (!big) {
+        slots = ggml_get_rows(c, L.slot_map, ggml_reshape_1d(c, ids, (int64_t) m.n_used * T));
+        slots = ggml_reshape_2d(c, slots, m.n_used, T);                                 // [n_used, T]
+    }
     ggml_tensor ** as = big ? G.stage : G.t;
     ggml_tensor * layer_t[3];
     if (big && e.preloaded) {                                // no pauses fill the staging copy: the layer's experts are
@@ -3346,7 +3365,7 @@ static ggml_tensor * glm_kda_layer(Engine & e, ggml_context * c, ggml_cgraph * g
                                      ggml_row_size(r->type, hd * nh * T), 0);
     ggml_tensor * ns = ggml_view_4d(c, r, hd, hd, nh, 1, ggml_row_size(r->type, hd), ggml_row_size(r->type, hd * hd),
                                     ggml_row_size(r->type, hd * hd * nh), ggml_row_size(r->type, hd * nh * T));
-    ggml_build_forward_expand(gf, ggml_cpy(c, ns, s));
+    ggml_build_forward_expand(gf, ggml_cpy(c, ns, ggml_reshape_4d(c, L.ssm_state, (int64_t) hd * hd * nh, 1, 1, 1)));   // (as above)
     ggml_tensor * g2 = ggml_reshape_3d(c, ggml_mul_mat(c, L.ssm_g_b, ggml_mul_mat(c, L.ssm_g_a, x)), hd, nh, T);
     ggml_tensor * o = norm(c, ggml_reshape_3d(c, ggml_cont(c, out), hd, nh, T), L.ssm_norm, m.rms_eps);
     o = ggml_cont_2d(c, ggml_mul(c, o, ggml_sigmoid(c, g2)), di, T);
