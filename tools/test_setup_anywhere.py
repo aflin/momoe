@@ -305,6 +305,17 @@ class MacDraft(unittest.TestCase):
         self.assertIn("--pool-gib", args)
         self.assertNotIn("--mtp", args)
 
+    def test_glm_drafts_only_from_a_big_enough_pool(self):
+        # GLM-5.3-Flash on the M4 Air (a 9 GiB pool, 9% of its experts): 1.4 tok/s without drafting, 1.0-1.1 with; on
+        # the M1 Ultra (29 GiB, 28%) it keeps --mtp 3
+        w = (102.32, 9.77)
+        args, _, _ = self.run_setup("glm53", True, mem=32, weights=w, avail=23.0)
+        self.assertIn("--pool-gib", args)
+        self.assertNotIn("--mtp", args)
+        args, _, _ = self.run_setup("glm53", True, mem=64, weights=w, avail=57.0)
+        self.assertGreaterEqual(int(args[args.index("--pool-gib") + 1]), 16)
+        self.assertEqual(args[args.index("--mtp") + 1], "3")
+
     def test_own_mtp_fetches_nothing(self):
         args, ran, _ = self.run_setup("ornith", False)
         self.assertEqual(ran, [])

@@ -1700,13 +1700,13 @@ static bool debug_on() { static int on = getenv("MOMOE_DEBUG") ? 1 : 0; return o
 static bool mb_on(const Engine & e) { return e.mailbox && (e.m.nemo || e.hyb_active); }
 #endif
 
-static int take_slot(Pool & P, Group & G, uint64_t floor) {
+static int take_slot(Pool & P, Group & G, uint64_t floor, bool spare_predictions = true) {
     int best = -1;
     auto f = [&](int i) { return G.owner[i] >= 0 ? P.freq[G.owner[i]] : 0u; };
     for (int i = 0; i < G.n_slots; ++i) {
         if (G.used[i] >= floor || G.left[i].load(std::memory_order_relaxed) != 0) continue;
-        if (G.by_prefetch[i] && G.used[i] + 12 > P.clock) continue;   // a prediction waiting for its layer (a clock
-                                                                         // tick per pause and per prediction: ~3 a layer)
+        // a prediction waiting for its layer (a clock tick per pause and per prediction: ~3 a layer)
+        if (spare_predictions && G.by_prefetch[i] && G.used[i] + 12 > P.clock) continue;
         if (best < 0) { best = i; continue; }
         if (P.lfu ? (f(i) < f(best) || (f(i) == f(best) && G.used[i] < G.used[best])) : G.used[i] < G.used[best]) best = i;
     }
@@ -1889,6 +1889,9 @@ static void make_resident(Engine & e, int il, const int32_t * ids, int n_tok) {
                 std::this_thread::sleep_for(std::chrono::microseconds(20));
                 slot = take_slot(P, G, pin);
             }
+            // every other slot a prediction for a later layer: a miss outranks a guess (Nemotron Bolt on the M4 Air, a
+            // 14 GiB pool: a 282-slot format group held only predictions, and the engine stopped)
+            if (slot < 0 && !stage) slot = take_slot(P, G, pin, false);
             if (hp && slot >= 0) {                           // the expert it evicts: down to the helper (read in the
                 const int old = G.owner[slot];               // background; the helper's own least used goes)
                 if (old >= 0 && H.slot_of[old] < 0) {
@@ -4485,8 +4488,13 @@ static int forward_once(Engine & e, const int32_t * toks, int T, int p0, Out * o
             ++e.pool.calls;
             const int32_t * top = (const int32_t *) e.topk[il]->data;
             make_resident(e, il, top, T);
+            // the predicted layers: the next two; nemo: the next MoE block only (the layers between have no experts:
+            // predictions filed under il + 1 were never used, and filled a 282-slot group on the M4 Air)
+            const int nx1 = m.nemo ? m.layers[il].next_moe : il + 1 < m.n_layer ? il + 1 : -1;
+            const int nx2 = !m.nemo && il + 2 < m.n_layer ? il + 2 : -1;
+            const bool p1 = e.predict && nx1 >= 0, p2 = p1 && e.predict2 && nx2 >= 0;
             // the predictions are copied before the GPU goes on: after it, the allocator reuses this tensor's memory
-            const size_t n_pred = (size_t) m.n_used * T * ((e.predict && il + 1 < m.n_layer) + (e.predict2 && il + 2 < m.n_layer));
+            const size_t n_pred = (size_t) m.n_used * T * (p1 + p2);
             e.pred_host.assign(top + (size_t) m.n_used * T, top + (size_t) m.n_used * T + n_pred);
             if (e.ns_graph) {
                 // the layers since the last pause (computed by now): their wanted experts read; the predictions; then
@@ -4495,15 +4503,15 @@ static int forward_once(Engine & e, const int32_t * toks, int T, int p0, Out * o
                 for (; done < il; ++done)
                     if (!ns_paused(e, done)) ns_layer(e, done, T);
                 done = il + 1;
-                if (e.predict && il + 1 < m.n_layer) prefetch(e, il + 1, e.pred_host.data(), T);
-                if (e.predict2 && il + 2 < m.n_layer) prefetch(e, il + 2, e.pred_host.data() + (size_t) m.n_used * T, T);
+                if (p1) prefetch(e, nx1, e.pred_host.data(), T);
+                if (p2) prefetch(e, nx2, e.pred_host.data() + (size_t) m.n_used * T, T);
                 ns_publish(e, il + 1);
             }
             e.pool.cb_s += now_s() - t0;
             ggml_backend_metal_pause_release(e.metal, at + 1);
             if (!e.ns_graph) {
-                if (e.predict && il + 1 < m.n_layer) prefetch(e, il + 1, e.pred_host.data(), T);
-                if (e.predict2 && il + 2 < m.n_layer) prefetch(e, il + 2, e.pred_host.data() + (size_t) m.n_used * T, T);
+                if (p1) prefetch(e, nx1, e.pred_host.data(), T);
+                if (p2) prefetch(e, nx2, e.pred_host.data() + (size_t) m.n_used * T, T);
             }
             at += 2;
         }

@@ -6770,7 +6770,14 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         # -> 33.2 tok/s, the M1 Ultra with a 36 of 38.8 GiB pool 16.4 -> 19.8); from the SSD (the M4 Air, 11 GiB) or
         # with the CPU computing the experts (a 12 GB card) it is slower: 4.1-4.5 -> 4.0, 19.1 -> 12.5
         args += fam["draft_args"]
-    args += fam.get("engine_args", [])
+    eargs = list(fam.get("engine_args", []))
+    if mac and pool is not None and "--mtp" in eargs and pool < 0.15 * w[0]:
+        # a family's own drafting from a pool this small: every failed draft reads more from the SSD (GLM-5.3-Flash on
+        # the M4 Air, a 9% pool: 1.4 tok/s without, 1.0-1.1 with --mtp 3 (and with the 9 GiB pool, Metal out of memory)
+        i = eargs.index("--mtp")
+        del eargs[i:i + 2]
+        ok("no drafting: the pool holds too few of the experts for it to pay here")
+    args += eargs
     cfg_name = "ornith-mac" if mac and q == MAC_MODEL else tag   # (Ornith's Mac config keeps its first name)
     cfg_path = name_config(config_path_for(a.config_name, tag) if a.config_name else
                            config_dir() / f"{cfg_name.lower()}.json", a)
