@@ -208,8 +208,9 @@ Ornith-122B and the M4 Air column 2026-10-21, see [its results](bench/results/20
   UD-IQ4_XS: 19.0 drafting from 36 GiB, 12.4 without from 39). Unsloth's Flash-Next and GLM on the M1 Ultra: 2026-10-19
   (an expert pool: no graphs kept). The files larger than Metal's working set (48 GiB on the M1 Ultra) were not run in
   llama.cpp: that took a MacBook down. The 8 GB-Mac rows: setup's 8 GB config (a 3 GiB pool, 16K context; setup run with
-  `MOMOE_MAC_MEMORY_GIB=8`), with 10 GiB locked away and about 5 GB left free beside macOS and the open programs; with all 32 GB the same runs wrote 43.3 and 12.0 tok/s (14.8 for the 24B before; the same with the
-  wait-for-event thread off). It does not simulate an 8 GB Mac's smaller Metal limit.
+  `MOMOE_MAC_MEMORY_GIB=8`), with 10 GiB locked away and about 5 GB left free beside macOS and the open programs; with
+  all 32 GB the same runs wrote 43.3 and 12.0 tok/s (14.8 for the 24B before; the same with the wait-for-event thread
+  off). It does not simulate an 8 GB Mac's smaller Metal limit.
 - **Before today:** Ornith on the M4 Air, its 16 GB simulation and llama.cpp beside them are in [design/mac-port.md](design/mac-port.md).
 
 ### Two cards: layer split and helper tier
