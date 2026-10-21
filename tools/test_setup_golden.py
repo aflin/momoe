@@ -86,7 +86,7 @@ def install(ram, found, argv, answers=None, extra=(), avx512=False, configs=()):
                 return next((v for k, v in answers.items() if k in prompt), "")
             return answers
 
-        def fake_download(url, dst, what=None):
+        def fake_download(url, dst, what=None, pin=None):
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(b"")
             setup.mark(dst)

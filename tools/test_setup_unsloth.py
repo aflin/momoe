@@ -165,7 +165,7 @@ class Base(unittest.TestCase):
         found = [{"index": i, "name": "NVIDIA GeForce RTX 5070", "vram_gb": vram, "arch": "120", "driver": "580.97"}
                  for i in range(n_gpus)]
 
-        def fake_download(url, dst, what=None):
+        def fake_download(url, dst, what=None, pin=None):
             self.downloads.append(url)
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(b"")

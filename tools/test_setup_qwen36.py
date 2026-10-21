@@ -205,7 +205,7 @@ class Base(unittest.TestCase):
         for old in self.t.glob("config/strata-*.json"):                          # this run's config only
             old.unlink()
 
-        def fake_download(url, dst, what=None):
+        def fake_download(url, dst, what=None, pin=None):
             self.downloads.append(url)
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(b"")
