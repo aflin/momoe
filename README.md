@@ -87,16 +87,16 @@ tokens are within a few hundredths of each other, which was checked); and the se
 | Model, size | PC | Spark | Jetson | M1 Ultra | M4 Air |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Qwen3.8-Flash-Next IQ3_XXS | 57.9* | 35.5 | - | 38.2 | 7.9* |
-| Flash-Next Coder IQ1_M | 54.8* | 33.3 | - | 48.9* | - |
-| Swift 1.5 IQ3_XXS | 63.4* | 34.6 | - | 37.9 | - |
-| Flash-Next (Unsloth) UD-IQ4_XS | 12.4* | 30.2 | - | 19.0* | - |
-| Qwen3.6-35B-A3B (Unsloth) UD-IQ4_XS | 158.7* | 125.2* | - | 129.3* | - |
-| Qwen3.6-35B-A3B (bartowski) IQ4_XS | 157.5* | 123.6* | - | 117.1* | - |
+| Flash-Next Coder IQ1_M | 54.8* | 33.3 | - | 48.9* | 12.4* |
+| Swift 1.5 IQ3_XXS | 63.4* | 34.6 | - | 37.9 | 11.4* (IQ2_XS) |
+| Flash-Next (Unsloth) UD-IQ4_XS | 12.4* | 30.2 | - | 19.0* | 6.1* |
+| Qwen3.6-35B-A3B (Unsloth) UD-IQ4_XS | 158.7* | 125.2* | - | 129.3* | 56.5* |
+| Qwen3.6-35B-A3B (bartowski) IQ4_XS | 157.5* | 123.6* | - | 117.1* | 60.2* |
 | Ornith-1.5-35B-A3B IQ4_XS | 128.8* | 104.1* | - | 92.7* | 31.2* (as a 16 GB Mac, earlier: 9.7-13.1) |
-| KAT-Coder-V2.5-Dev i-quality-v2 | 126.2* | 99.4* | - | 104.9* | - |
-| Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 | 28.4 | - | 37.5 (UD-Q3_K_XL) | - |
+| KAT-Coder-V2.5-Dev i-quality-v2 | 126.2* | 99.4* | - | 104.9* | 41.1* |
+| Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 | 28.4 | - | 37.5 (UD-Q3_K_XL) | 8.6 |
 | Ornith-1.5-122B-A10B UD-IQ3_XXS | 19.2 | 33.2* | - | 19.8* | 4.5 |
-| GLM-5.3-Flash UD-IQ3_XXS | does not fit a 12 GB card | 19.7* | - | 4.5* | - |
+| GLM-5.3-Flash UD-IQ3_XXS | does not fit a 12 GB card | 19.7* | - | 4.5* | 1.4 |
 | LFM2.5-24B-A2B | 75.9 (UD-Q4_K_XL) | 134.0 | 6.9 | 104.3 | 11.9 (as an 8 GB Mac) |
 | LFM2.5-8B-A1B UD-Q4_K_XL | 305.5 | 161.7 | 16.6 | 185.3 | 43.1 (as an 8 GB Mac) |
 | Flash-Next NVFP4 | Strata's own packs: a PC with an NVIDIA card only, not tested in MoMoE | | | | |
@@ -112,7 +112,10 @@ against llama.cpp's (64): the same on both Macs and on the Spark with drafting; 
 token 33, a three-way choice where each engine puts the weights differently (llama.cpp 0.53 / 0.28 / 0.19, `momoe-metal`
 0.56 / 0.39 / 0.05, `momoe-cuda` 0.36 / 0.38 / 0.25). Over 300 tokens fed llama.cpp's own, both are as close to it
 (KL from llama.cpp's top 20, mean / median: `momoe-cuda` on the Spark 0.0107 / 0.0006, `momoe-metal` on the M4 Air
-0.0108 / 0.0006; the same top token 98.3% and 99.0%; Ornith-35B: 0.0028 and 0.0030). llama.cpp's numbers: with drafting where marked \* (see below), else without.
+0.0108 / 0.0006; the same top token 98.3% and 99.0%; Ornith-35B: 0.0028 and 0.0030).
+On the M4 Air every model ran from setup's config (sizes, pools and drafting as setup chose them for 32 GB); how each
+was checked against llama.cpp, and every number: [bench/results/2026-10-21-every-model-everywhere](bench/results/2026-10-21-every-model-everywhere/README.md).
+GLM there drafts no tokens: from a pool of 9% of its experts drafting measured slower (1.0-1.1 against 1.4 tok/s). llama.cpp's numbers: with drafting where marked \* (see below), else without.
 
 On the Macs, `momoe-metal` keeps one thread waiting on the CPU's wait-for-event instruction while a request runs.
 Without it, macOS held the engine's main thread on the efficiency cores and the GPU's clock low, at random from run to
