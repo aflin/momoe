@@ -457,6 +457,9 @@ struct CpuExperts {
     const char * up = nullptr, * down = nullptr;             // the layer's up / down tensors in the mapping
     size_t up_bytes = 0, down_bytes = 0, up_row = 0, down_row = 0;
     ggml_type up_type = GGML_TYPE_COUNT, down_type = GGML_TYPE_COUNT;
+    const char * gate = nullptr;                             // qwen35moe: the gate tensor too, h = silu(gate . x) * (up . x)
+    size_t gate_bytes = 0, gate_row = 0;                     // (null: Nemotron's h = relu(up . x)^2)
+    ggml_type gate_type = GGML_TYPE_COUNT;
     int n_in = 0, n_ff = 0, k = 0, T = 0;                    // latent width, expert width, top-k, tokens
     std::vector<Miss> miss;
     std::vector<char> act;                                   // [T] x latent in up's vec_dot_type
@@ -469,6 +472,8 @@ struct CpuExperts {
     int n_uses = 0;
     double busy_s = 0;
     uint64_t experts = 0;
+    double t_launch = 0, prof[5] = {0, 0, 0, 0, 0};          // MOMOE_CPU_PROF: wake, up, to down's format, down, the
+    std::atomic<int> started{0};                             // last thread's finish (thread 0's view)
 
     void start(int n) {
         n_threads = n;
@@ -503,28 +508,43 @@ struct CpuExperts {
         }
     }
     void run(int tid) {
-        (void) tid;
+        static const bool pr = getenv("MOMOE_CPU_PROF") != nullptr;
+        double p0 = 0;
+        if (pr && started.fetch_add(1) == n_threads - 1) prof[0] += now_s() - t_launch;   // the last one awake
+        if (pr && tid == 0) p0 = now_s();
         const auto * tu = ggml_get_type_traits_cpu(up_type), * td = ggml_get_type_traits_cpu(down_type);
         const int RB = 32;                                   // rows per work unit
-        // up: h = relu(up . act)^2, every (expert, row block)
+        // up: h = relu(up . act)^2 (Nemotron) or silu(gate . act) * (up . act) (qwen35moe), every (expert, row block)
+        // (gate and up share their type and so their activation format: llama.cpp's qwen35moe files do)
+        const auto * tg = gate ? ggml_get_type_traits_cpu(gate_type) : nullptr;
         const int ub = (n_ff + RB - 1) / RB, nu = (int) miss.size() * ub;
         for (int u; (u = next.fetch_add(1)) < nu;) {
             const Miss & M = miss[u / ub];
             const int r0 = (u % ub) * RB, r1 = std::min(n_ff, r0 + RB);
             const char * w = up + (size_t) M.x * up_bytes;
+            const char * wg = gate ? gate + (size_t) M.x * gate_bytes : nullptr;
             const int base = use_off[u / ub];
             for (int r = r0; r < r1; ++r)
                 for (size_t j = 0; j < M.uses.size(); ++j) {
+                    const char * a = act.data() + (size_t) M.uses[j].first * act_row;
                     float v;
-                    tu->vec_dot(n_in, &v, 0, w + (size_t) r * up_row, 0, act.data() + (size_t) M.uses[j].first * act_row, 0, 1);
-                    v = v > 0 ? v : 0;
-                    h[(size_t) (base + j) * n_ff + r] = v * v;
+                    tu->vec_dot(n_in, &v, 0, w + (size_t) r * up_row, 0, a, 0, 1);
+                    if (wg) {
+                        float g;
+                        tg->vec_dot(n_in, &g, 0, wg + (size_t) r * gate_row, 0, a, 0, 1);
+                        h[(size_t) (base + j) * n_ff + r] = g / (1.0f + expf(-g)) * v;
+                    } else {
+                        v = v > 0 ? v : 0;
+                        h[(size_t) (base + j) * n_ff + r] = v * v;
+                    }
                 }
         }
         barrier();
+        if (pr && tid == 0) { const double t = now_s(); prof[1] += t - p0; p0 = t; }
         for (int u; (u = next.fetch_add(1)) < n_uses;)      // h in down's activation format
             ggml_get_type_traits_cpu(td->vec_dot_type)->from_float(h.data() + (size_t) u * n_ff, hq.data() + (size_t) u * h_row, n_ff);
         barrier();
+        if (pr && tid == 0) { const double t = now_s(); prof[2] += t - p0; p0 = t; }
         const int db = (n_in + RB - 1) / RB, nd = (int) miss.size() * db;
         for (int u; (u = next.fetch_add(1)) < nd;) {
             const Miss & M = miss[u / db];
@@ -537,6 +557,7 @@ struct CpuExperts {
                 for (int r = r0; r < r1; ++r) td->vec_dot(n_ff, o + r, 0, w + (size_t) r * down_row, 0, a, 0, 1);
             }
         }
+        if (pr && tid == 0) prof[3] += now_s() - p0;
     }
     // the layer's job: x_lat [T][n_in] floats; returns at once (wait() joins)
     void launch(const float * x_lat) {
@@ -554,14 +575,30 @@ struct CpuExperts {
         experts += miss.size();
         next.store(0);
         bar_n.store(0);
+        started.store(0);
+        t_launch = now_s();
         left.store(n_threads);
         { std::lock_guard<std::mutex> lk(mu); ++job; }
         cv.notify_all();
     }
-    void wait() { while (left.load(std::memory_order_acquire) > 0) { } }
+    void wait() {
+        while (left.load(std::memory_order_acquire) > 0) { }
+        static const bool pr = getenv("MOMOE_CPU_PROF") != nullptr;
+        if (pr) prof[4] += now_s() - t_launch;
+    }
 };
 
 static const int HYB_MAX_T = 16;                             // --hybrid: graphs of up to this many tokens (decode)
+
+// Nemotron; qwen35moe unless MOMOE_QWEN_HYBRID=0.  For qwen35moe the CPU path is one of two the engine tries on the first
+// decode tokens and keeps the faster of, measuring again while it runs (forward): on the RTX 4070 Ti + Ryzen 9 5950X it
+// won with Ornith-1.5-122B UD-IQ3_XXS (13% of the experts in the pool: 16.4 tok/s, the copies 10.6) and with
+// Ornith-1.5-35B IQ4_XS (52%: 14.1 ms per token, the copies 15.6)
+static bool hybrid_model(const Model & m) {
+    static const char * q = getenv("MOMOE_QWEN_HYBRID");
+    return m.nemo || (!(q && q[0] == '0') && !m.qwen4 && !m.glm5 && !m.lfm);
+}
+
 
 #if defined(MOMOE_CUDA)
 // momoe-cuda --hybrid with mailboxes (default; MOMOE_NO_MAILBOX=1: the stops of the scheduler's callback instead): a
@@ -610,6 +647,20 @@ struct Engine {
     bool uma = false;                                        // momoe-cuda: an integrated GPU (the DGX Spark): its memory is the RAM
     bool reserve_only = false;                               // forward(): build the graph, reserve its buffers, stop
     bool hybrid = false;                                     // momoe-cuda: missing experts computed on the CPU
+    bool hyb_active = false;                                 // qwen35moe: this graph takes the CPU path (Nemotron: always)
+    bool hyb_done = false;                                   // qwen35moe: the trial has chosen (or MOMOE_QWEN_HYBRID=1 did)
+    bool predict_copy = true;                                // the copy path's read-ahead (the CPU path runs without it)
+    float hyb_frac = 0;                                      // qwen35moe's CPU path: the share of a layer's missing experts
+                                                             // copied in instead (the most used first), the rest on the CPU
+    bool hyb_forced = false;                                 // MOMOE_QWEN_HYBRID=1 or MOMOE_HYB_FRAC: no trials
+    int hyb_trial = 0;                                       // the running trial's decode calls so far (forward)
+    int hyb_trials = 0;                                      // the trials done
+    double hyb_s[2] = {0, 0};                                // its measured time and tokens per candidate
+    int hyb_tok[2] = {0, 0};
+    const char * hyb_why = "at load";                        // why the running trial runs
+    double hyb_ms = 0;                                       // the chosen path's pace in its trial (ms per token)
+    double hyb_ws = 0;                                       // the watch: the chosen path's time and tokens in this window,
+    int hyb_wt = 0, hyb_off = 0, hyb_since = 0;              // windows in a row off its pace, tokens since the trial
     CpuExperts cpu_x;
     std::vector<ggml_tensor *> xl;                           // this graph's latent MoE inputs, by layer (hybrid)
     std::vector<float> xl_host;
@@ -619,12 +670,14 @@ struct Engine {
                                                              // makes the experts resident and hands back their slots)
     Mailbox mb;
     bool mb_graph = false;                                   // this graph uses them
+    bool mb_stale = false;                                   // qwen35moe: a graph without them has moved experts since
+                                                             // (the slot tables are rebuilt before the next one uses them)
     std::vector<ggml_tensor *> force_gpu;                    // ops the scheduler must place on the GPU
     struct Pending { int il, x, slot; };
     std::vector<Pending> mb_pending;                         // experts being read into the pool (published when read)
-    uint64_t mb_fills = 0;
+    uint64_t mb_fills = 0, mb_graphs = 0;
 #endif
-    uint64_t hyb_hits = 0, hyb_miss = 0;
+    uint64_t hyb_hits = 0, hyb_miss = 0, hyb_copy = 0;
     double t_cpu_wait = 0;
     bool load_mtp = false;                                   // --mtp K: draft K tokens with the MTP layer
     bool preloaded = false;                                  // every expert in its own slot (preload)
@@ -1591,6 +1644,8 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
         L.slot_map = ggml_new_tensor_2d(cs, GGML_TYPE_I32, 1, m.n_expert);
         L.res_mask = ggml_new_tensor_2d(cs, GGML_TYPE_F32, m.n_expert, 1);
         L.res_keep = ggml_new_tensor_2d(cs, GGML_TYPE_F32, 1, m.n_expert);
+        if (e.hybrid && hybrid_model(m) && !m.nemo && L.exp_fd[1] >= 0)   // qwen35moe --hybrid: the CPU's
+            L.cpu_dn = ggml_new_tensor_3d(cs, GGML_TYPE_F32, m.n_embd, m.n_used, HYB_MAX_T);   // experts' outputs
         if (L.recurrent && e.load_mtp) {                     // a verify window's per-token states (rollback)
             L.ssm_snap = ggml_new_tensor_2d(cs, GGML_TYPE_F32, (int64_t) head_v * head_v * m.ssm_dt_rank, e.max_window);
             L.conv_snap = ggml_new_tensor_1d(cs, GGML_TYPE_F32, (int64_t) (m.ssm_conv - 1 + e.max_window) * conv_ch);
@@ -1640,6 +1695,11 @@ static bool debug_on() { static int on = getenv("MOMOE_DEBUG") ? 1 : 0; return o
 
 // the least used slot of the group (recency breaking ties) that is not in use from `floor` on (this layer's experts, a
 // prediction) and not being read
+#if defined(MOMOE_CUDA)
+// does a graph of a few tokens take the mailboxes (Nemotron: always; qwen35moe: on the CPU's experts, see forward)?
+static bool mb_on(const Engine & e) { return e.mailbox && (e.m.nemo || e.hyb_active); }
+#endif
+
 static int take_slot(Pool & P, Group & G, uint64_t floor) {
     int best = -1;
     auto f = [&](int i) { return G.owner[i] >= 0 ? P.freq[G.owner[i]] : 0u; };
@@ -1752,7 +1812,7 @@ static void make_resident(Engine & e, int il, const int32_t * ids, int n_tok) {
         // there from the staging copy, inside the GPU (no PCIe)
 #if defined(MOMOE_CUDA)
         static const uint32_t admit = getenv("MOMOE_ADMIT") ? (uint32_t) atoi(getenv("MOMOE_ADMIT")) : 2;
-        if (e.mailbox) {                                     // the slot tables change only between graphs: the experts
+        if (mb_on(e)) {                                      // the slot tables change only between graphs: the experts
             for (int x = 0; x < m.n_expert; ++x) {           // to read in go to the next boundary
                 const int key = il * m.n_expert + x;
                 if (seen[x] && P.slot_of[key] < 0 && P.freq[key] > admit) e.mb.want.push_back({il, x});
@@ -2014,7 +2074,8 @@ static void prefetch(Engine & e, int il, const int32_t * ids, int n_tok) {
 
 // --hybrid: does this graph split its experts between the GPU and the CPU (a few tokens, the pool path)?
 static bool hybrid_on(const Engine & e, const Layer & L, int T) {
-    return e.hybrid && e.m.nemo && L.cpu_dn && T <= HYB_MAX_T && !staged(e.m.n_used, e.pool.g[L.grp].n_slots, T);
+    return e.hybrid && hybrid_model(e.m) && (e.m.nemo || e.hyb_active) && L.cpu_dn && !e.preloaded && T <= HYB_MAX_T &&
+           !staged(e.m.n_used, e.pool.g[L.grp].n_slots, T);   // (preloaded: nothing missing, and no stop to join it)
 }
 
 // --hybrid, at a layer's stop: the chosen experts the pool holds (read completely) are its; every other one points at
@@ -2033,10 +2094,26 @@ static void hybrid_resident(Engine & e, int il, const int32_t * ids, int T) {
     std::vector<int> miss_of(m.n_expert, -1);
     CpuExperts & C = e.cpu_x;
     C.miss.clear();
+    // --helper-tier: a missing expert the helper card holds is computed there, the others on the CPU; an expert the pool
+    // lets go goes down to the helper (as make_resident)
+    const bool hp = e.helper && !L.hmap_host.empty();
+    Pool & H = e.hpool;
+    Group * K = hp ? &H.g[L.grp] : nullptr;
+    int32_t * hmap = hp ? L.hmap_host.data() : nullptr;
+    const uint64_t hpin = hp ? ++H.clock : 0;
+    std::vector<Readers::Job> hjobs;
+    auto evicted = [&](int slot) {                           // `slot` taken from its expert: that one down to the helper
+        const int old = hp && slot >= 0 ? G.owner[slot] : -1;
+        if (old >= 0 && H.slot_of[old] < 0) {
+            const int hs = take_slot(H, *K, hpin);
+            if (hs >= 0) fill_hslot(e, old, hs, hjobs);
+        }
+    };
     for (int i = 0; i < k * T; ++i) {                        // the hits first: their slots are pinned
         const int x = ids[i];
         ++P.freq[il * m.n_expert + x];
         const int slot = P.slot_of[il * m.n_expert + x];
+        if (hp) hmap[x] = K->zero;
         if (slot >= 0 && G.left[slot].load(std::memory_order_acquire) == 0) {
             ++P.hits; ++e.hyb_hits;
             if (G.by_prefetch[slot]) { ++P.prefetch_hits; G.by_prefetch[slot] = 0; }
@@ -2045,18 +2122,58 @@ static void hybrid_resident(Engine & e, int il, const int32_t * ids, int T) {
         }
     }
     std::vector<Readers::Job> jobs;
+    // qwen35moe's split (e.hyb_frac, Strata's way): that share of the missing experts - the most used lately first: they
+    // stay for the next time - is copied into the pool now and computed by the GPU; the stop waits only for these, while
+    // the CPU computes the rest
+    std::vector<int> copy_wait;
+    if (!m.nemo && e.hyb_frac > 0) {
+        std::vector<int> want;
+        for (int i = 0; i < k * T; ++i) {
+            const int x = ids[i];
+            const int slot = P.slot_of[il * m.n_expert + x];
+            if ((slot >= 0 && G.used[slot] == pin) || std::find(want.begin(), want.end(), x) != want.end()) continue;
+            want.push_back(x);
+        }
+        std::stable_sort(want.begin(), want.end(), [&](int a, int b) {
+            return P.freq[il * m.n_expert + a] > P.freq[il * m.n_expert + b]; });
+        const int n_copy = (int) (e.hyb_frac * (float) want.size() + 0.5f);
+        std::vector<Readers::Job> now;
+        for (int j = 0; j < n_copy; ++j) {
+            const int x = want[j];
+            int slot = P.slot_of[il * m.n_expert + x];       // being read already (a background fill): waited for
+            if (slot < 0) {
+                slot = take_slot(P, G, pin);
+                if (slot < 0) break;
+                fill_slot(e, il, x, slot, now);
+                G.by_prefetch[slot] = 0;
+            }
+            G.used[slot] = pin;
+            map[x] = slot;
+            copy_wait.push_back(slot);
+            ++P.misses; ++e.hyb_copy;
+        }
+        e.readers.submit(now, true);                         // ahead of the background fills
+    }
     for (int i = 0; i < k * T; ++i) {
         const int x = ids[i];
         const int slot = P.slot_of[il * m.n_expert + x];
-        if (slot >= 0 && G.used[slot] == pin) continue;      // a hit
-        ++P.misses; ++e.hyb_miss;
+        if (slot >= 0 && G.used[slot] == pin) continue;      // a hit (or copied in now)
         map[x] = G.zero;
+        const int key = il * m.n_expert + x;
+        if (hp && H.slot_of[key] >= 0 && K->left[H.slot_of[key]].load(std::memory_order_acquire) == 0) {
+            const int hs = H.slot_of[key];                   // on the helper card
+            if (hmap[x] != hs) { K->used[hs] = hpin; ++H.freq[key]; ++e.helper_hits; }
+            hmap[x] = hs;
+            continue;
+        }
+        ++P.misses; ++e.hyb_miss;
         if (miss_of[x] < 0) {
             miss_of[x] = (int) C.miss.size();
             C.miss.push_back({x, {}});
             static const uint32_t admit = getenv("MOMOE_ADMIT") ? (uint32_t) atoi(getenv("MOMOE_ADMIT")) : 2;   // measured (0-8 within the noise)
             if (slot < 0 && P.freq[il * m.n_expert + x] > admit) {   // read for the next time (an expert used
                 const int s2 = take_slot(P, G, pin);         // more than `admit` times lately: the rest stay on the CPU)
+                evicted(s2);
                 if (s2 >= 0) {
                     fill_slot(e, il, x, s2, jobs);
                     G.by_prefetch[s2] = 0;
@@ -2067,15 +2184,22 @@ static void hybrid_resident(Engine & e, int il, const int32_t * ids, int T) {
         C.miss[miss_of[x]].uses.push_back({i / k, i % k});
     }
     (e.fillers.th.empty() ? e.readers : e.fillers).submit(jobs);
+    if (!hjobs.empty()) e.readers.submit(hjobs);
     L.sync_slots();
+    if (hp) tset(L.hslot_map, L.hmap_host.data(), 0, ggml_nbytes(L.hslot_map));
+    const int n_in = m.nemo ? m.latent : m.n_embd;          // the experts' input: Nemotron's latent, else the hidden state
     C.k = k;
     C.T = T;
-    C.out.assign((size_t) T * k * m.latent, 0.0f);
+    C.out.assign((size_t) T * k * n_in, 0.0f);
     C.outp = C.out.data();
     static const bool skip = getenv("MOMOE_TEST_SKIP_CPU") != nullptr;   // a timing test only: the output is wrong
     if (skip) C.miss.clear();
-    if (C.miss.empty()) return;
-    C.n_in = m.latent;
+    if (C.miss.empty()) {
+        for (int slot : copy_wait)
+            while (G.left[slot].load(std::memory_order_acquire)) { }
+        return;
+    }
+    C.n_in = n_in;
     C.n_ff = (int) L.exp_ne[1][1];
     C.up_type = L.exp_type[1];
     C.down_type = L.exp_type[2];
@@ -2085,12 +2209,42 @@ static void hybrid_resident(Engine & e, int il, const int32_t * ids, int T) {
     C.down_bytes = L.exp_bytes[2];
     C.up_row = ggml_row_size(C.up_type, L.exp_ne[1][0]);
     C.down_row = ggml_row_size(C.down_type, L.exp_ne[2][0]);
-    e.xl_host.resize((size_t) m.latent * T);
+    C.gate = m.part0() == 0 ? L.exp_map[0] + L.exp_off[0] : nullptr;   // qwen35moe: SwiGLU
+    C.gate_type = L.exp_type[0];
+    C.gate_bytes = L.exp_bytes[0];
+    C.gate_row = C.gate ? ggml_row_size(C.gate_type, L.exp_ne[0][0]) : 0;
+    e.xl_host.resize((size_t) n_in * T);
     ggml_backend_tensor_get(e.xl[il], e.xl_host.data(), 0, e.xl_host.size() * sizeof(float));
     C.launch(e.xl_host.data());
+    for (int slot : copy_wait)                               // the split's copies: the GPU computes them after this stop
+        while (G.left[slot].load(std::memory_order_acquire)) { }
 }
 
 #if defined(MOMOE_CUDA)
+// qwen35moe, before a mailbox graph that follows graphs without them (the copies, a prompt): those set a slot table's
+// entries for the experts they chose only, so every table is set again from the pool (an expert still being read: the
+// zero slot until the boundary after its read), and what the mailboxes had pending is dropped (its slots may be another
+// expert's now)
+static void mb_rebuild(Engine & e) {
+    Model & m = e.m;
+    Pool & P = e.pool;
+    e.mb_pending.clear();
+    e.mb.want.clear();
+    for (int il : e.mb.moe) {
+        Layer & L = m.layers[il];
+        Group & G = P.g[L.grp];
+        int32_t * map = L.slots_host();
+        for (int x = 0; x < m.n_expert; ++x) {
+            const int slot = P.slot_of[il * m.n_expert + x];
+            const bool read = slot >= 0 && G.left[slot].load(std::memory_order_acquire) == 0;
+            map[x] = read ? slot : G.zero;
+            if (slot >= 0 && !read) e.mb_pending.push_back({il, x, slot});
+        }
+        L.sync_slots();
+    }
+    e.mb_stale = false;
+}
+
 // the CPU's part of one MoE layer of a mailbox graph: the experts the slot table points at the zero slot, from the
 // layer's posted input, into its posted outputs (zeros for the GPU's experts); the pool's bookkeeping as hybrid_resident
 static void mb_layer(Engine & e, int il, int T) {
@@ -2127,12 +2281,17 @@ static void mb_layer(Engine & e, int il, int T) {
         }
         C.miss[miss_of[x]].uses.push_back({i / k, i % k});
     }
-    memset(B.out, 0, sizeof(float) * (size_t) T * k * m.latent);
+    const int n_in = m.nemo ? m.latent : m.n_embd;
+    memset(B.out, 0, sizeof(float) * (size_t) T * k * n_in);
     static const bool skip = getenv("MOMOE_TEST_SKIP_CPU") != nullptr;   // a timing test only: the output is wrong
     if (C.miss.empty() || skip) return;
     C.k = k;
     C.T = T;
-    C.n_in = m.latent;
+    C.n_in = n_in;
+    C.gate = m.part0() == 0 ? L.exp_map[0] + L.exp_off[0] : nullptr;   // qwen35moe: SwiGLU
+    C.gate_type = L.exp_type[0];
+    C.gate_bytes = L.exp_bytes[0];
+    C.gate_row = C.gate ? ggml_row_size(C.gate_type, L.exp_ne[0][0]) : 0;
     C.n_ff = (int) L.exp_ne[1][1];
     C.up_type = L.exp_type[1];
     C.down_type = L.exp_type[2];
@@ -2202,11 +2361,13 @@ static void mb_worker(Engine & e) {
 static void mb_init(Engine & e) {
     Model & m = e.m;
     Mailbox & M = e.mb;
-    const size_t x_b = sizeof(float) * (size_t) m.latent * HYB_MAX_T, ids_b = sizeof(int32_t) * (size_t) m.n_used * HYB_MAX_T;
-    const size_t out_b = sizeof(float) * (size_t) m.latent * m.n_used * HYB_MAX_T;
+    const size_t n_in = m.nemo ? m.latent : m.n_embd;       // the experts' input: Nemotron's latent, else the hidden state
+    const size_t x_b = sizeof(float) * n_in * HYB_MAX_T, ids_b = sizeof(int32_t) * (size_t) m.n_used * HYB_MAX_T;
+    const size_t out_b = sizeof(float) * n_in * m.n_used * HYB_MAX_T;
     const size_t per = 256 + (x_b + ids_b + out_b + 255) / 256 * 256;
+    auto moe = [&](const Layer & L) { return m.nemo ? L.kind == 'e' : L.cpu_dn != nullptr; };   // (qwen35moe: every layer)
     size_t total = 256;
-    for (auto & L : m.layers) total += L.kind == 'e' ? per : 0;
+    for (auto & L : m.layers) total += moe(L) ? per : 0;
     cudaSetDevice(e.device);
     void * h = nullptr, * d = nullptr;
     if (cudaHostAlloc(&h, total, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
@@ -2221,7 +2382,7 @@ static void mb_init(Engine & e) {
     size_t at = 256;
     for (int il = 0; il < m.n_layer; ++il) {
         Layer & L = m.layers[il];
-        if (L.kind != 'e') continue;
+        if (!moe(L)) continue;
         MbLayer & B = M.layer[il];
         char * base = M.host + at;
         B.sent = (volatile uint32_t *) base;
@@ -2370,7 +2531,7 @@ static void mb_stop(Engine & e) {
 }
 
 // between graphs: the experts read into the pool since are published in the slot tables, and new ones are read in
-// (MOMOE_FILLS a token at most, default 8): a slot taken from another expert first leaves that expert's table
+// (MOMOE_FILLS evictions a token at most, see below): a slot taken from another expert first leaves that expert's table
 static void mb_boundary(Engine & e) {
     Model & m = e.m;
     Pool & P = e.pool;
@@ -2387,9 +2548,11 @@ static void mb_boundary(Engine & e) {
             ++i;
         }
     }
-    // a free slot is filled at once; an expert put out of its slot counts against MOMOE_FILLS (default 8 a token: each
-    // read is RAM bandwidth the CPU's experts need)
-    static const int max_evict = getenv("MOMOE_FILLS") ? atoi(getenv("MOMOE_FILLS")) : 1 << 30;   // (measured: no limit)
+    // a free slot is filled at once; an expert put out of its slot counts against MOMOE_FILLS (each read is RAM bandwidth
+    // the CPU's experts need) (measured: Nemotron no limit; qwen35moe 16: Ornith-1.5-122B on the RTX 4070 Ti + Ryzen 9 5950X, 300 tokens twice,
+    // 18.2 tok/s against 16.4 without one: 15 GB read instead of 99, a third of the chosen experts in the pool instead of
+    // 42%, the CPU's experts about as fast as the GPU's there; 8: 18.0, 0: 18.8 but the pool never follows the text)
+    static const int max_evict = getenv("MOMOE_FILLS") ? atoi(getenv("MOMOE_FILLS")) : e.m.nemo ? 1 << 30 : 16;
     std::vector<Readers::Job> jobs;
     int n = 0, evicted = 0;
     for (const auto & w : e.mb.want) {
@@ -2863,6 +3026,17 @@ static ggml_tensor * moe_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, i
                                ggml_tensor * pred_in, ggml_tensor * pred_in2) {
     Model & m = e.m;
     Layer & L = m.layers[il];
+    if (hybrid_on(e, L, T)) {                                // --hybrid: the experts' input, read at the layer's stop
+        if (!ggml_is_contiguous(x)) x = ggml_cont(c, x);     // (the CPU computes the missing experts from it)
+        ggml_build_forward_expand(gf, x);                    // or posted to its mailbox
+        e.xl[il] = x;
+    }
+#if defined(MOMOE_CUDA)
+    const bool mbx = mb_on(e) && hybrid_on(e, L, T) && ns_paused(e, il);   // the mailboxes: no stops in this layer
+    ggml_tensor * send = nullptr;
+#else
+    const bool mbx = false;
+#endif
     ggml_tensor * lg = ggml_mul_mat(c, L.gate_inp, x);
     ggml_format_name(lg, "ffn_moe_logits-%d", il);
     ggml_tensor * probs = ggml_soft_max(c, lg);                                         // [n_expert, T]
@@ -2897,11 +3071,25 @@ static ggml_tensor * moe_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, i
                 ggml_tensor * pl = ggml_soft_max(c, ggml_mul_mat(c, m.layers[il + j].gate_inp, in));
                 top = ggml_concat(c, top, ggml_cont(c, ggml_argsort_top_k(c, pl, m.n_used)), 1);
             }
-            ggml_format_name(top, "topk-%d", il);                // made resident here: a pause point (or the callback)
-            if (e.ns_graph) ggml_set_output(top);
+            ggml_format_name(top, mbx ? "mbtopk-%d" : "topk-%d", il);   // made resident here: a pause point (or the
+            if (e.ns_graph) ggml_set_output(top);                                     // callback); mbtopk-: not
             e.topk[il] = top;
             ggml_build_forward_expand(gf, top);
             ids = pred_in ? ggml_view_2d(c, top, m.n_used, T, top->nb[1], 0) : top;       // [n_used, T]
+#if defined(MOMOE_CUDA)
+            if (mbx) {                                       // the layer's input and choice to the CPU, at once
+                MbLayer & B = e.mb.layer[il];
+                B.send.n_f32 = m.n_embd * T;
+                B.send.n_i32 = m.n_used * T;
+                ggml_tensor * args[2] = {x, pred_in ? ggml_cont(c, ids) : ids};
+                send = ggml_custom_4d(c, GGML_TYPE_I32, 1, 1, 1, 1, args, 2, momoe_mailbox_cpu_stub, 1, &B.send);
+                ggml_format_name(send, "mbsend-%d", il);
+                ggml_build_forward_expand(gf, send);
+                e.force_gpu.push_back(send);
+                e.mb_graph = true;
+                e.mb.graph.push_back(il);
+            }
+#endif
         }
     } else {
         // --nostall: the next layer's router on this layer's hidden state predicts its experts: computed in the same
@@ -2958,8 +3146,24 @@ static ggml_tensor * moe_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, i
     ggml_tensor * dn = ggml_mul_mat_id(c, as[2], h, slots);                             // [n_embd, n_used, T]
     if (helper_on(e, L, big))
         dn = ggml_add(c, dn, helper_down(e, c, L, x3, ids, T, [&](ggml_tensor * g, ggml_tensor * u) { return ggml_swiglu_split(c, g, u); }));
+#if defined(MOMOE_CUDA)
+    if (send) {                                              // the CPU's experts, waited for after the GPU's own
+        MbLayer & B = e.mb.layer[il];
+        B.wait.n_f32 = m.n_embd * m.n_used * T;
+        ggml_tensor * args[1] = {send};
+        ggml_tensor * cpu = ggml_custom_4d(c, GGML_TYPE_F32, m.n_embd, m.n_used, T, 1, args, 1, momoe_mailbox_cpu_stub, 1,
+                                           &B.wait);
+        ggml_format_name(cpu, "mbwait-%d", il);
+        e.force_gpu.push_back(cpu);
+        dn = ggml_add(c, dn, cpu);
+    } else
+#endif
+    if (hybrid_on(e, L, T)) {                                // the missing experts' outputs (zero slots here), from the CPU
+        ggml_format_name(dn, "moedn-%d", il);                // (joined at this stop: eval_cb)
+        dn = ggml_add(c, dn, ggml_view_3d(c, L.cpu_dn, m.n_embd, m.n_used, T, L.cpu_dn->nb[1], L.cpu_dn->nb[2], 0));
+    }
     ggml_format_name(up, "moe_up-%d", il);
-    ggml_format_name(dn, "moe_down-%d", il);
+    if (!hybrid_on(e, L, T)) ggml_format_name(dn, "moe_down-%d", il);   // (mailboxes: no stop either way)
     ggml_format_name(w, "moe_w-%d", il);
     dn = ggml_mul(c, dn, w);
     ggml_build_forward_expand(gf, dn);
@@ -4080,7 +4284,85 @@ static GraphCache * graph_cache(Engine & e, int T, int p0, int n_kv, const Out *
     return lru;
 }
 
+static int forward_once(Engine & e, const int32_t * toks, int T, int p0, Out * out);
+
+// qwen35moe with the experts in a pool (momoe-cuda): which expert path is faster depends on the model, the cards, the CPU
+// and what else runs on the machine (see hybrid_model), so the engine measures both on decode calls - a few warm-up
+// calls, then blocks of 6 calls on the copies (every missing expert read into the pool, the read-ahead on) and on the
+// CPU's experts (every missing one on the CPU), twice in turn - and keeps the one with the least time per token.  A
+// graph is built for every call here, so switching costs nothing.  It measures again 256 tokens after the first trial (a
+// page cache still filling at load, measured wrong once), when the chosen path's pace over two windows of 64 tokens in a
+// row is 25% off what its trial measured (a program taking the RAM or the CPU, or giving them back), and every 4096
+// tokens.  A trial costs about 12 tokens at the slower path's pace (Ornith-1.5-122B on the RTX 4070 Ti: 0.35 s).
+// MOMOE_QWEN_HYBRID=0: the copies; =1: the CPU's experts; MOMOE_HYB_FRAC=x: the split with that share copied in (the
+// most used first, Strata's way: slower than the CPU's experts alone with both Ornith-1.5 models on the 4070 Ti +
+// Ryzen 9 5950X: 72.1 and 80.3 ms per token for 25% and 50% with the 122B, 60.9 without); none of these measure
+static const char * hyb_name(int c) { return c ? "the CPU's experts" : "the copies"; }
+static void hyb_set(Engine & e, int c) {
+    e.hyb_active = c == 1;
+    e.hyb_frac = 0.0f;
+    e.predict = c == 1 ? false : e.predict_copy;
+}
+
 static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = nullptr) {
+    const bool pool = e.hybrid && !e.m.nemo && hybrid_model(e.m) && !e.hyb_forced && !e.preloaded && T <= HYB_MAX_T;
+    if (!pool) return forward_once(e, toks, T, p0, out);
+    const double t0 = now_s();
+    if (e.hyb_done) {                                        // the watch on the chosen path
+        const int r = forward_once(e, toks, T, p0, out);
+        e.hyb_ws += now_s() - t0;
+        e.hyb_wt += T;
+        e.hyb_since += T;
+        const char * why = nullptr;
+        static char buf[160];
+        if (e.hyb_wt >= 64) {
+            const double ms = 1000 * e.hyb_ws / e.hyb_wt;
+            e.hyb_off = std::fabs(ms / e.hyb_ms - 1) > 0.25 ? e.hyb_off + 1 : 0;
+            if (e.hyb_off >= 2) {
+                snprintf(buf, sizeof buf, "its pace moved from %.1f to %.1f ms per token", e.hyb_ms, ms);
+                why = buf;
+            }
+            e.hyb_ws = 0;
+            e.hyb_wt = 0;
+        }
+        if (!why && e.hyb_since >= (e.hyb_trials == 1 ? 256 : 4096))
+            why = e.hyb_trials == 1 ? "256 tokens after the first" : "4096 tokens since the last";
+        if (why) {                                           // a new trial from the next call
+            e.hyb_done = false;
+            e.hyb_why = why;
+        }
+        return r;
+    }
+    const int WARM = e.hyb_trials ? 2 : 4, B = 6, ROUNDS = 2;
+    const int n = e.hyb_trial++;
+    const int blk = n < WARM ? -1 : (n - WARM) / B;
+    const int c = blk < 0 ? e.hyb_active : blk % 2;          // the warm-up on the path in use
+    hyb_set(e, c);
+    const int r = forward_once(e, toks, T, p0, out);
+    if (blk < 0) return r;
+    e.hyb_s[c] += now_s() - t0;
+    e.hyb_tok[c] += T;
+    if (n == WARM + B * 2 * ROUNDS - 1) {                    // the trial's last call: choose
+        double ms[2];
+        for (int i = 0; i < 2; ++i) ms[i] = 1000 * e.hyb_s[i] / std::max(1, e.hyb_tok[i]);
+        const int best = ms[1] < ms[0];
+        hyb_set(e, best);
+        fprintf(stderr, "momoe-cuda: expert path: %s (trial %d, %s; ms per token: the copies %.1f, the CPU's experts "
+                        "%.1f; %d tokens each; MOMOE_QWEN_HYBRID=0/1 sets it)\n", hyb_name(best), e.hyb_trials + 1,
+                e.hyb_why, ms[0], ms[1], e.hyb_tok[0]);
+        e.hyb_ms = ms[best];
+        e.hyb_done = true;
+        ++e.hyb_trials;
+        e.hyb_trial = 0;
+        e.hyb_s[0] = e.hyb_s[1] = 0;
+        e.hyb_tok[0] = e.hyb_tok[1] = 0;
+        e.hyb_ws = 0;
+        e.hyb_wt = e.hyb_off = e.hyb_since = 0;
+    }
+    return r;
+}
+
+static int forward_once(Engine & e, const int32_t * toks, int T, int p0, Out * out) {
     Model & m = e.m;
 #if defined(MOMOE_CUDA)
     if (decode_cache_ok(e, T, out)) return forward_decode(e, toks, p0, out);
@@ -4156,7 +4438,10 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
     e.t_build += tc0 - tb0;
 #if defined(MOMOE_CUDA)
     uint64_t mb_job = 0;
+    if (!e.m.nemo && e.mailbox && !e.mb_graph) e.mb_stale = true;   // qwen35moe: experts moved without the mailboxes
     if (e.mb_graph) {                                        // the worker follows this graph's MoE layers
+        if (e.mb_stale) mb_rebuild(e);
+        ++e.mb_graphs;
         mb_boundary(e);
         std::lock_guard<std::mutex> lk(e.mb.mu);
         ++e.mb.cur;
@@ -5333,8 +5618,12 @@ int main(int argc, char ** argv) {
     }
 #endif
     // (--direct-io: the CPU's experts read the mapping; nemo only, for now: hybrid_on; --layer-split: the stops)
-    e.hybrid = !kHostMem && !g_direct && !getenv("MOMOE_NO_HYBRID") && e.split.empty() && !e.helper;
+    // (--helper-tier: with qwen35moe's CPU experts through the stops, the helper card computing the missing experts it
+    // holds: Ornith-1.5-122B, RTX 4070 Ti + RTX 3060, 12.1 tok/s against 8.7 with the copies; the helper saves RAM, not
+    // time: 18-19 without it.  Nemotron: the copies)
+    e.hybrid = !kHostMem && !g_direct && !getenv("MOMOE_NO_HYBRID") && e.split.empty();
     load(e, model, pool_gib, slots);
+    if (e.helper && e.m.nemo) e.hybrid = false;
     if (mtp_k > 0 && e.m.nemo) die("--mtp: not yet for Nemotron models");
     if (!kHostMem && pool_gib <= 0 && slots <= 0) fit_pool(e);
     if (e.helper && kHostMem) die("--helper-tier: NVIDIA cards only");
@@ -5343,10 +5632,15 @@ int main(int argc, char ** argv) {
         e.helper = false;
     }
     if (e.helper) make_hpool(e);
-    if (e.hybrid && e.m.nemo)                                // the CPU's experts: the physical cores less the readers'
+    if (e.hybrid && hybrid_model(e.m))                       // the CPU's experts: the physical cores less the readers'
         e.cpu_x.start(getenv("MOMOE_CPU_THREADS") ? atoi(getenv("MOMOE_CPU_THREADS"))
                                                   : std::max(2, (int) std::thread::hardware_concurrency() / 2));
 #if defined(MOMOE_CUDA)
+    if (e.hybrid && !e.m.nemo && hybrid_model(e.m) && !e.preloaded && !e.helper && !getenv("MOMOE_NO_MAILBOX")) {
+        bool cpu_dn = false;                                 // qwen35moe: the CPU's experts through mailboxes too (a
+        for (auto & L : e.m.layers) cpu_dn = cpu_dn || L.cpu_dn;   // graph per token, built again each time: CUDA
+        if (cpu_dn) mb_init(e);                              // graphs stay off below)
+    }
     if (e.hybrid && e.m.nemo && !getenv("MOMOE_NO_MAILBOX") && e.pool.n_slots < e.m.n_exp_all) mb_init(e);
     else if (e.m.glm5 && g_direct && getenv("MOMOE_RMB") && e.pool.host && e.pool.n_slots < e.m.n_exp_all) {
         // (opt-in, MOMOE_RMB=1 with MOMOE_POOL_HOST=1: with a device pool the readers' copies to the GPU did not run
@@ -5372,6 +5666,18 @@ int main(int argc, char ** argv) {
     e.demand.device = e.device;
     if (getenv("MOMOE_DEMAND_READERS")) e.demand.start(atoi(getenv("MOMOE_DEMAND_READERS")));
     e.predict = !getenv("MOMOE_NO_PREDICT") && !(e.hybrid && e.m.nemo);   // (hybrid: measured faster without)
+    e.predict_copy = e.predict;
+    if (e.hybrid && hybrid_model(e.m) && !e.m.nemo) {     // a forced expert path: no trial
+        const char * q = getenv("MOMOE_QWEN_HYBRID"), * f = getenv("MOMOE_HYB_FRAC");
+        if (f) {
+            e.hyb_active = e.hyb_done = e.hyb_forced = true;   // MOMOE_HYB_FRAC=x: the split with that share copied in
+            e.hyb_frac = std::clamp((float) atof(f), 0.0f, 1.0f);
+            e.predict = false;
+        } else if (q && q[0] == '1') {
+            e.hyb_active = e.hyb_done = e.hyb_forced = true;   // MOMOE_QWEN_HYBRID=1: the CPU's experts
+            e.predict = false;
+        }
+    }
     e.predict2 = e.predict && getenv("MOMOE_PREDICT2");      // two layers ahead: as fast, a third more read (M4)
 #if !defined(MOMOE_CUDA)
     if (nocache)                                             // expert reads from the SSD, as on a Mac without the RAM
@@ -5695,12 +6001,19 @@ int main(int argc, char ** argv) {
     if (e.helper)
         fprintf(stderr, "momoe-cuda: helper tier: %llu chosen experts computed on the helper card, %llu evictions copied "
                 "down to it\n", (unsigned long long) e.helper_hits, (unsigned long long) e.helper_down);
-    if (e.cpu_x.n_threads)
-        fprintf(stderr, "momoe-cuda: hybrid: %llu of %llu chosen experts computed on the CPU (%d threads), %.2f s waited for "
-                "them\n", (unsigned long long) e.hyb_miss, (unsigned long long) (e.hyb_hits + e.hyb_miss),
-                e.cpu_x.n_threads, e.t_cpu_wait);
 #if defined(MOMOE_CUDA)
+    if (e.cpu_x.n_threads)
+        fprintf(stderr, "momoe-cuda: hybrid: %llu of %llu chosen experts computed on the CPU (%d threads), %llu copied in, "
+                "%.2f s waited for them, %llu graphs through the mailboxes\n", (unsigned long long) e.hyb_miss,
+                (unsigned long long) (e.hyb_hits + e.hyb_miss), e.cpu_x.n_threads, (unsigned long long) e.hyb_copy,
+                e.t_cpu_wait, (unsigned long long) e.mb_graphs);
     mb_stop(e);
+    if (e.cpu_x.n_threads && getenv("MOMOE_CPU_PROF")) {
+        const auto & C = e.cpu_x;
+        fprintf(stderr, "momoe-cuda: CPU experts, s in all: all awake %.2f, up %.2f, to down's format %.2f, down %.2f "
+                "(thread 0), launch to done %.2f; %llu experts\n", C.prof[0], C.prof[1], C.prof[2], C.prof[3], C.prof[4],
+                (unsigned long long) C.experts);
+    }
 #endif
     if (e.cpu_x.n_threads) e.cpu_x.stop();
     if (!e.fillers.th.empty()) e.fillers.stop();
