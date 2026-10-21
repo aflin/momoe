@@ -658,12 +658,13 @@ GGML_FAMILIES = {
               "context": 65536, "min_vram_gb": 16,
               "license": "MIT: https://huggingface.co/zai-org/GLM-5.3-Flash"},
     "ornith122": {"title": "Ornith-1.5-122B-A10B", "by": "ornith-ai's agentic-coding model; Unsloth's GGUFs",
-                  "about": "Ornith-1.5's large sibling, 10B active; a 50 GB download, ~64 GB of RAM",
+                  "about": "Ornith-1.5's large sibling, 10B active; a 50 GB download, ~60 GB of RAM",
                   "hf": hf("unsloth/Ornith-1.5-122B-GGUF"), "file": "Ornith-1.5-122B-{q}.gguf", "tag": "ornith122-",
                   "name": "ornith-1.5-122b-a10b",
                   # ram_gb: on a separate card the file stays in the file cache (measured: an RTX 4070 Ti, 63 GB of
-                  # RAM, the X server off: 19-21 tok/s); on less, or beside other programs, the rest from the SSD
-                  "models": {"UD-IQ3_XXS": {"about": "3-bit (Unsloth Dynamic), measured", "ram_gb": 64}},
+                  # RAM, the X server off: 19-21 tok/s; with a desktop holding ~20 GB, 4.8): the rest from the SSD
+                  "models": {"UD-IQ3_XXS": {"about": "3-bit (Unsloth Dynamic), measured; close other programs",
+                                            "ram_gb": 60}},
                   "sha256": ORNITH122_FILES, "default": "UD-IQ3_XXS", "draft_args": ["--mtp", "3"],
                   "context": 32768, "min_vram_gb": 11,                    # measured on a 12 GB card
                   "license": "MIT: https://huggingface.co/ornith-ai/Ornith-1.5-122B"},
