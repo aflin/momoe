@@ -27,8 +27,9 @@ model family. Some of what followed doesn't fit Strata, which takes one change p
 default behaviour unchanged. MoMoE is the place for those changes:
 
 - **More MoE models.** Strata runs Qwen3.8-Flash-Next and its variants. MoMoE also runs Qwen3.6-35B-A3B and its
-  fine-tunes (Ornith 1.5, KAT-Coder), which fit 8-12 GB cards and 16-32 GB of RAM. The goal is more families: GLM and
-  other large MoE models.
+  fine-tunes (Ornith 1.5, KAT-Coder), which fit 8-12 GB cards and 16-32 GB of RAM; larger ones (Ornith-1.5-122B,
+  Nemotron 3.5 Bolt, GLM-5.3-Flash) and small ones (LFM2.5) on its own ggml engine. Each one installs with
+  `momoe setup`; the chart below shows where each was run (all but GLM on a 12 GB card, and the 8 GB Jetson).
 - **Agents first.** `momoe run claude` (or Codex, OpenCode, Unsloth Studio, LM Studio) starts the model and the tool,
   already connected to each other. There is no web page: the server is for your apps and agents.
 - **Two platforms.** The aims are Linux with NVIDIA cards (CUDA) and Apple Silicon Macs, including Flash-Next on a
@@ -48,10 +49,12 @@ this note.
 
 Early, and maintained by one person. MoMoE has three engines:
 - **Strata's engine** (`momoe`), on Linux with an NVIDIA card: Qwen3.8-Flash-Next and the Qwen3.6 family.
-- **MoMoE's ggml engine** (`momoe-cuda`), on Linux with an NVIDIA card: Nemotron 3.5 Bolt, GLM-5.3-Flash and
-  LFM2.5 everywhere, and every family on a GPU that shares the system's memory (the DGX Spark, a Jetson), where Strata's
-  engine is not built. On the Spark the experts that don't fit are read from the SSD directly, at 10-13 GB/s; on an
-  8 GB Jetson they are copied from the file cache. Two cards share a model with the layer split or the helper tier.
+- **MoMoE's ggml engine** (`momoe-cuda`), on Linux with an NVIDIA card: Nemotron 3.5 Bolt, GLM-5.3-Flash,
+  Ornith-1.5-122B and LFM2.5 everywhere, and every family on a GPU that shares the system's memory (the DGX Spark, a
+  Jetson), where Strata's engine is not built. On a card of its own, the CPU computes the Bolt and Ornith-122B experts
+  the card does not hold (for Ornith a trial at load, and again when the speed changes, picks that or copying them
+  in). On the Spark the experts that don't fit are read from the SSD directly, at 10-13 GB/s; on an 8 GB Jetson they
+  are copied from the file cache. Two cards share a model with the layer split or the helper tier.
 - **MoMoE's Metal engine** (`momoe-metal`, [src/metal](src/metal/README.md)), on Apple Silicon Macs: every family
   above (as GGUF files). The experts that don't fit are read from the SSD as needed.
 
@@ -59,8 +62,7 @@ Early, and maintained by one person. MoMoE has three engines:
 
 Not tested in MoMoE:
 - Windows, and AMD or Intel cards;
-- several GPUs with the Qwen3.6 family (it runs on one GPU);
-- Swift 1.5 and Unsloth's Flash-Next files.
+- several GPUs with the Qwen3.6 family (it runs on one GPU).
 
 Strata's code for these is still here, but MoMoE has changed things around it.
 
@@ -149,7 +151,7 @@ the model's own pass did: on the Spark, Qwen3.6 59.5 -> 125.2 tok/s, KAT-Coder 5
 The same tokens as before on every model. GLM-5.3 drafts without that copy: 19.4 -> 19.7.
 
 Which engine: on the PC, Strata's engine for the Qwen3.8-Flash-Next and Qwen3.6 families (Ornith with MoMoE's ggml
-engine: 63.9) and MoMoE's ggml engine (`momoe-cuda`) for Bolt, GLM and LFM; `momoe-cuda` for everything on the Spark
+engine: 63.9) and MoMoE's ggml engine (`momoe-cuda`) for Bolt, GLM, Ornith-122B and LFM; `momoe-cuda` for everything on the Spark
 and the Jetson; `momoe-metal` on the Macs.
 
 ### Against llama.cpp on the same machine
@@ -188,7 +190,8 @@ GLM on the Spark, Bolt on the PC.
 Reading prompts on the PC, with Strata's engine (4K / 16K tokens): Flash-Next IQ3_XXS 1,178 / 2,133 tok/s; the Coder
 1,931 / 2,615; Swift 1,196 / 2,163; Unsloth's UD-IQ4_XS 67 / 91; the Qwen3.6 family 3,081-3,767 / 3,974-4,521.
 
-How these were measured (2026-10-19 unless named; the M1 Ultra and Spark columns and LFM2.5-8B on the PC 2026-10-20; build `momoe-cuda` / `momoe-metal` with ggml from llama.cpp b11724):
+How these were measured (2026-10-19 unless named; the M1 Ultra and Spark columns and LFM2.5-8B on the PC 2026-10-20;
+Ornith-122B and the M4 Air column 2026-10-21, see [its results](bench/results/2026-10-21-every-model-everywhere/README.md); build `momoe-cuda` / `momoe-metal` with ggml from llama.cpp b11724):
 - **Strata's engine on the PC:** `tools/strata_bench.py`, three runs, medians: "chat decode" in the table.
 - **`momoe-cuda` and `momoe-metal`:** the engine on its own, greedy, the second half of a 300-400-token answer, with
   the arguments setup wrote (drafting where they have it); "server" rows: the server's own speed over a long chat.
@@ -215,7 +218,8 @@ How these were measured (2026-10-19 unless named; the M1 Ultra and Spark columns
 cards (`"layer_split": "auto"`, or the first layer of each later card), and `--helper-tier` in its `"args"` makes the
 second card a second tier of experts under the first one's (see [the helper tier](#two-different-gpus-the-helper-tier)).
 Setup writes them with `--gpus a,b` (and `--helper-tier`), and splits GLM-5.3-Flash by itself across two cards under
-16 GB each. Not yet with the CPU's experts (Bolt's `--hybrid`) or the mailboxes; not yet measured for this table.
+16 GB each. The helper tier also runs with the CPU computing Ornith-122B's experts (below); the layer split not with
+the CPU's experts or the mailboxes. Not yet measured for this table.
 
 `./setup.sh --check` lists what fits your PC. The Qwen3.6-family files are described in
 [docs/QWEN36.md](docs/QWEN36.md) and [docs/QWEN35MOE_GGUFS.md](docs/QWEN35MOE_GGUFS.md). The authors and quantizers
@@ -327,8 +331,13 @@ With a 262K context, the KV cache leaves the 4070 Ti room for fewer experts (1,0
 everyday use with that config (2026-10-18, 7 answers of 115-4,572 tokens), it wrote 43.6-56.1 tok/s with a 54-71%
 hit rate in the main card's cache. The first answer after each start was about 20 tok/s, while the caches fill.
 
+Ornith-1.5-122B UD-IQ3_XXS on the same two cards (2026-10-21, `momoe-cuda`): with `--helper-tier` the CPU computes the
+experts neither card holds, as on one card, and the 3060 keeps its share out of RAM. It writes 12.0-12.2 tok/s against
+19-21 on the 4070 Ti alone (each layer's hand-off between the cards costs ~27 ms a token), and against 8.7 with the
+helper and the experts copied in instead.
+
 For two equal cards, the layer split should be the better choice: each card runs its own layers without waiting for
-the other inside a layer. That, other cards, other models and Windows are not measured.
+the other inside a layer. That, other cards, the other models and Windows are not measured.
 
 ## Where things are
 
