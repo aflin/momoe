@@ -113,6 +113,14 @@ class MacPool(unittest.TestCase):
         with mock.patch.object(setup.subprocess, "run", return_value=mock.Mock(stdout=out)):
             self.assertAlmostEqual(setup.mac_available_gib(), 1024 * 16384 / 2**30)
 
+    def test_or_the_kernels_share(self):
+        # the file cache in active pages: the kernel's share (memorystatus_level) counts it
+        out = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:  1000.\n"
+        runs = {"vm_stat": out, "kern.memorystatus_level": "72\n", "hw.memsize": str(32 * 2**30)}
+        run = lambda cmd, **kw: mock.Mock(stdout=runs[cmd[-1]])
+        with mock.patch.object(setup.subprocess, "run", side_effect=run):
+            self.assertAlmostEqual(setup.mac_available_gib(), 0.72 * 32)
+
 
 class Routing(unittest.TestCase):
     def run_main(self, platform, gpus, argv):
@@ -285,6 +293,17 @@ class MacDraft(unittest.TestCase):
         args, ran, draft = self.run_setup("swift", True)
         self.assertEqual(ran, [])
         self.assertIn(str(draft), args)
+
+    def test_ornith122_drafts_only_from_a_full_pool(self):
+        # Ornith-122B: --mtp 3 on the M1 Ultra (a 36 of 38.8 GiB pool: 16.4 -> 19.8 tok/s), not on the M4 Air (11 GiB
+        # from 32 GB: 4.1-4.5 -> 4.0)
+        w = (38.77, 7.33)
+        args, _, _ = self.run_setup("ornith122", True, mem=64, weights=w, avail=60.0)
+        self.assertEqual(args[args.index("--pool-gib") + 1], "36")
+        self.assertEqual(args[args.index("--mtp") + 1], "3")
+        args, _, _ = self.run_setup("ornith122", True, mem=32, weights=w, avail=23.0)
+        self.assertIn("--pool-gib", args)
+        self.assertNotIn("--mtp", args)
 
     def test_own_mtp_fetches_nothing(self):
         args, ran, _ = self.run_setup("ornith", False)

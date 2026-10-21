@@ -95,6 +95,7 @@ tokens are within a few hundredths of each other, which was checked); and the se
 | Ornith-1.5-35B-A3B IQ4_XS | 128.8* | 104.1* | - | 92.7* | 31.2* (as a 16 GB Mac, earlier: 9.7-13.1) |
 | KAT-Coder-V2.5-Dev i-quality-v2 | 126.2* | 99.4* | - | 104.9* | - |
 | Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 | 28.4 | - | 37.5 (UD-Q3_K_XL) | - |
+| Ornith-1.5-122B-A10B UD-IQ3_XXS | 19.2 | 33.2* | - | 19.8* | 4.5 |
 | GLM-5.3-Flash UD-IQ3_XXS | does not fit a 12 GB card | 19.7* | - | 4.5* | - |
 | LFM2.5-24B-A2B | 75.9 (UD-Q4_K_XL) | 134.0 | 6.9 | 104.3 | 11.9 (as an 8 GB Mac) |
 | LFM2.5-8B-A1B UD-Q4_K_XL | 305.5 | 161.7 | 16.6 | 185.3 | 43.1 (as an 8 GB Mac) |
@@ -103,7 +104,12 @@ tokens are within a few hundredths of each other, which was checked); and the se
 \* With drafting: the model's own multi-token-prediction (MTP) layer proposes up to 3 or 4 tokens ahead and the model
 checks them in one pass, keeping only what it would have written itself. Numbers without \* are without drafting:
 the Flash-Next family on the Spark, and Flash-Next IQ3_XXS and Swift on the M1 Ultra (where every expert fits only
-without the draft layer, which measured faster) were measured without it, LFM has no MTP layer, and MoMoE does not yet draft with Bolt's. llama.cpp's numbers: with drafting where marked \* (see below), else without.
+without the draft layer, which measured faster) were measured without it, LFM has no MTP layer, and MoMoE does not yet draft with Bolt's.
+Ornith-122B drafts only where (nearly) every expert is in memory, and setup adds `--mtp 3` only there (the Spark 26.4
+-> 33.2 tok/s, the M1 Ultra 16.4 -> 19.8): on the PC the CPU computes the experts the card does not hold and drafting
+was slower (19.1 -> 12.5), on the M4 Air (an 11 GiB pool, the rest from the SSD) 4.1-4.5 -> 4.0. Its greedy tokens
+against llama.cpp's (64): the same on both Macs and on the Spark with drafting; `momoe-cuda` without drafting parts at
+token 33, where its own top two are 0.38 / 0.36 but llama.cpp's 0.53 / 0.28 (not yet explained). llama.cpp's numbers: with drafting where marked \* (see below), else without.
 
 On the Macs, `momoe-metal` keeps one thread waiting on the CPU's wait-for-event instruction while a request runs.
 Without it, macOS held the engine's main thread on the efficiency cores and the GPU's clock low, at random from run to
@@ -157,6 +163,7 @@ and the Jetson; `momoe-metal` on the Macs.
 | Ornith-1.5-35B-A3B IQ4_XS | M1 Ultra | 92.7* / 96.1 | 96.2* (2) / 96.1 |
 | Nemotron 3.5 Bolt UD-Q3_K_XL | M1 Ultra | 37.5 | 38.5 (it cannot read a prompt: its Metal build has no kernel for 9 experts a token) |
 | Nemotron 3.5 Bolt UD-IQ3_XXS | PC | 30.0 / 30.6 (server, greedy / sampled) | 26.2 / 26.1 |
+| Ornith-1.5-122B-A10B UD-IQ3_XXS | PC | 19.2 (the CPU computes the experts the card does not hold) | 4.62 (48 layers' experts on the CPU, the best fit) |
 | GLM-5.3-Flash UD-IQ3_XXS | Spark | 19.7* / 15.0* / 14.6* (server, greedy / sampled); 13.3 | 1.3 (a 48-token check: every expert on the CPU, cold, not a speed test) |
 | GLM-5.3-Flash UD-IQ4_XS | Spark | 11.7* / 10.4* (server); 9.3 | 2.3 / 2.5 |
 

@@ -74,6 +74,7 @@ HF_REVISIONS = {
     "unsloth/Qwen3.8-Flash-Next-GGUF": "38bb39ee97821de2c9009abb7e93950eec396e66",                   # 2026-09-30
     "unsloth/Qwen3.6-35B-A3B-MTP-GGUF": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",
     "bartowski/Ornith-1.5-35B-A3B-GGUF": "64b0493d34a5ca4c1b4ad67bb99b41d74b4f07d6",
+    "unsloth/Ornith-1.5-122B-GGUF": "3842d003341507c216295c6f28dfcd30349925c6",
     "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF": "5c2410d71524f4f72b023ce8daf7a80528226d5f",   # its mmproj (images)
     "Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF": "e4ae9970325413d582ba2c294122fc5567ec1dd7",
     "unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF": "34841e360524d421c564cc3ed247aa04a865473b",   # 2026-10-16
@@ -614,6 +615,12 @@ GLM53_FILES = {
         ("UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00003-of-00004.gguf", 49075832480, "5b728b5b263c662201ef4a4a2b12fb509fe230d012418d0ed37c220a8a5aa230"),
         ("UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00004-of-00004.gguf", 22020797792, "4b6d16e0d1381e1b4b7eeb6c9799671bf98153a995be12e75e3da93cd97981d2")],
 }
+# Ornith-1.5-122B (ornith-ai, MIT; Unsloth's GGUFs): Qwen3.5-122B-A10B's architecture (qwen35moe), ~10B active.  Strata's
+# engine cannot run it (n_embd 3072): Momoe's ggml engine does, the CPU computing the experts the card does not hold
+# (momoe-cuda picks that or copying them in by a trial, src/metal/README.md)
+ORNITH122_FILES = {
+    "Ornith-1.5-122B-UD-IQ3_XXS.gguf": (49515667712, "027a9a480e8bcc6079fcf834e368467a169953561fb4b98dc9528d6185c8a438"),
+}
 GGML_FAMILIES = {
     "bolt": {"title": "Nemotron 3.5 Bolt 74B-A9B", "by": "NVIDIA; Unsloth's GGUFs",
              "about": "Mamba-2 + attention + latent MoE, 9B active; a 32 GB download, ~56 GB of RAM",
@@ -650,6 +657,16 @@ GGML_FAMILIES = {
               # a 12 GB card cannot start it alone (dense 7.2 GiB + pool + staging): two share its layers (setup)
               "context": 65536, "min_vram_gb": 16,
               "license": "MIT: https://huggingface.co/zai-org/GLM-5.3-Flash"},
+    "ornith122": {"title": "Ornith-1.5-122B-A10B", "by": "ornith-ai's agentic-coding model; Unsloth's GGUFs",
+                  "about": "Ornith-1.5's large sibling, 10B active; a 50 GB download, ~64 GB of RAM",
+                  "hf": hf("unsloth/Ornith-1.5-122B-GGUF"), "file": "Ornith-1.5-122B-{q}.gguf", "tag": "ornith122-",
+                  "name": "ornith-1.5-122b-a10b",
+                  # ram_gb: on a separate card the file stays in the file cache (measured: an RTX 4070 Ti, 63 GB of
+                  # RAM, the X server off: 19-21 tok/s); on less, or beside other programs, the rest from the SSD
+                  "models": {"UD-IQ3_XXS": {"about": "3-bit (Unsloth Dynamic), measured", "ram_gb": 64}},
+                  "sha256": ORNITH122_FILES, "default": "UD-IQ3_XXS", "draft_args": ["--mtp", "3"],
+                  "context": 32768, "min_vram_gb": 11,                    # measured on a 12 GB card
+                  "license": "MIT: https://huggingface.co/ornith-ai/Ornith-1.5-122B"},
     "lfm25": {"title": "LFM2.5-24B-A2B", "by": "Liquid AI; Unsloth's GGUFs",
               "about": "short convolutions + attention + MoE, 2.4B active, an agent model that always thinks; "
                        "7.5-15 GB, for small machines (measured on an 8 GB Jetson Orin Nano Super)",
@@ -6402,7 +6419,8 @@ MAC_AVAIL_MARGIN_GIB = 6                               # left of what macOS can 
 
 
 def mac_available_gib() -> float:
-    """What macOS can hand out now (free, inactive, speculative and purgeable pages), GiB; 0 when unknown."""
+    """What macOS can hand out now (free, inactive, speculative and purgeable pages, or the kernel's share of the memory
+    when that is more), GiB; 0 when unknown."""
     if os.environ.get("MOMOE_MAC_AVAILABLE_GIB"):       # tests
         return float(os.environ["MOMOE_MAC_AVAILABLE_GIB"])
     try:
@@ -6411,7 +6429,14 @@ def mac_available_gib() -> float:
         return 0.0
     page = int(re.search(r"page size of (\d+)", out).group(1)) if "page size of" in out else 16384
     n = sum(int(m.group(2)) for m in re.finditer(r"Pages (free|inactive|speculative|purgeable):\s+(\d+)", out))
-    return n * page / 2**30
+    # or the kernel's own share (memory_pressure's "free percentage"), which counts the file cache macOS can drop: a
+    # model file just read for its SHA-256 sits in active pages (Ornith-122B on the M4 Air: 11.5 GiB by the pages, 72%
+    # free by the kernel; with a 3 GiB pool it ran at 3.0 tok/s, 8 GiB 3.8, 12 GiB 4.6)
+    try:
+        level = int(subprocess.run(["sysctl", "-n", "kern.memorystatus_level"], capture_output=True, text=True).stdout)
+    except (OSError, ValueError):
+        level = 0
+    return max(n * page / 2**30, level / 100 * mac_memory_gib())
 
 
 MAC_DRAFT_MARGIN_GIB = 2.0                             # more of Metal's working set left free with the Flash-Next draft
@@ -6479,8 +6504,8 @@ def momoe_title(family: str) -> str:
 
 
 # the families momoe_setup offers, in its menu's order (NVFP4's packs are Strata's own format: its engine only)
-MOMOE_MENU = ("ornith", "qwen36", "qwen36-bartowski", "kat-coder", "qwen", "swift", "coder", "unsloth", "bolt", "glm53",
-              "lfm25", "lfm25-8b")
+MOMOE_MENU = ("ornith", "qwen36", "qwen36-bartowski", "kat-coder", "qwen", "swift", "coder", "unsloth", "bolt",
+              "ornith122", "glm53", "lfm25", "lfm25-8b")
 
 
 def momoe_menu(a, ram: float) -> str:
@@ -6739,6 +6764,11 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         args += ["--mtp", "4", "--draft-vocab", str(ROOT / "data" / DRAFT_VOCABS[a.draft_vocab or "en"])]
     if draft:                                            # (--mtp 2 measured the same as 3 on the M4 Air)
         args += ["--mtp", "3", "--mtp-gguf", str(draft)]
+    if fam.get("draft_args") and (unified and not mac or mac and (pool is None or pool >= 0.9 * w[0])):
+        # drafting pays only where (nearly) every expert is in memory (Ornith-122B, --mtp 3, 300 tokens: the Spark 26.4
+        # -> 33.2 tok/s, the M1 Ultra with a 36 of 38.8 GiB pool 16.4 -> 19.8); from the SSD (the M4 Air, 11 GiB) or
+        # with the CPU computing the experts (a 12 GB card) it is slower: 4.1-4.5 -> 4.0, 19.1 -> 12.5
+        args += fam["draft_args"]
     args += fam.get("engine_args", [])
     cfg_name = "ornith-mac" if mac and q == MAC_MODEL else tag   # (Ornith's Mac config keeps its first name)
     cfg_path = name_config(config_path_for(a.config_name, tag) if a.config_name else
