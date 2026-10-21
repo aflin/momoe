@@ -109,7 +109,10 @@ Ornith-122B drafts only where (nearly) every expert is in memory, and setup adds
 -> 33.2 tok/s, the M1 Ultra 16.4 -> 19.8): on the PC the CPU computes the experts the card does not hold and drafting
 was slower (19.1 -> 12.5), on the M4 Air (an 11 GiB pool, the rest from the SSD) 4.1-4.5 -> 4.0. Its greedy tokens
 against llama.cpp's (64): the same on both Macs and on the Spark with drafting; `momoe-cuda` without drafting parts at
-token 33, where its own top two are 0.38 / 0.36 but llama.cpp's 0.53 / 0.28 (not yet explained). llama.cpp's numbers: with drafting where marked \* (see below), else without.
+token 33, a three-way choice where each engine puts the weights differently (llama.cpp 0.53 / 0.28 / 0.19, `momoe-metal`
+0.56 / 0.39 / 0.05, `momoe-cuda` 0.36 / 0.38 / 0.25). Over 300 tokens fed llama.cpp's own, both are as close to it
+(KL from llama.cpp's top 20, mean / median: `momoe-cuda` on the Spark 0.0107 / 0.0006, `momoe-metal` on the M4 Air
+0.0108 / 0.0006; the same top token 98.3% and 99.0%; Ornith-35B: 0.0028 and 0.0030). llama.cpp's numbers: with drafting where marked \* (see below), else without.
 
 On the Macs, `momoe-metal` keeps one thread waiting on the CPU's wait-for-event instruction while a request runs.
 Without it, macOS held the engine's main thread on the efficiency cores and the GPU's clock low, at random from run to
