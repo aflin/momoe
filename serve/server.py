@@ -4112,7 +4112,7 @@ class Service:
                                  f"({ctx}); requests are never truncated. Send a smaller "
                                  f"max_tokens (at most {max(0, room)} here), or add \"fit_max_tokens\": true to the "
                                  "model's strata-<model>.json to shorten it to the room left (#545)")
-            print(f"[strata] max_tokens {max_new} shortened to {max(1, room)}: the prompt ({len(ids)} tokens) leaves that much "
+            print(f"[momoe] max_tokens {max_new} shortened to {max(1, room)}: the prompt ({len(ids)} tokens) leaves that much "
                   f"of the context ({ctx}); \"fit_max_tokens\": false answers 400 instead", flush=True)
             max_new = max(1, room)          # a shorter completion beats a 400 (the default)
         if images:
@@ -4243,7 +4243,7 @@ class Service:
             done = f"{pr[0]:,} of {pr[1]:,}" if pr and pr[1] else f"{s.get('prompt_tokens', 0):,}"   # as read (#29)
             print(f"[momoe] reading the prompt: {done} tokens, {el:.0f} s so far", flush=True)
         else:
-            rate = s["generated"] / max(1e-6, now - s["first_token"])
+            rate = s["generated"] / max(RATE_MIN_SPAN_S, now - s["first_token"])
             # #984: while a thinking budget applies, the thinking line shows it, not the request's max_tokens
             limit = (f"budget {s['thinking_budget']} (max {s.get('max_tokens')})"
                      if s["phase"] == "thinking" and s.get("thinking_budget") else f"max {s.get('max_tokens')}")
@@ -4703,11 +4703,12 @@ class Service:
                             now = time.time()
                             el = now - st.get("started", now)
                             ft = st.get("first_token")
-                            rate = n / max(1e-6, now - ft) if ft else 0.0
+                            rate = answer_speed(last, n, now - ft if ft else None)
                             hit_msg = f", expert cache {hit_rate*100:.1f}% hit" if hit_rate is not None else ""
                             if hit_msg and pcie_share:
                                 hit_msg += f" (+{pcie_share*100:.1f}% of the routed experts over PCIe)"
-                            print(f"[momoe] done: {n} tokens in {el:.0f} s ({rate:.1f} tok/s) "
+                            rate_txt = f"{rate:.1f} tok/s" if rate is not None else "no speed"
+                            print(f"[momoe] done: {n} tokens in {el:.0f} s ({rate_txt}) "
                                   f"({finish}, cancel={cancel.is_set()}){hit_msg}", flush=True)
                             if finish == "length" and parser.state in ("reasoning", "rcall"):   # #530
                                 print("[momoe] the reply reached max tokens while still thinking, so it has no "
@@ -4736,7 +4737,7 @@ class Service:
             print(f"[momoe] tool calls inside the thinking: {parser.rescued} read as calls, {parser.refused} kept as "
                   f"reasoning (quoted, or the turn did not end on a stop)", flush=True)
         if parser.unread:
-            print(f"[strata] {parser.unread} <tool_call> block(s) in the answer did not read as a call of a declared "
+            print(f"[momoe] {parser.unread} <tool_call> block(s) in the answer did not read as a call of a declared "
                   "tool and went back as text (a name the request did not declare, or a form the template does "
                   "not use)", flush=True)
         if stops is not None and stops.hit is None and stops.held:
@@ -4779,6 +4780,20 @@ def add_carry(carry: dict, last: dict) -> dict:
     if "prompt_read" in carry:
         out["prompt_read"] = carry["prompt_read"]
     return out
+
+
+def answer_speed(last: dict, generated: int, wall_s: float | None = None) -> float | None:
+    """The one definition of "answer speed": every token the model produced (thinking and answer, the tokens it kept - not
+    the MTP drafts it threw away) over the decode time, first generated token to last.  The engine's DONE line holds both
+    numbers; /metrics (`decode_tok_s`), the timings (`predicted_per_second`), the Terminal monitor and the app all use them.
+    Only an engine that sent no DONE falls back to the server's own clock from the first token, and a clock younger than
+    RATE_MIN_SPAN_S says nothing (it printed 1000000 tok/s for a one-token reply).  Prompt reading is never in it."""
+    produced, decode_ms = last.get("generated"), last.get("decode_ms")
+    if produced and decode_ms and decode_ms > 0:
+        return round(produced / (decode_ms / 1000), 1)
+    if generated and wall_s is not None and wall_s >= RATE_MIN_SPAN_S:
+        return round(generated / wall_s, 1)
+    return None
 
 
 def request_timings(prompt_tokens: int, generated: int, last: dict) -> dict | None:
