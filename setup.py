@@ -4957,11 +4957,24 @@ def has_data(folder: Path) -> bool:
     return False
 
 
+def in_trash(path) -> bool:
+    """#3410: True when ``path`` is inside a Trash / Recycle Bin folder (a folder deleted with the file manager is still a
+    folder there, and was remembered as an install): ~/.local/share/Trash/files/.., /.Trash-1000/.., ~/.Trash/..,
+    $RECYCLE.BIN\\.. (from Strata's strata_control/discovery.py, with #3501: a Windows-shaped path read on Linux)."""
+    parts = [x.lower() for p in Path(path).parts for x in str(p).split("\\")]
+    for i, x in enumerate(parts):
+        if x in (".trash", "$recycle.bin", "recycler", "$recycle.bin.old") or x.startswith(".trash-"):
+            return True
+        if x == "trash" and i + 1 < len(parts) and parts[i + 1] in ("files", "info", "expunged"):
+            return True                                  # the XDG Trash: ~/.local/share/Trash/files
+    return False
+
+
 def other_installs(settings: dict) -> list:
     """Momoe folders besides this one that may hold model files: the ones this user ran before, and momoe* folders
     next to this one (a zip unpacked again lands in e.g. `momoe-main (1)\\momoe-main`).  Not Strata's: its model files
     stay where they are."""
-    cands = [Path(p) for p in settings.get("installs", [])]
+    cands = [Path(p) for p in settings.get("installs", []) if not in_trash(p)]
     for base in dict.fromkeys((ROOT.parent, ROOT.parent.parent)):
         try:
             for d in base.iterdir():
@@ -5087,7 +5100,8 @@ def data_folder(requested: str | None) -> tuple:
             warn(f"some model files are still in {folder} (in use, or already in {dest})")
         else:
             ok(f"model files from {folder} moved to {dest} (a new copy of Momoe finds them there)")
-    installs = [str(ROOT)] + [p for p in settings.get("installs", []) if p != str(ROOT) and Path(p).is_dir()]
+    installs = [str(ROOT)] + [p for p in settings.get("installs", [])
+                              if p != str(ROOT) and Path(p).is_dir() and not in_trash(p)]
     keep = {"data_dir": str(dest)} if requested or settings.get("data_dir") else {}   # the default is not remembered:
     save_settings({**{k: v for k, v in settings.items() if k != "data_dir"}, **keep,   # another Momoe folder uses its own
                    "installs": installs[:20]})

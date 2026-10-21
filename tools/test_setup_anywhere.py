@@ -122,6 +122,16 @@ class MacPool(unittest.TestCase):
             self.assertAlmostEqual(setup.mac_available_gib(), 0.72 * 32)
 
 
+class Trash(unittest.TestCase):
+    def test_a_folder_in_the_trash_is_not_an_install(self):
+        # #3410 (from Strata): a momoe folder deleted with the file manager is not offered or remembered
+        for p in ("/home/a/.local/share/Trash/files/momoe", "/media/x/.Trash-1000/files/momoe", "/Users/a/.Trash/momoe",
+                  "C:\\$Recycle.Bin\\S-1-5\\momoe"):
+            self.assertTrue(setup.in_trash(p), p)
+        for p in ("/usr/local/src/momoe", "/home/a/trash/momoe", "/home/a/Trash"):
+            self.assertFalse(setup.in_trash(p), p)
+
+
 class Routing(unittest.TestCase):
     def run_main(self, platform, gpus, argv):
         calls = []
