@@ -94,12 +94,12 @@ tokens are within a few hundredths of each other, which was checked); and the se
 | Flash-Next (Unsloth) UD-IQ4_XS | 12.4* | 30.2 | - | 19.0* | 6.1* |
 | Qwen3.6-35B-A3B (Unsloth) UD-IQ4_XS | 158.7* | 125.2* | - | 129.3* | 56.5* |
 | Qwen3.6-35B-A3B (bartowski) IQ4_XS | 157.5* | 123.6* | - | 117.1* | 60.2* |
-| Ornith-1.5-35B-A3B IQ4_XS | 128.8* | 104.1* | - | 92.7* | 31.2* (as a 16 GB Mac, earlier: 9.7-13.1) |
+| Ornith-1.5-35B-A3B IQ4_XS | 128.8* | 104.1* | - | 92.7* | 49.3* (a 14 GiB pool: 31.2*; as a 16 GB Mac, earlier: 9.7-13.1) |
 | KAT-Coder-V2.5-Dev i-quality-v2 | 126.2* | 99.4* | - | 104.9* | 41.1* |
 | Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 | 28.4 | - | 37.5 (UD-Q3_K_XL) | 8.6 |
 | Ornith-1.5-122B-A10B UD-IQ3_XXS | 19.2 | 33.2* | - | 19.8* | 4.5 |
 | GLM-5.3-Flash UD-IQ3_XXS | does not fit a 12 GB card | 19.7* | - | 4.5* | 1.4 |
-| LFM2.5-24B-A2B | 75.9 (UD-Q4_K_XL) | 134.0 | 6.9 | 104.3 | 11.9 (as an 8 GB Mac) |
+| LFM2.5-24B-A2B | 75.9 (UD-Q4_K_XL) | 134.0 | 6.9 | 104.3 | 59.0 (11.9 as an 8 GB Mac) |
 | LFM2.5-8B-A1B UD-Q4_K_XL | 305.5 | 161.7 | 16.6 | 185.3 | 43.1 (as an 8 GB Mac) |
 | Flash-Next NVFP4 | Strata's own packs: a PC with an NVIDIA card only, not tested in MoMoE | | | | |
 
@@ -107,6 +107,8 @@ tokens are within a few hundredths of each other, which was checked); and the se
 checks them in one pass, keeping only what it would have written itself. Numbers without \* are without drafting:
 the Flash-Next family on the Spark, and Flash-Next IQ3_XXS and Swift on the M1 Ultra (where every expert fits only
 without the draft layer, which measured faster) were measured without it, LFM has no MTP layer, and MoMoE does not yet draft with Bolt's.
+llama.cpp's numbers: with drafting where marked \* (see below), else without.
+
 Ornith-122B drafts only where (nearly) every expert is in memory, and setup adds `--mtp 3` only there (the Spark 26.4
 -> 33.2 tok/s, the M1 Ultra 16.4 -> 19.8): on the PC the CPU computes the experts the card does not hold and drafting
 was slower (19.1 -> 12.5), on the M4 Air (an 11 GiB pool, the rest from the SSD) 4.1-4.5 -> 4.0. Its greedy tokens
@@ -115,9 +117,10 @@ token 33, a three-way choice where each engine puts the weights differently (lla
 0.56 / 0.39 / 0.05, `momoe-cuda` 0.36 / 0.38 / 0.25). Over 300 tokens fed llama.cpp's own, both are as close to it
 (KL from llama.cpp's top 20, mean / median: `momoe-cuda` on the Spark 0.0107 / 0.0006, `momoe-metal` on the M4 Air
 0.0108 / 0.0006; the same top token 98.3% and 99.0%; Ornith-35B: 0.0028 and 0.0030).
+
 On the M4 Air every model ran from setup's config (sizes, pools and drafting as setup chose them for 32 GB); how each
 was checked against llama.cpp, and every number: [bench/results/2026-10-21-every-model-everywhere](bench/results/2026-10-21-every-model-everywhere/README.md).
-GLM there drafts no tokens: from a pool of 9% of its experts drafting measured slower (1.0-1.1 against 1.4 tok/s). llama.cpp's numbers: with drafting where marked \* (see below), else without.
+GLM there drafts no tokens: from a pool of 9% of its experts drafting measured slower (1.0-1.1 against 1.4 tok/s).
 
 On the Macs, `momoe-metal` keeps one thread waiting on the CPU's wait-for-event instruction while a request runs.
 Without it, macOS held the engine's main thread on the efficiency cores and the GPU's clock low, at random from run to
@@ -169,22 +172,32 @@ and the Jetson; `momoe-metal` on the Macs.
 | Qwen3.6-35B-A3B (bartowski) IQ4_XS | M1 Ultra | 117.1* / 95.8 | 146.1* (4) / 96.1 |
 | KAT-Coder-V2.5-Dev i-quality-v2 | M1 Ultra | 104.9* / 91.0 | 106.8* (3) / 89.6 |
 | Ornith-1.5-35B-A3B IQ4_XS | M1 Ultra | 92.7* / 96.1 | 96.2* (2) / 96.1 |
+| Qwen3.6-35B-A3B (Unsloth) UD-IQ4_XS | M4 Air | 60.8* / 33.2 | 47.6* (4) / 28.9 |
+| Ornith-1.5-35B-A3B IQ4_XS | M4 Air | 49.3* / 40.9 | 36.1* (2) / 35.3 |
+| LFM2.5-24B-A2B UD-IQ3_XXS | M4 Air | 59.0 | 58.1 |
 | Nemotron 3.5 Bolt UD-Q3_K_XL | M1 Ultra | 37.5 | 38.5 (it cannot read a prompt: its Metal build has no kernel for 9 experts a token) |
 | Nemotron 3.5 Bolt UD-IQ3_XXS | PC | 30.0 / 30.6 (server, greedy / sampled) | 26.2 / 26.1 |
 | Ornith-1.5-122B-A10B UD-IQ3_XXS | PC | 19.2 (the CPU computes the experts the card does not hold) | 4.62 (48 layers' experts on the CPU, the best fit) |
 | GLM-5.3-Flash UD-IQ3_XXS | Spark | 19.7* / 15.0* / 14.6* (server, greedy / sampled); 13.3 | 1.3 (a 48-token check: every expert on the CPU, cold, not a speed test) |
 | GLM-5.3-Flash UD-IQ4_XS | Spark | 11.7* / 10.4* (server); 9.3 | 2.3 / 2.5 |
 
-\* With drafting (see above); the others without. llama.cpp drafts with the same MTP layer (`llama-server
---spec-type draft-mtp`, b11724), shown at its best number of drafted tokens (2-4); MoMoE drafts 4. Both sides for these
-rows: greedy, the same prompt, 400 tokens (MoMoE: its engine, the answer's second half; llama.cpp: its server's own
-timing over all 400). Without drafting the two are level (92.0-96.1 tok/s against 89.6-96.1); llama.cpp gains more
-from drafting (Qwen3.6: 1.66x against 1.41x), the gap left. Ornith's MTP layer is a weak drafter in both (llama.cpp: 54%
-of its drafts kept at 2, 28% at 4): without drafting both write 96.1. On the M4 Air, where it runs from a 14 GiB
-pool and the SSD, drafting still wins (30.7-31.7 against 24.6-25.2 tok/s without: a window shares the experts' reads).
+\* With drafting (see above); the others without. llama.cpp drafts with the same MTP layer (`llama-server --spec-type
+draft-mtp`, b11724), shown at its best number of drafted tokens (2-4); MoMoE drafts 4. Both sides for these rows:
+greedy, the same prompt, 400 tokens (MoMoE: its engine, the answer's second half; llama.cpp: its server's own timing
+over all 400). On the M1 Ultra, without drafting the two are level (92.0-96.1 tok/s against 89.6-96.1); llama.cpp gains
+more from drafting (Qwen3.6: 1.66x against 1.41x), the gap left. Ornith's MTP layer is a weak drafter in both
+(llama.cpp: 54% of its drafts kept at 2, 28% at 4): without drafting both write 96.1. On the M4 Air, where it runs from
+a 14 GiB pool and the SSD, drafting still wins (30.7-31.7 against 24.6-25.2 tok/s without: a window shares the experts'
+reads).
+
+On the M4 Air (2026-10-21, the same llama.cpp build, every expert in memory, the same way): MoMoE is ahead on the
+Qwen3.6 family, without drafting (Qwen3.6 33.2 against 28.9, Ornith 40.9 against 35.3) and more with it; level on
+LFM2.5-24B. Ornith's draft layer gains llama.cpp little there (36.1 with 2 drafted, slower with 3-4); MoMoE drafts
+only while that layer is sure (1.91 tokens a window) and writes 49.3. Two runs each, within 0.4 tok/s.
 
 Where every expert fits on the GPU, MoMoE with its graphs kept is level with llama.cpp on LFM2.5 (the PC, the Jetson,
-the M1 Ultra), and on the Qwen3.6 family on the M1 Ultra without drafting; with drafting llama.cpp is ahead there. MoMoE gains where the experts do not fit: the Jetson,
+the M1 Ultra, the M4 Air), and on the Qwen3.6 family on the M1 Ultra without drafting; with drafting llama.cpp is ahead
+there. On the M4 Air MoMoE is ahead on the Qwen3.6 family, 15% without drafting and 27-37% with it. MoMoE gains where the experts do not fit: the Jetson,
 GLM on the Spark, Bolt on the PC.
 
 Reading prompts on the PC, with Strata's engine (4K / 16K tokens): Flash-Next IQ3_XXS 1,178 / 2,133 tok/s; the Coder

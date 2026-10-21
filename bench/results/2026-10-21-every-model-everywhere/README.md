@@ -19,4 +19,21 @@ Found and fixed on the way (07c8e590): Nemotron's read-ahead on Metal went to th
 next MoE block (0% used; it filled a 282-slot group and the engine stopped); GLM's drafting from a 9% pool ran Metal
 out of memory and was slower (setup now leaves it off below 15%).
 
+## Against llama.cpp on the M4 Air
+
+llama.cpp 99db719 (the M1 Ultra's build), every expert in memory (32 GB, nothing locked away), the model's chat
+template rendered by llama-server and the same token ids given to MoMoE, greedy 400 tokens, two runs each, 90 s apart
+(the Air has no fan). llama.cpp: its server's own timings over the 400 tokens (`--spec-type draft-mtp N`); MoMoE: the
+engine with setup's config (`momoe setup --config-name ornith-32gb.json`, `lfm25-32gb.json`), the second half.
+`zll.sh` ran it.
+
+| Model | llama.cpp, no drafting | llama.cpp, drafting | MoMoE, no drafting | MoMoE, setup's config |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen3.6-35B-A3B UD-IQ4_XS | 28.9 | 43.8 / 46.8 / 47.6 (2 / 3 / 4 drafted) | 33.2 | 60.8 (`--mtp 4`) |
+| Ornith-1.5-35B-A3B IQ4_XS | 35.3 | 36.1 / 32.0 / 27.3 | 40.9 | 49.3 (`--mtp 4`) |
+| LFM2.5-24B-A2B UD-IQ3_XXS | 58.1 | (no MTP layer) | 58.5-59.0 | 58.8-59.0 |
+
+llama.cpp's draft acceptance: Qwen3.6 0.89 / 0.82 / 0.77, Ornith 0.58 / 0.40 / 0.30. Swap stayed at 0.6 GB; the
+lowest memory available 4.3 GB (Ornith drafting).
+
 Not tested: the Jetson (8 GB) with the 122B or the big Flash-Next files; Flash-Next NVFP4 (Strata's own packs).
