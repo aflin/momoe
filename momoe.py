@@ -7,6 +7,12 @@
     momoe stop                           stop it
     momoe status                         is it running, which model, where
     momoe list                           the configs in config/
+    momoe remove CONFIG|FOLDER [--dry-run] [-y|--yes] [--wipe]
+                                         delete a model: its GGUF files (its folder in models/), its tokenizer pack
+                                         in packs/, the config and its logs (also: momoe delete); lists them and
+                                         asks first (-y: no question).  Files other configs use stay; it asks
+                                         whether those configs and the files should go too (--wipe: they do, no
+                                         question).  A folder in models/: that folder and its pack
     momoe log [server|engine|unsloth|lmstudio|all] [-n N] [--no-follow]
                                          show the last N lines (20) of the logs in logs/ and follow them as they grow;
                                          by default the server's and the running (or last) config's engine log
@@ -411,6 +417,203 @@ def cmd_list(args) -> int:
         ctx = args[args.index(flag) + 1] if flag else "?"
         say(f"{'*' if on else ' '} {p.name:36} {c.get('model_name', ''):40} context {ctx}{'  (running)' if on else ''}")
     return 0
+
+
+# ------------------------------------------------------------------------------------------------ remove
+OWNED = ("models", "packs")                          # the folders a model's files are in (setup's); nothing else is
+                                                     # deleted but the config and its logs
+
+
+def _strings(v):
+    if isinstance(v, str):
+        yield v
+    elif isinstance(v, dict):
+        for x in v.values():
+            yield from _strings(x)
+    elif isinstance(v, list):
+        for x in v:
+            yield from _strings(x)
+
+
+def model_paths(cfg: Path) -> set:
+    """What a config's model is made of: for every file or folder it names inside models/ or packs/, that folder's
+    entry right under models/ or packs/ (a model's folder: models/gemma4-UD-IQ3_XXS; its pack: packs/gemma4-ud-iq3_xxs)."""
+    c = read_json(cfg)
+    found = set()
+    if not isinstance(c, dict):
+        return found
+    base = Path(c.get("cwd") or ROOT)
+    for v in _strings(c):
+        if not v or len(v) > 4096 or "\n" in v:
+            continue
+        p = Path(v) if Path(v).is_absolute() else base / v
+        try:
+            p = p.resolve()
+        except (OSError, RuntimeError):
+            continue
+        for top in OWNED:
+            d = (ROOT / top).resolve()
+            if p != d and d in p.parents and p.exists():
+                found.add(d / p.relative_to(d).parts[0])
+    return found
+
+
+def size_of(p: Path) -> int:
+    try:
+        if p.is_file() or p.is_symlink():
+            return p.lstat().st_size
+        return sum(f.lstat().st_size for f in p.rglob("*") if f.is_file() and not f.is_symlink())
+    except OSError:
+        return 0
+
+
+def gb(n: int) -> str:
+    return f"{n / 1e9:.1f} GB" if n >= 1e8 else f"{n / 1e6:.1f} MB" if n >= 1e5 else f"{round(n / 1e3) if n == 0 else max(1, round(n / 1e3))} KB"
+
+
+def all_configs() -> list:
+    """Every config file in config/ (the ones `momoe list` shows and any other *.json there that names files)."""
+    move_configs()
+    return sorted(p.resolve() for p in config_dir().glob("*.json") if not p.name.endswith(".shared-settings.json"))
+
+
+def config_files(cfg: Path) -> list:
+    """A config's own files: it, its backups (NAME.json.bak, ...) and its logs in logs/."""
+    out = [cfg] + sorted(f for f in config_dir().glob(cfg.name + ".*") if f.is_file())
+    c = read_json(cfg)
+    if isinstance(c, dict) and isinstance(c.get("log"), str) and c["log"]:
+        lp = Path(c["log"])
+        if (ROOT / "logs").resolve() in lp.resolve().parents:
+            out += sorted(f for f in lp.parent.glob(lp.name + "*") if f.is_file())
+    return out
+
+
+def sharing(cfgs: set, dirs: set, uses: dict) -> tuple:
+    """The configs that use any of `dirs`, and everything they use, until nothing more joins: what goes when a model
+    and every config that runs it go."""
+    cfgs, dirs = set(cfgs), set(dirs)
+    while True:
+        more = {p for p, used in uses.items() if p not in cfgs and used & dirs}
+        if not more:
+            return cfgs, dirs
+        cfgs |= more
+        for p in more:
+            dirs |= uses[p]
+
+
+def show(paths, title: str) -> int:
+    say(title)
+    total = 0
+    for p in paths:
+        n = size_of(p)
+        total += n
+        say(f"  {p}{'/' if p.is_dir() else ''}  ({gb(n)})")
+    return total
+
+
+def delete(paths) -> int:
+    failed = 0
+    for p in paths:
+        try:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p)
+            elif p.exists() or p.is_symlink():
+                p.unlink()
+        except OSError as e:
+            failed += 1
+            say(f"  could not delete {p}: {e}")
+    return failed
+
+
+def ask(question: str) -> bool:
+    return input(question + " [y/N] ").strip().lower() in ("y", "yes")
+
+
+def cmd_remove(args) -> int:
+    flags = ("--dry-run", "--yes", "-y", "--wipe")
+    names = [a for a in args if not a.startswith("-")]
+    if len(names) != 1 or any(a.startswith("-") and a not in flags for a in args):
+        have = configs()
+        die("momoe remove CONFIG|FOLDER [--dry-run] [-y|--yes] [--wipe]" +
+            (f" (configs: {', '.join(p.stem for p in have)})" if have else ""))
+    name, dry, wipe = names[0], "--dry-run" in args, "--wipe" in args
+    yes = "--yes" in args or "-y" in args
+    uses = {p: model_paths(p) for p in all_configs()}
+    d = config_dir()
+    if any(p.is_file() for p in (Path(name), d / name, d / (name + ".json"), d / f"strata-{name.lower()}.json")):
+        cfg = find_config(name)
+        mine, start = uses.get(cfg, model_paths(cfg)), {cfg}
+        uses[cfg] = mine
+        label = cfg.stem
+    else:                                            # a folder in models/ (a download without a config)
+        models = (ROOT / "models").resolve()
+        hits = [p for p in models.iterdir() if p.is_dir() and p.name.lower() == Path(name).name.lower()] \
+            if models.is_dir() and "/" not in name.strip("/") and "\\" not in name else []
+        if not hits:
+            have = configs()
+            die(f"no config or model folder {name!r} (configs: {', '.join(p.stem for p in have) or 'none'}; folders: "
+                f"{', '.join(sorted(p.name for p in models.iterdir() if p.is_dir())) if models.is_dir() else 'none'})")
+        folder = hits[0]
+        pack = (ROOT / "packs").resolve() / folder.name.lower()
+        mine, start, cfg = {folder} | ({pack} if pack.is_dir() else set()), set(), None
+        label = folder.name
+    # this alone: the config's files and what no other config uses; then what goes with every config sharing them
+    others = {p for p, used in uses.items() if p not in start and used & mine}
+    shared = {x for x in mine if any(x in uses[p] for p in others)}
+    if cfg is None and any(folder in uses[p] for p in others):
+        alone = []                                   # (the folder itself is in use: nothing goes on its own)
+    else:
+        alone = sorted(mine - shared) + [f for c in start for f in config_files(c)]
+    cfgs, dirs = sharing(start, mine, uses)
+    extra_cfgs = sorted(cfgs - start)
+    extra = sorted(dirs - set(alone)) + [f for c in extra_cfgs for f in config_files(c)]
+    s = running()
+    if s and Path(s.get("config", "")).resolve() in (cfgs if (wipe or extra_cfgs) else start):
+        on = Path(s["config"]).resolve()
+        if on in start or wipe:
+            die(f"{s.get('model') or on.stem} ({on.stem}) is running: momoe stop first")
+    total = 0
+    if alone:
+        total = show(alone, f"momoe remove {label}: deletes" + (" (no config uses it)" if cfg is None else ""))
+    else:
+        say(f"momoe remove {label}: " + (f"{', '.join(p.stem for p in extra_cfgs)} use{'s' if len(extra_cfgs) == 1 else ''}"
+                                         " it: nothing goes without them"))
+    if extra_cfgs and alone:
+        say(f"  {len(extra_cfgs)} other config{'s' if len(extra_cfgs) > 1 else ''} use{'s' if len(extra_cfgs) == 1 else ''}"
+            f" the same files: {', '.join(p.stem for p in extra_cfgs)}")
+    if extra_cfgs:
+        more = show(extra, "  with them (--wipe, or yes to the second question)" + (" also:" if alone else ":"))
+    else:
+        more = 0
+    if not mine and cfg is not None:
+        say("  (the config names no model files in models/ or packs/: only the config and its logs)")
+    say(f"  {gb(total + more)} in all with the other configs" if not alone else
+        f"  {gb(total)}" + (f" ({gb(total + more)} with the other configs)" if extra_cfgs else "") + " in all")
+    if dry:
+        return 0
+    go, also = bool(alone), False
+    if wipe:
+        go, also = True, bool(extra_cfgs)
+    elif yes:
+        if not alone:
+            die("not deleted: other configs use it (--wipe deletes them too)")
+    else:
+        if not sys.stdin.isatty():
+            die("not deleted: no terminal to ask (-y deletes this, --wipe this and the configs sharing its files)")
+        go = bool(alone) and ask("Delete these?")
+        if extra_cfgs and (go or not alone):
+            also = ask(("Also delete the other config" if len(extra_cfgs) == 1 else
+                        f"Also delete the {len(extra_cfgs)} other configs") + ", the model files and the files made from them?")
+        if not go and not also:
+            say("Nothing deleted.")
+            return 1
+    if also and s and Path(s.get("config", "")).resolve() in cfgs:
+        die(f"{s.get('model') or Path(s['config']).stem} is running: momoe stop first")
+    gone = (alone if go else []) + (extra if also else [])
+    failed = delete(gone)
+    n = (total if go else 0) + (more if also else 0)
+    say(f"Deleted {gb(n)}." if not failed else f"{failed} could not be deleted (above).")
+    return 1 if failed else 0
 
 
 # ------------------------------------------------------------------------------------------------ run <tool>
@@ -886,7 +1089,7 @@ def main(argv) -> int:
         say(__doc__.strip())
         return 0
     cmds = {"setup": cmd_setup, "start": cmd_start, "stop": cmd_stop, "status": cmd_status, "list": cmd_list,
-            "log": cmd_log, "run": cmd_run}
+            "log": cmd_log, "run": cmd_run, "remove": cmd_remove, "delete": cmd_remove}
     if argv[0] not in cmds:
         die(f"unknown command {argv[0]!r}: momoe " + "|".join(cmds) + " (momoe help)")
     return cmds[argv[0]](argv[1:])

@@ -347,7 +347,14 @@ momoe run unsloth                     # Unsloth Studio with a "MoMoE" provider
 momoe run lmstudio                    # LM Studio, with the plugin it needs installed and set up
 momoe run claude --config ornith-8gb  # start that config first if nothing is running
 momoe stop
+momoe remove ornith-8gb               # delete a model: its GGUF, its pack, the config and its logs (asks first)
 ```
+
+`momoe remove` (or `momoe delete`) lists what it will delete and asks first (`-y`: no question; `--dry-run`: only the
+list). A model file or pack that other configs also use stays, and it asks whether those configs, the model and the
+files made from it should go as well (`--wipe`: they do, without asking). It touches nothing outside `models/`,
+`packs/`, `config/` and `logs/`. Given a folder in `models/` (a download without a config, say), it deletes that folder
+and its pack.
 
 When no server is running, `momoe run` starts one, asking which config if there are several. It gives the tool its
 settings for that run only and installs nothing: a missing tool is named, with how to install it.
