@@ -265,6 +265,7 @@ class MacDraft(unittest.TestCase):
                    mock.patch.object(setup, "get_llama_cpp", return_value=Path("/l")),
                    mock.patch.object(setup, "weights_gib", return_value=weights),
                    mock.patch.object(setup, "kv_bytes_per_token", return_value=self.KV),
+                   mock.patch.object(setup, "kv_ring_gib", return_value=0.0),
                    mock.patch.object(setup, "mac_available_gib", return_value=avail),
                    mock.patch.object(setup, "name_config", side_effect=lambda p, a: p),
                    mock.patch.object(setup, "write_setup_config", side_effect=lambda p, c: written.update(c))]

@@ -75,6 +75,7 @@ HF_REVISIONS = {
     "unsloth/Qwen3.6-35B-A3B-MTP-GGUF": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",
     "bartowski/Ornith-1.5-35B-A3B-GGUF": "64b0493d34a5ca4c1b4ad67bb99b41d74b4f07d6",
     "unsloth/Ornith-1.5-122B-GGUF": "3842d003341507c216295c6f28dfcd30349925c6",
+    "unsloth/flint-GGUF": "9167d02e3b32c8592d94d17e2316f0be8d7caab8",
     "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF": "5c2410d71524f4f72b023ce8daf7a80528226d5f",   # its mmproj (images)
     "Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF": "e4ae9970325413d582ba2c294122fc5567ec1dd7",
     "unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF": "34841e360524d421c564cc3ed247aa04a865473b",   # 2026-10-16
@@ -621,6 +622,12 @@ GLM53_FILES = {
 ORNITH122_FILES = {
     "Ornith-1.5-122B-UD-IQ3_XXS.gguf": (49515667712, "027a9a480e8bcc6079fcf834e368467a169953561fb4b98dc9528d6185c8a438"),
 }
+# Flint (Recursive, 40B-A2.5B, for coding agents; Unsloth's GGUFs): GQA attention with sinks (35 sliding-window blocks,
+# 14 full), 256 experts + a shared one.  Momoe's ggml engine runs it as an lfm2moe variant (src/metal: flint)
+FLINT_FILES = {
+    "flint-UD-IQ3_XXS.gguf": (14535427520, "7a0a095dde1d931063a5d571e19497d997edbc783eb1ed6b86529bfab9d94804"),
+    "flint-UD-Q4_K_XL.gguf": (25054688704, "63c2ecc461ca545134b670c660e76fa20f47240f8d39b6510bfd21c4dd6e072f"),
+}
 GGML_FAMILIES = {
     "bolt": {"title": "Nemotron 3.5 Bolt 74B-A9B", "by": "NVIDIA; Unsloth's GGUFs",
              "about": "Mamba-2 + attention + latent MoE, 9B active; a 32 GB download, ~56 GB of RAM",
@@ -668,6 +675,17 @@ GGML_FAMILIES = {
                   "sha256": ORNITH122_FILES, "default": "UD-IQ3_XXS", "draft_args": ["--mtp", "3"],
                   "context": 32768, "min_vram_gb": 11,                    # measured on a 12 GB card
                   "license": "MIT: https://huggingface.co/ornith-ai/Ornith-1.5-122B"},
+    "flint": {"title": "Flint 40B-A2.5B", "by": "Recursive's coding-agent model; Unsloth's GGUFs",
+              "about": "a coding-agent MoE, 2.5B active; 14.5-25 GB",
+              "hf": hf("unsloth/flint-GGUF"), "file": "flint-{q}.gguf", "tag": "flint-", "name": "flint-40b-a2.5b",
+              # which size: flint_size (by the machine); ram_gb: the memory each was measured to run well with
+              "models": {"UD-IQ3_XXS": {"about": "3-bit (Unsloth Dynamic), measured: for 12 GB cards and Macs under "
+                                                 "48 GB", "ram_gb": 24},
+                         "UD-Q4_K_XL": {"about": "4-bit, larger (Unsloth Dynamic), measured: where the GPU shares "
+                                                 "48 GB or more", "ram_gb": 32}},
+              "sha256": FLINT_FILES, "default": "UD-IQ3_XXS",
+              "context": 32768, "min_vram_gb": 0,
+              "license": "Apache 2.0: https://huggingface.co/RecursiveSI/flint"},
     "lfm25": {"title": "LFM2.5-24B-A2B", "by": "Liquid AI; Unsloth's GGUFs",
               "about": "short convolutions + attention + MoE, 2.4B active, an agent model that always thinks; "
                        "7.5-15 GB, for small machines (measured on an 8 GB Jetson Orin Nano Super)",
@@ -5477,6 +5495,7 @@ SAMPLING_QWEN36 = {"temperature": 0.6, "top_p": 0.95, "top_k": 20}       # Qwen3
 SAMPLING_FLASH_NEXT = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}   # Qwen3.8-Flash-Next: thinking mode
 SAMPLING_NEMOTRON = {"temperature": 1.0, "top_p": 0.95}                  # Nemotron 3.5 (Bolt): the card's text sampling
 SAMPLING_GLM53 = {"temperature": 1.0, "top_p": 0.95}                     # GLM-5.3-Flash: its card's evaluation settings
+SAMPLING_FLINT = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}       # Flint: its card's (and the file's)
 SAMPLING_LFM25 = {"temperature": 0.1, "top_k": 50}                       # LFM2.5: the card's (and its repetition
                                                                           # penalty 1.05, which momoe-cuda does not apply)
 SAMPLING_LFM25_8B = {"temperature": 0.2, "top_k": 64}                    # LFM2.5-8B-A1B: its card's (top_k 80 there: the
@@ -5493,6 +5512,8 @@ def recommended_sampling(model_name) -> dict | None:
         return dict(SAMPLING_NEMOTRON)
     if name.startswith("glm-5.3-flash"):
         return dict(SAMPLING_GLM53)
+    if name.startswith("flint-"):
+        return dict(SAMPLING_FLINT)
     if name.startswith("lfm2.5-8b-"):
         return dict(SAMPLING_LFM25_8B)
     if name.startswith("lfm2.5-"):
@@ -6801,13 +6822,24 @@ def momoe_size(family: str, size: str | None, ram: float) -> str:
     return small_size(family, ram) if small_family(family) else recommended_size(family, names, ram)
 
 
+def flint_size(ram: float, shared: bool, vram_gb: float) -> str:
+    """Flint's size for this machine.  Measured: an RTX 4070 Ti (12 GB) + 63 GB, the CPU computing the experts the card
+    does not hold: UD-IQ3_XXS 90 tok/s, UD-Q4_K_XL 67 (llama.cpp: 103, 58); the M4 Air (32 GB): UD-IQ3_XXS 42.2 with
+    every expert in memory (llama.cpp 41.0), UD-Q4_K_XL 16.6-19.1 from a 14-16 GiB pool and the SSD (llama.cpp 20.8).
+    So the 4-bit file where it fits in memory beside the system (a GPU sharing 48 GB or more) or a card of 16 GB or
+    more holds most of its experts (not measured), else the 3-bit one."""
+    if shared:
+        return "UD-Q4_K_XL" if ram >= 48 else "UD-IQ3_XXS"
+    return "UD-Q4_K_XL" if vram_gb >= 16 and ram >= 32 else "UD-IQ3_XXS"
+
+
 def momoe_title(family: str) -> str:
     return (GGML_FAMILIES.get(family) or FAMILIES[family])["title"]
 
 
 # the families momoe_setup offers, in its menu's order (NVFP4's packs are Strata's own format: its engine only)
 MOMOE_MENU = ("ornith", "qwen36", "qwen36-bartowski", "kat-coder", "qwen", "swift", "coder", "unsloth", "bolt",
-              "ornith122", "glm53", "lfm25", "lfm25-8b")
+              "ornith122", "glm53", "flint", "lfm25", "lfm25-8b")
 
 
 def momoe_menu(a, ram: float) -> str:
@@ -6843,9 +6875,31 @@ def kv_bytes_per_token(files: list) -> int:
         int(md.get(f"{a}.embedding_length", 0) or 0) // max(1, int(md.get(f"{a}.attention.head_count", 1) or 1)))
     if isinstance(kv, list):
         return sum(int(x) for x in kv) * head * 2 * 2
+    swa = md.get(f"{a}.attention.sliding_window_pattern")
+    if isinstance(swa, list):                           # flint: only the full-attention blocks keep every position
+        return sum(1 for x in swa[:blocks] if not x) * int(kv or 0) * head * 2 * 2   # (the others: kv_ring_gib)
     every = int(md.get(f"{a}.full_attention_interval", 0) or 0)
     layers = blocks // every if every else blocks
     return layers * int(kv or 0) * head * 2 * 2
+
+
+KV_RING_ROWS = 2048                                    # a sliding-window block's ring: the window and the largest
+                                                       # batch, rounded up (src/metal: flint's swa_rows, <= 2048)
+
+
+def kv_ring_gib(files: list) -> float:
+    """The fixed KV cache of the sliding-window blocks that keep only a ring of positions (flint), GiB; 0 for others."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    from gguf_reader import GGUFFile
+    md = GGUFFile(files[0]).metadata
+    a = md.get("general.architecture", "")
+    swa = md.get(f"{a}.attention.sliding_window_pattern")
+    if not isinstance(swa, list):
+        return 0.0
+    blocks = int(md.get(f"{a}.block_count", 0) or 0)
+    head = int(md.get(f"{a}.attention.key_length") or 0)
+    kv = int(md.get(f"{a}.attention.head_count_kv") or 0)
+    return sum(1 for x in swa[:blocks] if x) * KV_RING_ROWS * kv * head * 2 * 2 / 2**30
 
 
 def weights_gib(files: list) -> tuple:
@@ -6930,6 +6984,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     if a.helper_tier and len(cards) != 2:
         fail("--helper-tier takes two cards: --gpus MAIN,HELPER")
     q = momoe_size(family, a.model, ram)
+    if family == "flint" and not a.model:
+        q = flint_size(ram, mac or unified, 0.0 if mac or unified else gpu["vram_gb"])
     need = momoe_sizes(family)[q][1]
     files = momoe_files(family, q)
     if ram < need:
@@ -7039,6 +7095,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     pool, ctx = None, a.context or fam.get("context") or 32768
     if mac:
         w, kvt, avail = weights_gib(paths), kv_bytes_per_token(paths), mac_available_gib()
+        w = (w[0], w[1] + kv_ring_gib(paths))          # (flint's sliding-window rings: held with the other weights)
         draft_gib = draft.stat().st_size / 2**30 if draft else 0.0
         fixed = a.context or fam.get("context")
         for c in ((fixed,) if fixed else (65536, 32768)):

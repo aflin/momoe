@@ -93,8 +93,20 @@ CHATGLM4_PATTERN = (
 
 # `lfm2` (Liquid's LFM2 / LFM2.5): llama-vocab.cpp maps it to LLAMA_VOCAB_PRE_TYPE_LLAMA3 with `ignore_merges` - the
 # same pattern as CHATGLM4's (numbers in runs of up to three digits, no \p{M} classes).
+# `flint` (Recursive's Flint): llama-vocab.cpp's LLAMA_VOCAB_PRE_TYPE_FLINT is three patterns applied one after another,
+# each splitting every piece the one before it left (its matches and the text between them both stay pieces): runs of
+# up to three digits, then CJK runs, then words with their English contractions, punctuation runs, line breaks and spaces.
+# No ignore_merges, no bos.
+FLINT_PATTERNS = (
+    r"\p{N}{1,3}",
+    r"[一-龥぀-ゟ゠-ヿ]+",
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?"
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?"
+    r"| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+",
+)
 PRE_PATTERNS = {"qwen35": QWEN35_PATTERN, "tekken": TEKKEN_PATTERN, "glm4": CHATGLM4_PATTERN, "glm5": CHATGLM4_PATTERN,
-                "lfm2": CHATGLM4_PATTERN}
+                "lfm2": CHATGLM4_PATTERN, "flint": FLINT_PATTERNS[-1]}
+PRE_SEQUENCES = {"flint": FLINT_PATTERNS}     # pre-tokenizers of several patterns in a row (the last one is PRE_PATTERNS')
 IGNORE_MERGES = {"glm4", "glm5", "lfm2"}
 # llama.cpp adds a bos token to these (add_bos); their chat templates write it as {{ bos_token }}: the pack names it
 # (`bos_token` in tokenizer.json) for the server's ChatTemplate
@@ -126,6 +138,7 @@ class Tokenizer:
         if pre not in PRE_PATTERNS:
             raise ValueError("pre-tokenizer %r is not supported (only %s)" % (pre, ", ".join(PRE_PATTERNS)))
         self._re = regex.compile(PRE_PATTERNS[pre])
+        self._seq = [regex.compile(x) for x in PRE_SEQUENCES.get(pre, ())]
 
         # The literals matched directly instead of being run through BPE.  GGUF token types: 3 = CONTROL,
         # 4 = USER_DEFINED.  The two classes behave DIFFERENTLY and llama.cpp's own tokenizer settled which:
@@ -253,6 +266,25 @@ class Tokenizer:
                     heapq.heappush(heap, (r2, p, parts[p], parts[i]))
         return [s for s in parts if s is not None]
 
+    def _split_seq(self, text: str) -> list[str]:
+        """Several patterns in a row (llama.cpp's unicode_regex_split): each one splits every piece into its matches and
+        the text between them, the next one splits those again."""
+        pieces = [text]
+        for pat in self._seq:
+            out = []
+            for p in pieces:
+                at = 0
+                for m in pat.finditer(p):
+                    if m.start() > at:
+                        out.append(p[at:m.start()])
+                    if m.end() > m.start():
+                        out.append(m.group())
+                    at = m.end()
+                if at < len(p):
+                    out.append(p[at:])
+            pieces = out
+        return pieces
+
     PIECE_CACHE_MAX = 200_000    # pre-tokenizer pieces remembered (an agent resends its whole history every turn)
 
     def _encode_plain(self, text: str) -> list[int]:
@@ -260,7 +292,7 @@ class Tokenizer:
         # A piece's ids depend on the piece alone, so repeated pieces (most of a resent conversation) are looked up
         # instead of merged again.  The ids are the ones _bpe gives: this only skips the work.
         cache = self._piece_ids
-        for piece in self._re.findall(text):
+        for piece in (self._split_seq(text) if self._seq else self._re.findall(text)):
             got = cache.get(piece)
             if got is None:
                 mapped = "".join(BYTE_TO_UNICODE[b] for b in piece.encode("utf-8"))

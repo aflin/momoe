@@ -151,6 +151,9 @@ struct Layer {
     ggml_tensor *hc_ffn_fn = nullptr, *hc_ffn_base = nullptr, *hc_ffn_scale = nullptr;
     ggml_tensor *ffn_norm = nullptr, *ffn_gate = nullptr, *ffn_up = nullptr, *ffn_down = nullptr;   // + the dense FFN
     ggml_tensor *lat_cache = nullptr;                        // MLA: [kv_lora, n_ctx] f16 (the key, and the value)
+    // flint: per-head attention sinks; a sliding-window block (the window's mask) and whether it ropes
+    ggml_tensor *sinks = nullptr;
+    bool swa = false, rope = true;
 };
 
 struct Model {
@@ -190,6 +193,15 @@ struct Model {
     // norms, NEOX RoPE); the first n_dense blocks have a dense FFN, the others a sigmoid-routed MoE (its bias only
     // chooses, the chosen weights normalized), no shared expert
     bool lfm = false;
+    // flint (Recursive's Flint 40B-A2.5B): lfm2moe's MoE and dense lead blocks (lfm is set too) with every block GQA
+    // attention: q / k norms, attention sinks, a sliding window (n_swa: the token and the 512 before it) with NEOX RoPE
+    // on 35 blocks, full attention without RoPE on 14; a shared expert; the down projection's input scaled per expert
+    // and token by a power of two (llama.cpp's build_amax_src1_f16: the 8-bit activation blocks' f16 sums stay finite)
+    bool flint = false;
+    int n_swa = 0;
+    // flint's sliding-window blocks keep only a ring of swa_rows positions (the window and the largest batch, as
+    // llama.cpp's iswa cache): position p in row p % swa_rows; the full blocks keep every position
+    int swa_rows = 0;
     int n_dense = 0, kda_hd = 0, q_lora = 0, kv_lora = 0, mla_k = 0, mla_v = 0, hc_iters = 0;
     float norm_eps = 1e-6f, kda_lb = -INFINITY, hc_eps = 1e-6f;
     bool kpool_tail = true;
@@ -596,7 +608,7 @@ static const int HYB_MAX_T = 16;                             // --hybrid: graphs
 // Ornith-1.5-35B IQ4_XS (52%: 14.1 ms per token, the copies 15.6)
 static bool hybrid_model(const Model & m) {
     static const char * q = getenv("MOMOE_QWEN_HYBRID");
-    return m.nemo || (!(q && q[0] == '0') && !m.qwen4 && !m.glm5 && !m.lfm);
+    return m.nemo || (!(q && q[0] == '0') && !m.qwen4 && !m.glm5 && (!m.lfm || m.flint));   // (flint: SwiGLU experts as qwen35moe's)
 }
 
 
@@ -788,6 +800,18 @@ static std::vector<uint64_t> gguf_uarr(gguf_context * g, const std::string & key
             default: die("GGUF key %s: not an integer array", key.c_str());
         }
     }
+    return v;
+}
+
+// a bool array (flint's sliding_window_pattern, rope_pattern)
+static std::vector<bool> gguf_barr(gguf_context * g, const std::string & key) {
+    int64_t i = gguf_find_key(g, key.c_str());
+    if (i < 0) die("GGUF key %s missing", key.c_str());
+    if (gguf_get_arr_type(g, i) != GGUF_TYPE_BOOL) die("GGUF key %s: not a bool array", key.c_str());
+    const size_t n = gguf_get_arr_n(g, i);
+    const int8_t * d = (const int8_t *) gguf_get_arr_data(g, i);
+    std::vector<bool> v(n);
+    for (size_t j = 0; j < n; ++j) v[j] = d[j] != 0;
     return v;
 }
 
@@ -1080,12 +1104,14 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     gguf_context * g = gguf_init_from_file(path, gp);
     if (!g) die("cannot read %s as GGUF", path);
     std::string arch = gguf_get_val_str(g, gguf_find_key(g, "general.architecture"));
-    if (arch != "qwen35moe" && arch != "qwen4exp" && arch != "nemotron_h_moe" && arch != "glm5-next" && arch != "lfm2moe")
-        die("%s: only qwen35moe, qwen4exp, nemotron_h_moe, glm5-next and lfm2moe models", arch.c_str());
+    if (arch != "qwen35moe" && arch != "qwen4exp" && arch != "nemotron_h_moe" && arch != "glm5-next" && arch != "lfm2moe"
+        && arch != "flint")
+        die("%s: only qwen35moe, qwen4exp, nemotron_h_moe, glm5-next, lfm2moe and flint models", arch.c_str());
     m.qwen4 = arch == "qwen4exp";
     m.nemo = arch == "nemotron_h_moe";
     m.glm5 = arch == "glm5-next";
-    m.lfm = arch == "lfm2moe";
+    m.flint = arch == "flint";
+    m.lfm = arch == "lfm2moe" || m.flint;
     {                                                        // the control tokens the serve loop needs, by name
         const int64_t ti = gguf_find_key(g, "tokenizer.ggml.tokens");
         if (ti < 0) die("the file has no vocabulary");
@@ -1101,7 +1127,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
             else if (!strcmp(s, "<|user|>") || !strcmp(s, "<|observation|>")) glm_ends.push_back((int32_t) i);
             else if (!strcmp(s, "<|assistant|>")) glm_asst = (int32_t) i;
         }
-        if (m.glm5) {
+        if (m.glm5 || m.flint) {                             // (flint: llama.cpp ends its replies there too)
             m.eos_ids.insert(m.eos_ids.end(), glm_ends.begin(), glm_ends.end());
             if (m.im_start < 0) m.im_start = glm_asst;
         }
@@ -1171,10 +1197,23 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
         if ((int) kv.size() < m.n_layer) die("the per-block arrays are shorter than the model");
         m.layers.resize(m.n_layer);
         m.n_head_kv = 0;
+        std::vector<bool> swa, rope;
+        if (m.flint) {                                       // llama.cpp's flint.cpp load_arch_hparams
+            swa = gguf_barr(g, k("attention.sliding_window_pattern"));
+            rope = has("attention.rope_pattern") ? gguf_barr(g, k("attention.rope_pattern")) : swa;
+            if ((int) swa.size() < m.n_layer || (int) rope.size() < m.n_layer) die("the per-block arrays are shorter than the model");
+            m.n_swa = gguf_int(g, k("attention.sliding_window"));
+            if (m.n_swa < 1) die("flint: a sliding window of %s tokens", std::to_string(m.n_swa).c_str());
+        }
         for (int il = 0; il < m.n_layer; ++il) {
             Layer & L = m.layers[il];
             L.kind = kv[il] > 0 ? 'a' : 'c';
             L.recurrent = kv[il] == 0;
+            if (m.flint) {
+                if (L.kind != 'a') die("flint: a block without attention");
+                L.swa = swa[il];
+                L.rope = rope[il];
+            }
             if (L.kind == 'a') {
                 if (m.n_head_kv && m.n_head_kv != (int) kv[il]) die("attention blocks with different KV head counts");
                 m.n_head_kv = (int) kv[il];
@@ -1186,12 +1225,16 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
         m.n_expert = gguf_int(g, k("expert_count"));
         m.n_used = gguf_int(g, k("expert_used_count"));
         m.n_ff_exp = gguf_int(g, k("expert_feed_forward_length"));
-        if (gguf_int(g, k("expert_gating_func")) != 2) die("lfm2moe: only the sigmoid router");
+        if (gguf_int(g, k("expert_gating_func")) != 2) die("%s: only the sigmoid router", arch.c_str());
         // (llama.cpp scales the normalized weights only by a scale other than 0 and 1)
         m.exp_scale = has("expert_weights_scale") ? gguf_float(g, k("expert_weights_scale")) : 1.0f;
         if (m.exp_scale == 0.0f) m.exp_scale = 1.0f;
-        m.ssm_conv = gguf_int(g, k("shortconv.l_cache"));   // the convolution's width; its history: l_cache - 1
-        if (m.ssm_conv < 2) die("lfm2moe: a short convolution of width 1");
+        if (!m.flint) {
+            m.ssm_conv = gguf_int(g, k("shortconv.l_cache"));   // the convolution's width; its history: l_cache - 1
+            if (m.ssm_conv < 2) die("lfm2moe: a short convolution of width 1");
+        }
+        if (m.flint && has("expert_weights_norm") && !gguf_get_val_bool(g, gguf_find_key(g, k("expert_weights_norm").c_str())))
+            die("flint: only normalized expert weights");
         m.rms_eps = gguf_float(g, k("attention.layer_norm_rms_epsilon"));
         m.rope_base = gguf_float(g, k("rope.freq_base"));
         m.full_attn_interval = 0;
@@ -1464,7 +1507,8 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
                 {"ffn_down.weight", &L.ffn_down},
                 // lfm2moe: the short convolution (its kernel, in_proj, out_proj)
                 {"shortconv.conv.weight", &L.conv1d}, {"shortconv.in_proj.weight", &L.ssm_in},
-                {"shortconv.out_proj.weight", &L.ssm_out}};
+                {"shortconv.out_proj.weight", &L.ssm_out},
+                {"attn_sinks.weight", &L.sinks}};                    // flint
             auto it = slot.find(r);
             if (it == slot.end()) fprintf(stderr, "momoe-metal: tensor %s not used\n", name);
             else *it->second = t;
@@ -1632,8 +1676,15 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
             L.conv_state = ggml_new_tensor_1d(cs, GGML_TYPE_F32, (int64_t) (m.ssm_conv - 1) * conv_ch);
             L.ssm_state = ggml_new_tensor_1d(cs, GGML_TYPE_F32, (int64_t) head_v * head_v * m.ssm_dt_rank);
         } else {
-            L.k_cache = ggml_new_tensor_3d(cs, GGML_TYPE_F16, m.head_dim, m.n_head_kv, e.n_ctx);
-            L.v_cache = ggml_new_tensor_3d(cs, GGML_TYPE_F16, m.head_dim, m.n_head_kv, e.n_ctx);
+            int rows = e.n_ctx;
+            if (L.swa) {                                     // (flint) a batch writes at most max(max_batch, a window)
+                const int t_max = std::max(e.max_batch, e.max_window + 1);   // rows: none it still reads is overwritten
+                m.swa_rows = std::min(e.n_ctx, (m.n_swa + t_max - 1 + 255) / 256 * 256);
+                if (getenv("MOMOE_FLINT_NO_RING")) m.swa_rows = e.n_ctx;   // a test: every position kept
+                rows = m.swa_rows;
+            }
+            L.k_cache = ggml_new_tensor_3d(cs, GGML_TYPE_F16, m.head_dim, m.n_head_kv, rows);
+            L.v_cache = ggml_new_tensor_3d(cs, GGML_TYPE_F16, m.head_dim, m.n_head_kv, rows);
         }
         if (L.idx_k && !m.glm5) {
             L.idx_raw = ggml_new_tensor_2d(cs, GGML_TYPE_F16, m.idx_dim, e.n_ctx);
@@ -2713,6 +2764,8 @@ static void preload(Engine & e) {
 // ------------------------------------------------------------------------------------------------ the graph
 struct Inputs {
     ggml_tensor *tokens, *pos, *mask;
+    ggml_tensor *mask_swa = nullptr;                         // flint: the sliding window's mask [swa_rows, T]
+    ggml_tensor *kv_idx_swa = nullptr;                       // flint: I64 [T], the ring rows written (p % swa_rows)
     ggml_tensor *kv_idx = nullptr;                           // I64 [T]: the positions written (a graph reused token
                                                              // after token: the caches' rows as an input, not offsets)
     // QSA (llama.cpp's llm_graph_input_kpool, one sequence: a position's cell is its position): the blocks completed
@@ -3398,11 +3451,18 @@ static ggml_tensor * lfm_attn_layer(Engine & e, ggml_context * c, ggml_cgraph * 
     ggml_tensor * q = norm(c, ggml_reshape_3d(c, ggml_mul_mat(c, L.wq, x), hd, m.n_head, T), L.q_norm, m.rms_eps);
     ggml_tensor * k = norm(c, ggml_reshape_3d(c, ggml_mul_mat(c, L.wk, x), hd, m.n_head_kv, T), L.k_norm, m.rms_eps);
     ggml_tensor * v = ggml_reshape_3d(c, ggml_mul_mat(c, L.wv, x), hd, m.n_head_kv, T);
-    ggml_tensor * pos = ggml_view_1d(c, in.pos, T, 0);                                    // (section 0: p0 + i)
-    q = ggml_rope_ext(c, q, pos, nullptr, m.n_rot, GGML_ROPE_TYPE_NEOX, 0, m.rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
-    k = ggml_rope_ext(c, k, pos, nullptr, m.n_rot, GGML_ROPE_TYPE_NEOX, 0, m.rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+    if (L.rope) {                                            // (flint: no RoPE on its full-attention blocks)
+        ggml_tensor * pos = ggml_view_1d(c, in.pos, T, 0);                                // (section 0: p0 + i)
+        q = ggml_rope_ext(c, q, pos, nullptr, m.n_rot, GGML_ROPE_TYPE_NEOX, 0, m.rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+        k = ggml_rope_ext(c, k, pos, nullptr, m.n_rot, GGML_ROPE_TYPE_NEOX, 0, m.rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+    }
     const size_t row = ggml_row_size(GGML_TYPE_F16, (int64_t) hd * m.n_head_kv);
-    if (kv_idx) {                                            // the positions as an input (a graph reused token after token)
+    if (L.swa) {                                             // flint's ring: written at p % swa_rows, read whole
+        const int64_t w = (int64_t) hd * m.n_head_kv;
+        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.k_cache, w, m.swa_rows), ggml_reshape_2d(c, k, w, T), in.kv_idx_swa));
+        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.v_cache, w, m.swa_rows), ggml_reshape_2d(c, v, w, T), in.kv_idx_swa));
+        n_kv = std::min(n_kv, m.swa_rows);                   // (before it wraps: only the rows written so far)
+    } else if (kv_idx) {                                            // the positions as an input (a graph reused token after token)
         const int64_t w = (int64_t) hd * m.n_head_kv;
         ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.k_cache, w, e.n_ctx), ggml_reshape_2d(c, k, w, T), kv_idx));
         ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.v_cache, w, e.n_ctx), ggml_reshape_2d(c, v, w, T), kv_idx));
@@ -3413,10 +3473,25 @@ static ggml_tensor * lfm_attn_layer(Engine & e, ggml_context * c, ggml_cgraph * 
     ggml_tensor * kv_k = ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, n_kv, L.k_cache->nb[1], row, 0);
     ggml_tensor * kv_v = ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, n_kv, L.v_cache->nb[1], row, 0);
     ggml_tensor * o = ggml_flash_attn_ext(c, ggml_permute(c, q, 0, 2, 1, 3), ggml_permute(c, kv_k, 0, 2, 1, 3),
-                                          ggml_permute(c, kv_v, 0, 2, 1, 3), in.mask, 1.0f / sqrtf((float) hd), 0.0f, 0.0f);
+                                          ggml_permute(c, kv_v, 0, 2, 1, 3), L.swa ? in.mask_swa : in.mask,
+                                          1.0f / sqrtf((float) hd), 0.0f, 0.0f);
+    if (L.sinks) ggml_flash_attn_ext_add_sinks(o, L.sinks);  // (flint: one learned logit per head beside the keys)
     ggml_prec_set_acc(o, GGML_PREC_F32);
     o = ggml_reshape_2d(c, o, (int64_t) hd * m.n_head, T);
     return ggml_mul_mat(c, L.wo, o);
+}
+
+// flint: the down projection's input divided per expert and token by a power of two that brings its largest value
+// under 1024 (llama.cpp's build_amax_src1_f16: 32 values of an 8-bit activation block summed in f16 stay finite),
+// the same factor multiplied back on the output (exact).  act: [n_ff, k, T]; *scale: [1, k, T]
+static ggml_tensor * flint_down_scale(ggml_context * c, ggml_tensor * act, ggml_tensor ** scale) {
+    ggml_tensor * amax = ggml_pool_1d(c, ggml_abs(c, act), GGML_OP_POOL_MAX, (int) act->ne[0], (int) act->ne[0], 0);
+    ggml_tensor * f = ggml_scale(c, amax, 1.0f / 1024.0f);
+    f = ggml_scale(c, ggml_log(c, f), 1.4426950408889634f);                              // log2
+    f = ggml_clamp(c, ggml_ceil(c, f), 0.0f, 127.0f);
+    f = ggml_exp(c, ggml_scale(c, f, 0.6931471805599453f));                              // 2^n
+    *scale = f;
+    return ggml_div(c, act, f);
 }
 
 // the MoE (llama.cpp's build_moe_ffn with the sigmoid gate, norm_w): the bias only chooses, the chosen experts'
@@ -3429,36 +3504,70 @@ static ggml_tensor * lfm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
     Model & m = e.m;
     Layer & L = m.layers[il];
     const int k = m.n_used;
+    const bool hyb = hybrid_on(e, L, T);                     // flint --hybrid: the CPU computes the experts the pool
+    if (hyb) {                                               // lacks, from the experts' input (as moe_layer)
+        if (!ggml_is_contiguous(x)) x = ggml_cont(c, x);
+        ggml_build_forward_expand(gf, x);
+        e.xl[il] = x;
+    }
+#if defined(MOMOE_CUDA)
+    const bool mbx = mb_on(e) && hyb && ns_paused(e, il);   // the mailboxes: no stops in this layer
+    ggml_tensor * send = nullptr;
+#else
+    const bool mbx = false;
+#endif
     ggml_tensor * lg = ggml_mul_mat(c, L.gate_inp, x);
     ggml_format_name(lg, "ffn_moe_logits-%d", il);
     ggml_tensor * probs = ggml_sigmoid(c, lg);                                            // [n_expert, T]
-    ggml_tensor * chosen = ggml_argsort_top_k(c, ggml_add(c, probs, L.exp_probs_b), k);  // [k, T] (a view)
+    ggml_tensor * chosen = ggml_argsort_top_k(c, L.exp_probs_b ? ggml_add(c, probs, L.exp_probs_b) : probs, k);   // [k, T]
     ggml_tensor * w = ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, m.n_expert, T), chosen);   // [1, k, T]
     w = ggml_reshape_2d(c, w, k, T);
     w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
     w = ggml_reshape_3d(c, w, 1, k, T);
     if (m.exp_scale != 1.0f) w = ggml_scale(c, w, m.exp_scale);
     ggml_build_forward_expand(gf, w);                        // (the routing's nodes in a row: fused)
+    // every expert in its slot and nothing reading the choice (momoe-metal, as moe_layer's `direct`): the choice as it
+    // is and the layer's experts as a view of the pool (flint on the M4 Air, UD-IQ3_XXS)
+    static const bool no_direct = getenv("MOMOE_FORCE_CB") != nullptr || getenv("MOMOE_NO_DIRECT") != nullptr;
+    const bool direct = kHostMem && e.preloaded && !e.pause && !e.ns_graph && !e.hybrid && !e.helper && !debug_on() &&
+                        !no_direct && !pred_in && !pred_in2;
     // this block's choice, then the predicted blocks', in one tensor: what the stop or the mailbox reads
-    ggml_tensor * top = ggml_cont(c, chosen);                                             // [k, T (2T, 3T)]
-    for (int j = 1; j <= 2; ++j) {
+    ggml_tensor * top = direct ? chosen : ggml_cont(c, chosen);                           // [k, T (2T, 3T)]
+    for (int j = 1; j <= 2 && !direct; ++j) {
         ggml_tensor * in = j == 1 ? pred_in : pred_in2;
         if (!in) continue;
         const Layer & N = m.layers[il + j];
-        ggml_tensor * pl = ggml_add(c, ggml_sigmoid(c, ggml_mul_mat(c, N.gate_inp, in)), N.exp_probs_b);
+        ggml_tensor * pl = ggml_sigmoid(c, ggml_mul_mat(c, N.gate_inp, in));
+        if (N.exp_probs_b) pl = ggml_add(c, pl, N.exp_probs_b);
         top = ggml_concat(c, top, ggml_cont(c, ggml_argsort_top_k(c, pl, k)), 1);
     }
     Group & G = e.pool.g[L.grp];
-    const bool big = staged(k, G.n_slots, T);                // the staging copy, by expert number
+    const bool big = staged(k, G.n_slots, T) || direct;      // the staging copy, by expert number (direct: the pool)
 #if defined(MOMOE_CUDA)
-    const bool rmb = e.rmb && !big && T <= HYB_MAX_T;       // the resident mailbox (rmb_layer): no stop here
+    const bool rmb = e.rmb && !big && T <= HYB_MAX_T && !mbx;   // the resident mailbox (rmb_layer): no stop here
 #else
     const bool rmb = false;
 #endif
-    ggml_format_name(top, rmb ? "rmbtopk-%d" : "topk-%d", il);
-    e.topk[il] = top;
-    ggml_build_forward_expand(gf, top);
+    if (!direct) {
+        ggml_format_name(top, rmb ? "rmbtopk-%d" : mbx ? "mbtopk-%d" : "topk-%d", il);
+        e.topk[il] = top;
+        ggml_build_forward_expand(gf, top);
+    } else e.topk[il] = nullptr;
     ggml_tensor * ids = pred_in ? ggml_view_2d(c, top, k, T, top->nb[1], 0) : top;     // [k, T], contiguous
+#if defined(MOMOE_CUDA)
+    if (mbx) {                                               // the layer's input and choice to the CPU, at once
+        MbLayer & B = e.mb.layer[il];
+        B.send.n_f32 = m.n_embd * T;
+        B.send.n_i32 = k * T;
+        ggml_tensor * args[2] = {x, pred_in ? ggml_cont(c, ids) : ids};
+        send = ggml_custom_4d(c, GGML_TYPE_I32, 1, 1, 1, 1, args, 2, momoe_mailbox_cpu_stub, 1, &B.send);
+        ggml_format_name(send, "mbsend-%d", il);
+        ggml_build_forward_expand(gf, send);
+        e.force_gpu.push_back(send);
+        e.mb_graph = true;
+        e.mb.graph.push_back(il);
+    }
+#endif
     ggml_tensor * slots = nullptr;
 #if defined(MOMOE_CUDA)
     if (rmb) {                                               // the choice to the worker; the slots back from it
@@ -3478,7 +3587,7 @@ static ggml_tensor * lfm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
         e.mb.graph.push_back(il);
     } else
 #endif
-    slots = ggml_reshape_2d(c, ggml_get_rows(c, L.slot_map, ggml_reshape_1d(c, ids, (int64_t) k * T)), k, T);
+    if (!big) slots = ggml_reshape_2d(c, ggml_get_rows(c, L.slot_map, ggml_reshape_1d(c, ids, (int64_t) k * T)), k, T);
     ggml_tensor * x3 = ggml_reshape_3d(c, x, m.n_embd, 1, T);
     ggml_tensor ** as = big ? G.stage : G.t;
     ggml_tensor * layer_t[3];
@@ -3492,10 +3601,38 @@ static ggml_tensor * lfm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
     if (big) slots = ids;
     ggml_tensor * up = ggml_mul_mat_id(c, as[1], x3, slots);                            // [n_ff, k, T]
     ggml_tensor * gt = ggml_mul_mat_id(c, as[0], x3, slots);
-    ggml_tensor * dn = ggml_mul_mat_id(c, as[2], ggml_swiglu_split(c, gt, up), slots); // [n_embd, k, T]
+    ggml_tensor * act = ggml_swiglu_split(c, gt, up), * dscale = nullptr;
+    static const bool no_scale = getenv("MOMOE_FLINT_NO_SCALE") != nullptr;   // a test: the down projection unscaled
+    // (momoe-metal, a few tokens: its matrix-vector kernels read the activations as f32, nothing to keep finite; the
+    // power-of-two factor cancels exactly.  Its batched kernels take them as f16: scaled, as on CUDA, whose
+    // matrix-vector kernels sum 8-bit blocks in f16.  M4 Air, UD-IQ3_XXS: 38.4 -> 42.9 tok/s, the same tokens)
+    if (m.flint && !no_scale && (!kHostMem || T > 8)) act = flint_down_scale(c, act, &dscale);
+    ggml_tensor * dn = ggml_mul_mat_id(c, as[2], act, slots);                             // [n_embd, k, T]
+    if (dscale) dn = ggml_mul(c, dn, dscale);                // (before the CPU's part: that one was not scaled)
     if (helper_on(e, L, big))
         dn = ggml_add(c, dn, helper_down(e, c, L, x3, ids, T, [&](ggml_tensor * g, ggml_tensor * u) { return ggml_swiglu_split(c, g, u); }));
-    ggml_format_name(dn, "moe_down-%d", il);
+    ggml_tensor * sh = nullptr;                              // flint's shared expert, before the CPU's experts are
+    if (L.gate_sh) {                                         // waited for: the GPU computes it while the CPU works
+        sh = ggml_mul_mat(c, L.down_sh, ggml_swiglu_split(c, ggml_mul_mat(c, L.gate_sh, x), ggml_mul_mat(c, L.up_sh, x)));
+        ggml_format_name(sh, "ffn_shexp-%d", il);
+        ggml_build_forward_expand(gf, sh);
+    }
+#if defined(MOMOE_CUDA)
+    if (send) {                                              // the CPU's experts, waited for after the GPU's own
+        MbLayer & B = e.mb.layer[il];
+        B.wait.n_f32 = m.n_embd * k * T;
+        ggml_tensor * args[1] = {send};
+        ggml_tensor * cpu = ggml_custom_4d(c, GGML_TYPE_F32, m.n_embd, k, T, 1, args, 1, momoe_mailbox_cpu_stub, 1, &B.wait);
+        ggml_format_name(cpu, "mbwait-%d", il);
+        e.force_gpu.push_back(cpu);
+        dn = ggml_add(c, dn, cpu);
+    } else
+#endif
+    if (hyb) {                                               // the missing experts' outputs (zero slots here), from the CPU
+        ggml_format_name(dn, "moedn-%d", il);                // (joined at this stop: eval_cb)
+        dn = ggml_add(c, dn, ggml_view_3d(c, L.cpu_dn, m.n_embd, k, T, L.cpu_dn->nb[1], L.cpu_dn->nb[2], 0));
+    }
+    if (!hyb) ggml_format_name(dn, "moe_down-%d", il);
     dn = ggml_mul(c, dn, w);
     ggml_build_forward_expand(gf, dn);
     ggml_tensor * v[64];                                     // the views before the adds (llama.cpp's order)
@@ -3510,7 +3647,7 @@ static ggml_tensor * lfm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
         ggml_build_forward_expand(gf, moe);
     }
     ggml_format_name(moe, "ffn_moe_out-%d", il);
-    return moe;
+    return sh ? ggml_add(c, moe, sh) : moe;                  // (as llama.cpp: the routed experts' sum, then the shared)
 }
 
 // ------------------------------------------------------------------------------------------------ glm5-next
@@ -3773,6 +3910,30 @@ struct Out {
 
 static uint64_t g_sched_gen = 1;                             // a reused decode graph's allocation: bumped by every other
                                                              // graph the scheduler allocates
+// flint: the sliding window's mask over the ring and the rows a batch of T tokens at p0 writes.  Row r holds the
+// newest position <= p0 + T - 1 that is r mod swa_rows (one the batch writes, or one before it); token i sees it when
+// it is no later than the token and fewer than n_swa positions back.  (A batch of at most swa_rows - n_swa + 1 tokens
+// overwrites no row an earlier token of it still sees: the ring's size, see load)
+static void flint_swa_inputs(Engine & e, ggml_tensor * mask_t, ggml_tensor * idx_t, int p0, int T) {
+    const Model & m = e.m;
+    const int W = m.swa_rows, R = (int) mask_t->ne[0];      // the ring; the rows the graph reads (all once it wraps)
+    if (T > W - m.n_swa + 1) die("flint: a batch larger than the sliding window's ring allows");
+    std::vector<ggml_fp16_t> mask((size_t) R * T);
+    const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(-INFINITY);
+    const int last = p0 + T - 1;
+    for (int r = 0; r < R; ++r) {
+        const int p = last - (((last - r) % W) + W) % W;     // the position row r holds (< 0: never written)
+        for (int i = 0; i < T; ++i) {
+            const int q = p0 + i;
+            mask[(size_t) i * R + r] = p >= 0 && p <= q && q - p < m.n_swa ? zero : ninf;
+        }
+    }
+    ggml_backend_tensor_set(mask_t, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+    std::vector<int64_t> rows(T);
+    for (int i = 0; i < T; ++i) rows[i] = (p0 + i) % W;
+    ggml_backend_tensor_set(idx_t, rows.data(), 0, rows.size() * sizeof(int64_t));
+}
+
 #if defined(MOMOE_CUDA)
 // momoe-cuda, Bolt's one-token decode through mailboxes: the graph is built once per attention window (256 positions)
 // and kept, its per-token values (the token, the mask, the KV cache's row) set as inputs, so every token computes the
@@ -3782,6 +3943,7 @@ struct DecodeCache {
     ggml_cgraph * gf = nullptr;
     ggml_tensor *tokens = nullptr, *mask = nullptr, *kv_idx = nullptr, *seq0 = nullptr, *logits = nullptr, *best = nullptr;
     ggml_tensor *on_cpu = nullptr, *on_gpu = nullptr;
+    ggml_tensor *pos = nullptr, *mask_swa = nullptr, *kv_idx_swa = nullptr;   // flint: its RoPE positions, its window's mask, ring rows
     std::vector<ggml_tensor *> force_gpu;
     std::vector<int> mb_layers;
     int n_kv = -1;
@@ -3791,7 +3953,9 @@ static DecodeCache g_dec;
 
 static bool decode_cache_ok(const Engine & e, int T, const Out * out) {
     static const bool off = getenv("MOMOE_NO_GRAPH_REUSE") != nullptr;
-    if (off || !e.mailbox || !e.m.nemo || T != 1 || (out && (out->all || out->snap))) return false;
+    // Bolt; flint while its CPU path runs (the copies stop at every layer: no graph to keep)
+    if (off || !e.mailbox || !(e.m.nemo || (e.m.flint && e.hyb_active)) || T != 1 || (out && (out->all || out->snap)))
+        return false;
     for (const auto & G : e.pool.g)
         if (staged(e.m.n_used, G.n_slots, 1)) return false;  // every MoE layer through its mailbox
     return true;
@@ -3826,19 +3990,38 @@ static int forward_decode(Engine & e, const int32_t * toks, int p0, Out * out) {
         ggml_set_input(D.kv_idx);
         D.seq0 = ggml_new_tensor_1d(c, GGML_TYPE_I32, 1);
         ggml_set_input(D.seq0);
+        if (m.flint) {
+            in.pos = D.pos = ggml_new_tensor_1d(c, GGML_TYPE_I32, (int64_t) T * 4);
+            ggml_set_input(in.pos);
+            in.mask_swa = D.mask_swa = ggml_new_tensor_2d(c, GGML_TYPE_F16, std::min(n_kv, m.swa_rows), T);
+            ggml_set_input(in.mask_swa);
+            in.kv_idx_swa = D.kv_idx_swa = ggml_new_tensor_1d(c, GGML_TYPE_I64, T);
+            ggml_set_input(in.kv_idx_swa);
+        }
         ggml_tensor * x = ggml_get_rows(c, m.tok_embd, in.tokens);
         D.on_cpu = D.on_gpu = nullptr;
         if (m.tok_embd->buffer && ggml_backend_buffer_is_host(m.tok_embd->buffer)) {
             D.on_cpu = x;
             x = D.on_gpu = ggml_scale(c, x, 1.0f);
         }
-        for (int il = 0; il < m.n_layer; ++il) {
+        for (int il = 0; il < m.n_layer && !m.flint; ++il) {
             Layer & L = m.layers[il];
             ggml_tensor * h = norm(c, x, L.attn_norm, m.rms_eps);
             h = L.kind == 'm' ? mamba2_layer(e, c, D.gf, L, h, D.seq0, T)
               : L.kind == 'a' ? nemo_attn_layer(e, c, D.gf, L, h, in, p0, T, n_kv, D.kv_idx)
                               : nemo_moe_layer(e, c, D.gf, il, h, T, nullptr);
             x = ggml_add(c, h, x);
+        }
+        for (int il = 0; il < m.n_layer && m.flint; ++il) {  // flint: as forward's lfm2moe blocks, every one attention
+            Layer & L = m.layers[il];
+            x = ggml_add(c, x, lfm_attn_layer(e, c, D.gf, L, norm(c, x, L.attn_norm, m.rms_eps), in, p0, T, n_kv, D.kv_idx));
+            ggml_tensor * f = norm(c, x, L.ffn_norm, m.rms_eps);
+            if (il < m.n_dense) {
+                f = ggml_mul_mat(c, L.ffn_down, ggml_swiglu_split(c, ggml_mul_mat(c, L.ffn_gate, f), ggml_mul_mat(c, L.ffn_up, f)));
+            } else {
+                f = lfm_moe_layer(e, c, D.gf, il, f, T, nullptr, nullptr);
+            }
+            x = ggml_add(c, x, f);
         }
         x = norm(c, x, m.out_norm, m.rms_eps);
         D.logits = ggml_mul_mat(c, m.output, x);
@@ -3864,13 +4047,20 @@ static int forward_decode(Engine & e, const int32_t * toks, int p0, Out * out) {
     const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(-INFINITY);
     for (int j = 0; j < n_kv; ++j) mask[j] = j <= p0 ? zero : ninf;
     ggml_backend_tensor_set(D.mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+    if (D.mask_swa) {                                        // flint: the window over its ring, the RoPE position
+        flint_swa_inputs(e, D.mask_swa, D.kv_idx_swa, p0, 1);
+        const int32_t pp[4] = {p0, p0, p0, 0};
+        ggml_backend_tensor_set(D.pos, pp, 0, sizeof pp);
+    }
     const int64_t pos = p0;
     ggml_backend_tensor_set(D.kv_idx, &pos, 0, sizeof pos);
     const int32_t zero_id = 0;
-    ggml_backend_tensor_set(D.seq0, &zero_id, 0, sizeof zero_id);
+    if (D.seq0->buffer) ggml_backend_tensor_set(D.seq0, &zero_id, 0, sizeof zero_id);   // (flint: no Mamba state)
     e.batch_tokens = T;
     const double tc0 = now_s();
     e.t_build += tc0 - tb0;
+    if (!m.nemo && e.mb_stale) mb_rebuild(e);               // (flint: experts moved by a graph without the mailboxes)
+    ++e.mb_graphs;
     mb_boundary(e);
     uint64_t mb_job;
     {
@@ -4036,6 +4226,12 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
     ggml_set_input(in.pos);
     in.mask = ggml_new_tensor_2d(c, GGML_TYPE_F16, n_kv, T);
     ggml_set_input(in.mask);
+    if (m.flint) {
+        in.mask_swa = ggml_new_tensor_2d(c, GGML_TYPE_F16, std::min(n_kv, m.swa_rows), T);
+        ggml_set_input(in.mask_swa);
+        in.kv_idx_swa = ggml_new_tensor_1d(c, GGML_TYPE_I64, T);
+        ggml_set_input(in.kv_idx_swa);
+    }
     if (by_input) {                                          // the rows written: an input (a reused graph)
         in.kv_idx = ggml_new_tensor_1d(c, GGML_TYPE_I64, T);
         ggml_set_input(in.kv_idx);
@@ -4087,7 +4283,7 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
                 ggml_tensor * pred = e.predict && il + 1 < m.n_layer ? norm(c, x, m.layers[il + 1].ffn_norm, m.rms_eps) : nullptr;
                 ggml_tensor * pred2 = pred && e.predict2 && il + 2 < m.n_layer
                                     ? norm(c, x, m.layers[il + 2].ffn_norm, m.rms_eps) : nullptr;
-                f = lfm_moe_layer(e, c, gf, il, f, T, pred, pred2);
+                f = lfm_moe_layer(e, c, gf, il, f, T, pred, pred2);   // (flint: with its shared expert)
             }
             ggml_format_name(f, "ffn_out-%d", il);
             x = ggml_add(c, x, f);
@@ -4418,6 +4614,7 @@ static int forward_once(Engine & e, const int32_t * toks, int T, int p0, Out * o
     for (int i = 0; i < T; ++i)
         for (int j = 0; j < n_kv; ++j) mask[(size_t) i * n_kv + j] = j <= p0 + i ? zero : ninf;
     ggml_backend_tensor_set(in.mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+    if (in.mask_swa) flint_swa_inputs(e, in.mask_swa, in.kv_idx_swa, p0, T);
     if (in.kv_idx) {
         std::vector<int64_t> rows(T);
         for (int i = 0; i < T; ++i) rows[i] = p0 + i;
@@ -4772,6 +4969,10 @@ static std::vector<ggml_tensor *> state_tensors(Engine & e) {
         if (L.ssm_state) r.push_back(L.ssm_state);
         if (L.conv_state) r.push_back(L.conv_state);
         if (L.ple_state) r.push_back(L.ple_state);
+        if (L.swa && L.k_cache) {                            // flint's ring: the state at a position, kept whole
+            r.push_back(L.k_cache);
+            r.push_back(L.v_cache);
+        }
     }
     return r;
 }
@@ -5143,8 +5344,8 @@ static std::vector<PosTensor> position_tensors(Engine & e) {
     std::vector<PosTensor> r;
     auto add = [&](ggml_tensor * t, int dim, int per_row) { if (t) r.push_back({t, dim, per_row}); };
     for (auto & L : e.m.layers) {
-        add(L.k_cache, 2, 1);
-        add(L.v_cache, 2, 1);
+        if (!L.swa) add(L.k_cache, 2, 1);                    // (flint's ring: state_tensors)
+        if (!L.swa) add(L.v_cache, 2, 1);
         add(L.idx_raw, 1, 1);
         add(L.idx_pool, 1, e.m.kpool);
         add(L.lat_cache, 1, 1);                              // glm5-next's MLA latents
@@ -5660,6 +5861,9 @@ int main(int argc, char ** argv) {
                && e.pool.n_slots < e.m.n_exp_all) {         // (a device pool: the readers' copies would wait behind
         rmb_init(e);                                         // the mailbox's wait, measured: never with one)
         if (!getenv("MOMOE_CUDA_GRAPHS")) setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0);
+    } else if (e.m.flint && e.mailbox) {
+        // flint through its mailboxes: the kept decode graph (forward_decode) replayed as a CUDA graph (RTX 4070 Ti,
+        // UD-IQ3_XXS: 79-82 -> 87 tok/s, the same tokens); the trial's few graphs with stops fit beside it
     } else if (!getenv("MOMOE_CUDA_GRAPHS") && !getenv("GGML_CUDA_DISABLE_GRAPHS")) {   // CUDA graphs for the
         setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0);         // mailbox's one-graph token only: with the stops' many
         cuda_graphs_off = true;                             // splits, instantiating them ran out of VRAM (12 GB card;
