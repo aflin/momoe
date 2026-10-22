@@ -6521,10 +6521,6 @@ def bench_tips(args, env, ram: float, model_ram_gb: float, vram_gb: float, visio
         tips.append(f"tip: on a PC with {ram:.0f} GB of RAM, \"env\": {{\"STRATA_RESIDENT_HEADROOM_GIB\": \"6\"}} in the "
                     "config kept decode speed in a community benchmark and left the system 2 GiB more (#834); the "
                     "default is 4")
-    if "--conversation-cache-mib" not in args and ram - model_ram_gb >= AGENT_CACHE_FREE_GB:
-        tips.append(f"tip: for several agents or clients at once, --conversation-cache-mib {AGENT_CACHE_MIB} in the "
-                    "config's args keeps each one's conversation; without it they were measured re-reading ~90% of "
-                    "their prompts (#882 #440; docs/DETAILS.md, Multiple conversations)")
     # Not the 35B-A3B models: Ornith IQ4_XS on a 4070 Ti read a 24K-token prompt at ~4,130 tok/s with or without it
     if vision == "gpu" and 0 < vram_gb <= SMALL_VISION_VRAM_GB and not small:
         tips.append("tip: the image encoder on the GPU makes a prompt's chunks smaller on a card this size (243 vs 750 "
