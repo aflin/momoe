@@ -1,26 +1,61 @@
 <h1 align="center">MoMoE</h1>
 
 <p align="center"><b>More MoEs: large mixture-of-experts models on one graphics card plus system RAM</b><br>
-a fork of <a href="https://github.com/Niko1221/Strata">Strata</a> · tested on Linux with NVIDIA and on Apple Silicon Macs · free and open source (MIT)</p>
+its own CUDA and Metal engines, and <a href="https://github.com/Niko1221/Strata">Strata</a>'s · tested on Linux with NVIDIA and on Apple Silicon Macs · free and open source (MIT)</p>
 
-## Built on Strata
+## Quick start
 
-MoMoE is a fork of **[Strata](https://github.com/Niko1221/Strata)** by Niko1221 and the Strata contributors. Almost
-everything that makes it work is theirs:
-- the engine that runs a mixture-of-experts model with its experts spread over VRAM, RAM and the SSD;
-- the expert cache and the predictions that fill it;
-- the multi-token draft layer;
-- the OpenAI- and Anthropic-compatible server;
-- the installer;
-- the measurements behind all of it.
+You need Linux with an NVIDIA card (RTX 20 series or newer) or an Apple Silicon Mac, Python 3, and enough RAM for
+the model. Setup checks the rest and says what is missing.
 
-How it works is written up in Strata's [paper](docs/paper/Strata-Paper.pdf) and [DETAILS.md](docs/DETAILS.md).
+```sh
+git clone https://github.com/aflin/momoe.git
+cd momoe
+./momoe setup                  # pick a model: setup compiles the engine, downloads the model and starts it
+```
 
-**If you want Qwen3.8-Flash-Next, use Strata.** It has a maintainer, ready-made engines for Windows and AMD cards, a
-web app, and far more testing on far more hardware than this fork. Problems with Strata and improvements to it belong
-in [Strata's issues](https://github.com/Niko1221/Strata/issues), not here.
+Setup picks the model's size for your machine and writes a config for it (for example `flint-ud-iq3_xxs`); to skip
+the menu, name the family: `./momoe setup --family flint`. Then:
 
-## Why a fork
+```sh
+./momoe run claude             # Claude Code connected to the model (also: codex, opencode, unsloth, lmstudio)
+./momoe status                 # what is running, and its address (http://127.0.0.1:8080/v1 by default)
+./momoe stop
+./momoe start flint-ud-iq3_xxs # start a config again later (./momoe list shows them)
+./update.sh                    # the newest MoMoE; compiles again only what changed
+```
+
+Any OpenAI- or Anthropic-compatible app can use the address `momoe status` shows. More in [Install](#install),
+[Use](#use) and [Models](#models).
+
+## Strata and MoMoE's own engines
+
+MoMoE began as a fork of **[Strata](https://github.com/Niko1221/Strata)**, by Niko1221 and the Strata contributors,
+and Strata is still its base:
+- **Strata's engine** (`momoe`) runs Qwen3.8-Flash-Next and the Qwen3.6 family on a PC with an NVIDIA card: their
+  experts spread over VRAM, RAM and the SSD, the expert cache and the predictions that fill it, the multi-token draft
+  layer. It is Strata's, with MoMoE's additions (the Qwen3.6 family's path began as
+  [#1402](https://github.com/Niko1221/Strata/pull/1402)). How it works is written up in Strata's
+  [paper](docs/paper/Strata-Paper.pdf) and [DETAILS.md](docs/DETAILS.md).
+- **The server and the installer** grew from Strata's (the OpenAI- and Anthropic-compatible API, setup's checks and
+  downloads), and so did the way MoMoE measures.
+
+MoMoE's other two engines are its own: **`momoe-cuda`** (Linux with NVIDIA) and **`momoe-metal`** (Apple Silicon), in
+[src/metal](src/metal/README.md), written for MoMoE on [ggml](https://github.com/ggml-org/llama.cpp) (llama.cpp's
+library: its kernels, and its model code for the families they add). They run every model on a Mac, the DGX Spark and
+the Jetson, and Nemotron 3.5 Bolt, GLM-5.3-Flash, LFM2.5, Ornith-1.5-122B and Flint on a PC. They read a model's GGUF as
+it is (nothing packed), keep the experts they can in a pool on the GPU, and fetch or compute the rest as each layer
+needs them: read from the SSD (on the Spark past the page cache), copied in from RAM, or computed by the CPU through
+mailboxes the GPU waits on (for Ornith-122B and Flint, a trial while the model runs picks the faster way). Their graphs
+are kept and replayed (as CUDA graphs on NVIDIA); they have their own layer split and helper tier for two cards, and
+their own ways around each model's quirks (Flint's sliding-window cache as a ring, GLM's sparse attention, Bolt's latent
+experts).
+
+**For Qwen3.8-Flash-Next on Windows, an AMD or Intel card, or with a desktop app, use Strata.** It has a maintainer,
+ready-made engines and far more testing on far more hardware. Problems with Strata's engine that also happen in
+Strata belong in [Strata's issues](https://github.com/Niko1221/Strata/issues).
+
+## Why a separate project
 
 MoMoE started as a pull request to Strata ([#1402](https://github.com/Niko1221/Strata/pull/1402)) that added a second
 model family. Some of what followed doesn't fit Strata, which takes one change per pull request and keeps its
@@ -43,7 +78,6 @@ Unlike my other projects, MoMoE's changes, since the fork and in the pull reques
 ([#1402](https://github.com/Niko1221/Strata/pull/1402)), are written entirely with
 [Claude Code](https://claude.com/claude-code). Strata's own code, which is most of what is here, is not covered by
 this note.
-— Aaron Flin ([aflin](https://github.com/aflin))
 
 ## Status
 
@@ -384,19 +418,24 @@ the other inside a layer. That, other cards, the other models and Windows are no
 
 ## Credits
 
-- **[Strata](https://github.com/Niko1221/Strata)**, by Niko1221 and the Strata contributors: the engine, the server,
-  the installer, the documentation and the paper. MoMoE is their work with changes on top.
+- **MoMoE**: its CUDA and Metal engines (`momoe-cuda`, `momoe-metal`: [src/metal](src/metal/README.md)), built on ggml,
+  and the changes to Strata's engine, server and installer (the Qwen3.6 family's path began as
+  [#1402](https://github.com/Niko1221/Strata/pull/1402)).
+- **[Strata](https://github.com/Niko1221/Strata)**, by Niko1221 and the Strata contributors: the engine `momoe` runs
+  (Strata's, with MoMoE's additions), and the server, the installer, the documentation and the paper MoMoE's grew from.
 - Changes taken from other Strata forks and open pull requests, credited to their authors:
   - [Asofwar/Strata](https://github.com/Asofwar/Strata) by Asofwar: the Qwen3.6 decode-path speedups, the fast
     256 x 8 router on CUDA and the control-vector fix (three commits, under their own name).
   - [#2674](https://github.com/Niko1221/Strata/pull/2674) by Scott Page ([page1](https://github.com/page1)): the
     server logs a reply that ended after its thinking with no text and no tool call.
-- **[llama.cpp / ggml](https://github.com/ggml-org/llama.cpp)**: the GGUF format, the quantization kernels and the
-  image encoder, which Strata builds on.
-- The models' authors and quantizers listed above: the Qwen team, ISTA-DASLab, ukisai, Unsloth, bartowski, Ornith AI
-  and Myric.
+- **[llama.cpp / ggml](https://github.com/ggml-org/llama.cpp)**, by the ggml authors: the ggml library under
+  `momoe-cuda` and `momoe-metal` (in [src/metal/ggml](src/metal/ggml), with MoMoE's additions listed in its
+  `README.momoe`), the model code their graphs for Nemotron, GLM-5.3, LFM2.5 and Flint follow, and the GGUF format,
+  the quantization kernels and the image encoder Strata builds on.
+- The models' authors and quantizers listed above: the Qwen team, ISTA-DASLab, ukisai, Unsloth, bartowski, Ornith AI,
+  Myric, NVIDIA, Z.ai, Liquid AI and Recursive.
 
 ## License
 
-MIT, like Strata: see [LICENSE](LICENSE). Strata's copyright notice stays with its code, and MoMoE's changes are under
-the same license.
+MIT: see [LICENSE](LICENSE), which holds Strata's copyright notice and MoMoE's own. The copy of ggml in
+[src/metal/ggml](src/metal/ggml) keeps its own MIT license (the ggml authors), beside it.
