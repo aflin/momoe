@@ -3114,6 +3114,9 @@ bool ggml_metal_op_flash_attn_ext_use_vec(const ggml_tensor * op) {
     const int64_t ne00 = op->src[0]->ne[0]; // head size
     const int64_t ne01 = op->src[0]->ne[1]; // batch size
 
+    // Momoe: not on macOS before 14 (ggml_metal_fa_vec_ok): there the vec kernel's output was wrong (an M1 on
+    // macOS 11: Flint's single-token attention, KL 7.6 against llama.cpp; the other kernel 0.0037, as on macOS 26)
+    if (!ggml_metal_fa_vec_ok) return false;
     // use vec kernel if the batch size is small and if the head size is supported
     return (ne01 < 20) && (ne00 % 32 == 0);
 }

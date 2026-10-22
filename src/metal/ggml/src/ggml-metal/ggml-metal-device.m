@@ -28,6 +28,8 @@
 static const NSInteger MTLGPUFamilyMetal3_GGML = 5001;
 static const NSInteger MTLGPUFamilyMetal4_GGML = 5002;
 
+bool ggml_metal_fa_vec_ok = true;                   // Momoe: see ggml-metal-device.h
+
 // MTLLanguageVersion4_0 is not present in older SDKs
 static const NSUInteger MTLLanguageVersion4_0_GGML = 4 << 16;
 
@@ -1140,6 +1142,13 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
 
                 dev->props.has_bfloat  = [dev->mtl_device supportsFamily:MTLGPUFamilyMetal3_GGML];
                 dev->props.has_bfloat |= [dev->mtl_device supportsFamily:MTLGPUFamilyApple6];
+                // Momoe: the kernels have bfloat only from MSL 3.1 (kernels/common.h drops GGML_METAL_HAS_BF16 below
+                // it), which needs macOS 14: before it a BF16 op found no kernel and aborted (an M1 on macOS 11)
+                if (@available(macOS 14.0, iOS 17.0, *)) {
+                } else {
+                    dev->props.has_bfloat = false;
+                    ggml_metal_fa_vec_ok = false;            // (see ggml_metal_op_flash_attn_ext_use_vec)
+                }
                 if (getenv("GGML_METAL_BF16_DISABLE") != NULL) {
                     dev->props.has_bfloat = false;
                 }

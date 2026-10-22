@@ -1452,7 +1452,19 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     // their VRAM goes to the expert pool. Only when the head has its own weights (output.weight in this file)
     ggml_context * ccpu = ggml_init(ip);
     const bool embd_cpu = !kHostMem && gguf_find_tensor(g, "output.weight") >= 0 && !getenv("MOMOE_EMBD_GPU");
-    struct ToRead { ggml_tensor * t; int fd; size_t off; };
+    struct ToRead { ggml_tensor * t; int fd; size_t off; bool bf16 = false; };
+    // momoe-metal on a GPU without bfloat kernels (macOS before 14: an M1 on Big Sur): BF16 weights (flint's routers)
+    // loaded as F32 (exact: BF16 is F32's top half); its scheduler would want the CPU for them, from a Metal buffer
+    bool bf16_f32 = false;
+    if (kHostMem) {
+        ggml_backend_dev_t gpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
+        ggml_init_params tp = {ggml_tensor_overhead() * 4, nullptr, true};
+        ggml_context * tc = ggml_init(tp);
+        ggml_tensor * op = ggml_mul_mat(tc, ggml_new_tensor_2d(tc, GGML_TYPE_BF16, 64, 64),
+                                        ggml_new_tensor_2d(tc, GGML_TYPE_F32, 64, 1));
+        bf16_f32 = gpu && !ggml_backend_dev_supports_op(gpu, op);
+        ggml_free(tc);
+    }
     std::vector<ToRead> to_read;
     for (size_t sh = 0; sh < paths.size(); ++sh) {
         if (sh > 0) {
@@ -1546,9 +1558,11 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
                 L.exp_map[w] = fmap;
                 continue;
             }
-            ggml_tensor * t = ggml_dup_tensor(embd_cpu && !strcmp(name, "token_embd.weight") ? ccpu : cw_of(il, name), src);
+            ggml_context * tctx = embd_cpu && !strcmp(name, "token_embd.weight") ? ccpu : cw_of(il, name);
+            const bool as_f32 = bf16_f32 && src->type == GGML_TYPE_BF16;
+            ggml_tensor * t = as_f32 ? ggml_new_tensor(tctx, GGML_TYPE_F32, ggml_n_dims(src), src->ne) : ggml_dup_tensor(tctx, src);
             ggml_set_name(t, name);
-            to_read.push_back({t, fd, off});
+            to_read.push_back({t, fd, off, as_f32});
             if (il < 0) {
                 if (!strcmp(name, "token_embd.weight")) m.tok_embd = t;
                 else if (!strcmp(name, "output_norm.weight")) m.out_norm = t;
@@ -1652,7 +1666,20 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     if (embd_cpu) e.bufs.push_back(ggml_backend_alloc_ctx_tensors_from_buft(ccpu, ggml_backend_cpu_buffer_type()));
     size_t dense = 0;
     std::vector<char> tmp;
+    size_t n_bf16 = 0;
     for (auto & r : to_read) {
+        if (r.bf16) {                                        // (see bf16_f32)
+            const int64_t n = ggml_nelements(r.t);
+            std::vector<ggml_bf16_t> raw(n);
+            read_at(r.fd, raw.data(), n * sizeof(ggml_bf16_t), r.off);
+            std::vector<float> f(n);
+            ggml_bf16_to_fp32_row(raw.data(), f.data(), n);
+            if (kHostMem) memcpy(r.t->data, f.data(), n * sizeof(float));
+            else ggml_backend_tensor_set(r.t, f.data(), 0, n * sizeof(float));
+            dense += ggml_nbytes(r.t);
+            ++n_bf16;
+            continue;
+        }
         if (kHostMem) read_at(r.fd, r.t->data, ggml_nbytes(r.t), r.off);   // a Metal buffer is host memory
         else {
             tmp.resize(ggml_nbytes(r.t));
@@ -1662,6 +1689,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
         dense += ggml_nbytes(r.t);
     }
     fprintf(stderr, "momoe-metal: dense weights %.2f GiB loaded\n", dense / 1073741824.0);
+    if (n_bf16) fprintf(stderr, "momoe-metal: %zu BF16 weights loaded as F32 (this GPU has no bfloat kernels: macOS before 14)\n", n_bf16);
     if (m.qwen4 && e.load_mtp) load_mtp_qwen4(e);
     if (m.has_mtp && !e.draft_vocab.empty()) {               // the draft head: the output head's rows for the subset
         FILE * f = fopen(e.draft_vocab.c_str(), "rb");
