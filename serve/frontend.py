@@ -1273,6 +1273,53 @@ def glm_forced(force: str | None) -> str | None:
     return force
 
 
+class NameCaseRewriter:
+    """A call's `<function=NAME>` for a tool the request did not declare under that spelling but did under one that
+    differs only in case, written with the declared one (Flint called Claude Code's `Bash` as `bash`: the call came back
+    as text).  Only where exactly one declared name matches; a declared name is never changed.  A tag split across
+    deltas is held until its `>` (or a line break: not a call's name) arrives."""
+
+    def __init__(self, names):
+        names = [n for n in names if isinstance(n, str)]
+        exact = set(names)
+        low = {}
+        for n in names:
+            low.setdefault(n.lower(), []).append(n)
+        self.map = {k: v[0] for k, v in low.items() if len(v) == 1}
+        self.exact, self.buf = exact, ""
+
+    def feed(self, delta: str) -> str:
+        b, out, at = self.buf + delta, [], 0
+        while True:
+            i = b.find(FUNC_START, at)
+            if i < 0:
+                keep = GlmCallRewriter._held(b[at:], (FUNC_START,))
+                out.append(b[at:len(b) - keep])
+                self.buf = b[len(b) - keep:]
+                return "".join(out)
+            j = i + len(FUNC_START)
+            gt, nl = b.find(">", j), b.find("\n", j)
+            if gt < 0 and (nl < 0) and len(b) - j < 256:     # the name still arriving
+                out.append(b[at:i])
+                self.buf = b[i:]
+                return "".join(out)
+            if gt < 0 or (0 <= nl < gt):                     # not a call's name
+                out.append(b[at:j])
+                at = j
+                continue
+            name = b[j:gt].strip()
+            if name not in self.exact and name.lower() in self.map:
+                name = self.map[name.lower()]
+                out.append(b[at:j] + name + ">")
+            else:
+                out.append(b[at:gt + 1])
+            at = gt + 1
+
+    def flush(self) -> str:
+        rest, self.buf = self.buf, ""
+        return rest
+
+
 RCALL_MAX = 32768        # the most of a `<tool_call>` inside the reasoning that is held while waiting for its end (#804)
 
 
@@ -1299,6 +1346,8 @@ class OutputParser:
         # conversation's tools in the prompt only, and its calls come back as before.
         self.declared_only = declared_only
         self._alias = {k.replace(".", "__", 1) for k in self.schemas if isinstance(k, str) and "." in k}
+        # a call's tool name in another case than declared (Flint: `bash` for Claude Code's `Bash`): the declared one
+        self.case = NameCaseRewriter(self.schemas) if self.schemas else None
         self.unread = 0              # #3441: `<tool_call>` blocks that opened like a call and were returned as text
         # stream_tools: a tool call is also reported while it is being written - "tool_start" (its name and id) as
         # soon as the name is known, then "tool_args" pieces of its JSON arguments (string parameters character by
@@ -1629,6 +1678,8 @@ class OutputParser:
     def feed(self, delta: str) -> list[Event]:
         if self.glm is not None:
             delta = self.glm.feed(delta)
+        if self.case is not None:
+            delta = self.case.feed(delta)
         return self._feed(delta)
 
     def _feed(self, delta: str) -> list[Event]:
@@ -1903,6 +1954,12 @@ class OutputParser:
         out = []
         if self.glm is not None:
             rest = self.glm.flush()
+            if self.case is not None:
+                rest = self.case.feed(rest) + self.case.flush()
+            if rest:
+                out += self._feed(rest)
+        elif self.case is not None:
+            rest = self.case.flush()
             if rest:
                 out += self._feed(rest)
         if self.pending:
