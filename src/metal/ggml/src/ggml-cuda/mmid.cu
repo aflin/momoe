@@ -127,12 +127,65 @@ static __global__ void mm_ids_helper(
     expert_bounds[gridDim.x] = nex_prev + it_compact;
 }
 
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+// Momoe: the same maps when a token uses an expert more than once (momoe-cuda --hybrid: every expert the GPU does not
+// hold is the one slot of zeros). The helper above counts the columns before an expert per use but compacts them per
+// token, which left some of a token's uses unmapped (an illegal memory access in the MMQ kernels). Here every use is
+// a column, in the same order (by token, then by use): without repeats the maps are the helper's own.
+static __global__ void mm_ids_helper_repeats(
+        const int32_t * __restrict__ ids, int32_t * __restrict__ ids_src1, int32_t * __restrict__ ids_dst, int32_t * __restrict__ expert_bounds,
+        const int n_tokens, const int n_expert_used, const int nchannels_y, const int si1, const int sis1, const bool write_inverse) {
+    const int expert = blockIdx.x;
+    const int n = n_tokens*n_expert_used;
+
+    int nex_prev = 0;
+    for (int f = threadIdx.x; f < n; f += WARP_SIZE) {
+        nex_prev += ids[(f / n_expert_used)*si1 + f % n_expert_used] < expert;
+    }
+    nex_prev = warp_reduce_sum<WARP_SIZE>(nex_prev);
+
+    int it_compact = 0;
+    for (int f0 = 0; f0 < n; f0 += WARP_SIZE) {
+        const int f = f0 + threadIdx.x;
+        const int it = f / n_expert_used, iex = f % n_expert_used;
+        const bool use = f < n && ids[it*si1 + iex] == expert;
+        const unsigned mask = __ballot_sync(0xFFFFFFFF, use);
+        if (use) {
+            const int itc = nex_prev + it_compact + __popc(mask & ((1u << threadIdx.x) - 1));
+            ids_dst[itc] = it*n_expert_used + iex;
+            if (write_inverse) {
+                ids_src1[it*n_expert_used + iex] = itc;
+            } else {
+                ids_src1[itc] = it*sis1 + iex % nchannels_y;
+            }
+        }
+        it_compact += __popc(mask);
+    }
+
+    if (threadIdx.x != 0) {
+        return;
+    }
+    expert_bounds[expert] = nex_prev;
+    if (expert == static_cast<int>(gridDim.x) - 1) {
+        expert_bounds[gridDim.x] = nex_prev + it_compact;
+    }
+}
+#endif
+
 template <int n_expert_used_template>
 static void launch_mm_ids_helper(
         const int32_t * __restrict__ ids, int32_t * __restrict__ ids_src1, int32_t * __restrict__ ids_dst, int32_t * __restrict__ expert_bounds,
-        const int n_experts, const int n_tokens, const int n_expert_used_var, const int nchannels_y, const int si1, const int sis1, const bool write_inverse, cudaStream_t stream) {
+        const int n_experts, const int n_tokens, const int n_expert_used_var, const int nchannels_y, const int si1, const int sis1, const bool write_inverse, cudaStream_t stream,
+        const bool repeats) {
     GGML_ASSERT(n_tokens          < (1 << 22) && "too few bits in mm_ids_helper_store");
     GGML_ASSERT(n_expert_used_var < (1 << 10) && "too few bits in mm_ids_helper_store");
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    if (repeats) {
+        mm_ids_helper_repeats<<<n_experts, WARP_SIZE, 0, stream>>>
+            (ids, ids_src1, ids_dst, expert_bounds, n_tokens, n_expert_used_var, nchannels_y, si1, sis1, write_inverse);
+        return;
+    }
+#endif
 
     const int id = ggml_cuda_get_device();
     const int warp_size = ggml_cuda_info().devices[id].warp_size;
@@ -149,31 +202,32 @@ static void launch_mm_ids_helper(
 
 void ggml_cuda_launch_mm_ids_helper(
         const int32_t * __restrict__ ids, int32_t * __restrict__ ids_src1, int32_t * __restrict__ ids_dst, int32_t * __restrict__ expert_bounds,
-        const int n_experts, const int n_tokens, const int n_expert_used, const int nchannels_y, const int si1, const int sis1, const bool write_inverse, cudaStream_t stream) {
+        const int n_experts, const int n_tokens, const int n_expert_used, const int nchannels_y, const int si1, const int sis1, const bool write_inverse, cudaStream_t stream,
+        const bool repeats) {
     switch (n_expert_used) {
         case  2:
-            launch_mm_ids_helper< 2>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream);
+            launch_mm_ids_helper< 2>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream, repeats);
             break;
         case  4:
-            launch_mm_ids_helper< 4>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream);
+            launch_mm_ids_helper< 4>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream, repeats);
             break;
         case  6:
-            launch_mm_ids_helper< 6>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream);
+            launch_mm_ids_helper< 6>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream, repeats);
             break;
         case  8:
-            launch_mm_ids_helper< 8>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream);
+            launch_mm_ids_helper< 8>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream, repeats);
             break;
         case 10:
-            launch_mm_ids_helper<10>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream);
+            launch_mm_ids_helper<10>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream, repeats);
             break;
         case 16:
-            launch_mm_ids_helper<16>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream);
+            launch_mm_ids_helper<16>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream, repeats);
             break;
         case 32:
-            launch_mm_ids_helper<32>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream);
+            launch_mm_ids_helper<32>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream, repeats);
             break;
         default:
-            launch_mm_ids_helper< 0>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream);
+            launch_mm_ids_helper< 0>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, write_inverse, stream, repeats);
             break;
     }
 }

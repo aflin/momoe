@@ -572,6 +572,8 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
     for k, v in (req.get("chat_template_kwargs") or {}).items():
         if k == "enable_thinking" and not v:
             kwargs = {"enable_thinking": False}
+        elif k == "enable_thinking":                 # (asked for: Gemma 4's template thinks only then)
+            kwargs.setdefault("enable_thinking", True)
         elif k == "reasoning_effort" and "enable_thinking" not in kwargs:
             kwargs.update(effort_kwargs(v))
         elif k == "preserve_thinking":
@@ -1117,6 +1119,148 @@ def lfm_forced(force: str | None) -> str | None:
     return force
 
 
+GEMMA_THOUGHT, GEMMA_THOUGHT_END = "<|channel>thought", "<channel|>"
+GEMMA_CALL_START, GEMMA_CALL_END, GEMMA_Q = "<|tool_call>", "<tool_call|>", '<|"|>'
+
+
+def _gemma_value(s: str, i: int):
+    """One value of Gemma 4's argument syntax at s[i:] (its template's format_argument: a string between <|"|> marks,
+    {key:value,...} with bare or marked keys, [value,...], or a bare true / false / null / number) -> (value, end)."""
+    while i < len(s) and s[i] in " \t\r\n":
+        i += 1
+    if s.startswith(GEMMA_Q, i):
+        j = s.find(GEMMA_Q, i + len(GEMMA_Q))
+        if j < 0:
+            raise ValueError("an unclosed string")
+        return s[i + len(GEMMA_Q):j], j + len(GEMMA_Q)
+    if i < len(s) and s[i] in "{[":
+        obj = s[i] == "{"
+        out, i = ({} if obj else []), i + 1
+        while True:
+            while i < len(s) and s[i] in " \t\r\n,":
+                i += 1
+            if i >= len(s):
+                raise ValueError("an unclosed %s" % ("object" if obj else "list"))
+            if s[i] == ("}" if obj else "]"):
+                return out, i + 1
+            if obj:
+                if s.startswith(GEMMA_Q, i):
+                    key, i = _gemma_value(s, i)
+                else:
+                    j = s.find(":", i)
+                    if j < 0:
+                        raise ValueError("a key without a value")
+                    key, i = s[i:j].strip(), j
+                while i < len(s) and s[i] in " \t\r\n":
+                    i += 1
+                if not s.startswith(":", i):
+                    raise ValueError("a key without a value")
+                out[key], i = _gemma_value(s, i + 1)
+            else:
+                v, i = _gemma_value(s, i)
+                out.append(v)
+    j = i
+    while j < len(s) and s[j] not in ",}]":
+        j += 1
+    word = s[i:j].strip()
+    if word in ("true", "false", "null"):
+        return {"true": True, "false": False, "null": None}[word], j
+    try:
+        return (float(word) if any(c in word for c in ".eE") else int(word)), j
+    except ValueError:
+        if not word:
+            raise ValueError("a missing value") from None
+        return word, j                                   # (a bare word as written: text)
+
+
+def gemma_call(body: str) -> str | None:
+    """The inside of `<|tool_call>...<tool_call|>` - `call:NAME{key:value,...}` - in this parser's form, or None when
+    it is not that."""
+    body = body.strip()
+    if not body.startswith("call:") or "{" not in body:
+        return None
+    k = body.index("{")
+    name = body[len("call:"):k].strip()
+    if not name:
+        return None
+    try:
+        args, end = _gemma_value(body, k)
+    except ValueError:
+        return None
+    if body[end:].strip() or not isinstance(args, dict):
+        return None
+    params = "".join(PARAM_START + str(key) + ">\n" + (v if isinstance(v, str) else json.dumps(v, ensure_ascii=False))
+                     + "\n</parameter>\n" for key, v in args.items())
+    return CALL_START + "\n<function=" + name + ">\n" + params + "</function>\n</tool_call>"
+
+
+class GemmaRewriter:
+    """Gemma 4's markers rewritten into this parser's form as they arrive: its thinking (`<|channel>thought` ...
+    `<channel|>`) as <think> ... </think>, and its calls (`<|tool_call>call:NAME{k:v,...}<tool_call|>`) as
+    <tool_call> blocks once complete (LfmCallRewriter's way: one that is not a call stays text, as written).  A
+    marker split across deltas is held until whole."""
+
+    TAGS = (GEMMA_THOUGHT + "\n", GEMMA_THOUGHT, GEMMA_THOUGHT_END, GEMMA_CALL_START)   # (the thought's line break too)
+
+    def __init__(self):
+        self.buf, self.inside = "", False
+
+    def feed(self, delta: str) -> str:
+        self.buf += delta
+        out = []
+        while True:
+            b = self.buf
+            if not self.inside:
+                hits = [(b.find(t), t) for t in self.TAGS if b.find(t) >= 0]
+                if not hits:
+                    keep = GlmCallRewriter._held(b, self.TAGS)
+                    out.append(b[:len(b) - keep])
+                    self.buf = b[len(b) - keep:]
+                    break
+                i, tag = min(hits, key=lambda h: (h[0], -len(h[1])))
+                if tag == GEMMA_THOUGHT and i + len(tag) == len(b):   # its line break may be in the next delta
+                    out.append(b[:i])
+                    self.buf = b[i:]
+                    break
+                out.append(b[:i])
+                self.buf = b[i + len(tag):]
+                if tag == GEMMA_CALL_START:
+                    self.inside = True
+                else:
+                    out.append(THINK_END if tag == GEMMA_THOUGHT_END else THINK_START)
+            else:
+                j = b.find(GEMMA_CALL_END)
+                if j < 0:
+                    if len(b) > RCALL_MAX:               # far too long for a call: text
+                        out.append(GEMMA_CALL_START + b)
+                        self.buf, self.inside = "", False
+                    break
+                out.append(gemma_call(b[:j]) or GEMMA_CALL_START + b[:j] + GEMMA_CALL_END)
+                self.buf, self.inside = b[j + len(GEMMA_CALL_END):], False
+        return "".join(out)
+
+    def flush(self) -> str:
+        """The end of the output: a call whose end tag never came (the reply stopped at <|tool_response>, its end of a
+        call turn) is still read as a call when it is complete; anything else is text."""
+        rest, self.buf = self.buf, ""
+        if self.inside:
+            self.inside = False
+            return gemma_call(rest) or GEMMA_CALL_START + rest
+        return THINK_START if rest == GEMMA_THOUGHT else rest
+
+
+def gemma_forced(force: str | None) -> str | None:
+    """forced_call's opening in Gemma 4's form (the model goes on from it)."""
+    if not force:
+        return force
+    head = CALL_START + "\n" + FUNC_START
+    if force == head:
+        return GEMMA_CALL_START + "call:"
+    if force.startswith(head) and force.endswith(">\n"):
+        return GEMMA_CALL_START + "call:" + force[len(head):-2] + "{"
+    return force
+
+
 def glm_forced(force: str | None) -> str | None:
     """forced_call's opening in GLM's form (the model goes on from it)."""
     if not force:
@@ -1138,9 +1282,9 @@ class OutputParser:
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
                  recover: bool = False, glm: bool = False, lfm: bool = False, opened: bool = True,
-                 declared_only: bool = False):
-        # GLM-5's or LFM2's call format, rewritten into this one as it arrives
-        self.glm = GlmCallRewriter() if glm else LfmCallRewriter() if lfm else None
+                 declared_only: bool = False, gemma: bool = False):
+        # GLM-5's, LFM2's or Gemma 4's call format (Gemma 4's thinking markers too), rewritten into this one as it arrives
+        self.glm = GlmCallRewriter() if glm else LfmCallRewriter() if lfm else GemmaRewriter() if gemma else None
         # opened: the prompt ends inside the thinking (its template wrote <think>); a template that leaves it to the
         # model (LFM2.5-8B-A1B) starts in "opening": the reply's own <think> opens the reasoning, anything else is the
         # answer

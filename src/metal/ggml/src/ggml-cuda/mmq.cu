@@ -1,5 +1,6 @@
 #include "common.cuh"
 #include "mmq.cuh"
+#include "ggml-momoe-mailbox.h"
 #include "quantize.cuh"
 #include "mmid.cuh"
 
@@ -279,6 +280,8 @@ void ggml_cuda_mul_mat_q(
 
     const int64_t n_expert_used = ids->ne[0];
     const int64_t ne_get_rows = ne12 * n_expert_used;
+    // Momoe: a token may use one expert more than once (MOMOE_MMID_REPEATS): an expert then has up to every column
+    const bool repeats = ggml_get_op_params_i32(dst, 0) == (int32_t) MOMOE_MMID_REPEATS;
     GGML_ASSERT(ne1 == n_expert_used);
 
     ggml_cuda_pool_alloc<int32_t> ids_src1(ctx.pool(), ne_get_rows);
@@ -295,7 +298,7 @@ void ggml_cuda_mul_mat_q(
         const int sis1 = nb12 / nb11;
 
         ggml_cuda_launch_mm_ids_helper((const int32_t *) ids->data, ids_src1.get(), ids_dst.get(), expert_bounds.get(),
-            ne02, ne12, n_expert_used, ne11, si1, sis1, /*write_inverse =*/ dedup_bcast, stream);
+            ne02, ne12, n_expert_used, ne11, si1, sis1, /*write_inverse =*/ dedup_bcast, stream, repeats);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -347,7 +350,7 @@ void ggml_cuda_mul_mat_q(
         ne00, ne01, ne_get_rows, s01, ne_get_rows, s1,
         ne02, ne02, s02, s12, s2,
         ne03, ne13, s03, s13, s3,
-        ne12, J_best};
+        repeats ? ne_get_rows : ne12, J_best};
 
     ggml_cuda_mul_mat_q_switch_type(ctx, args, stream, prec_src1);
 }

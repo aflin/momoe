@@ -62,7 +62,7 @@ SHUTDOWN = threading.Event()                      # set by POST /shutdown (momoe
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (THINK_END, THINK_START, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
-                            forced_call, glm_forced, lfm_forced, images_of, literal_tags, mark_think_literals,
+                            forced_call, glm_forced, lfm_forced, gemma_forced, images_of, literal_tags, mark_think_literals,
                             openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
@@ -3222,17 +3222,25 @@ class Service:
         self.restore_after_load = None                    # a session file an image job saved before it unloaded
         # the end-of-turn tokens; a name the vocabulary has no single token for (Nemotron 3.5 Bolt has no
         # <|endoftext|>) is skipped: encoded as text, its first piece ("<") would end every reply that wrote a "<"
-        # (GLM-5: <|user|> and <|observation|> end a reply as well: its eos_token_id list)
+        # (GLM-5: <|user|> and <|observation|> end a reply as well: its eos_token_id list; Gemma 4: <turn|>, <eos>
+        # and, after a call, <|tool_response>)
         self.stop_ids = {ids[0] for ids in (tokenizer.encode(s, parse_special=True)
-                                            for s in (IM_END, "<|endoftext|>", "<|user|>", "<|observation|>"))
+                                            for s in (IM_END, "<|endoftext|>", "<|user|>", "<|observation|>")
+                                            + (("<turn|>", "<eos>", "<|tool_response>")
+                                               if "<|channel>" in getattr(template, "source", "") else ()))
                          if len(ids) == 1}
         # GLM-5's tool-call format (<tool_call>NAME<arg_key>..): the parser rewrites it into its own (GlmCallRewriter)
         self.glm = "<arg_key>" in getattr(template, "source", "")
         # LFM2's (<|tool_call_start|>[name(k=v)]<|tool_call_end|>, a Python list): rewritten too (LfmCallRewriter)
         self.lfm = not self.glm and "<|tool_call_start|>" in getattr(template, "source", "")
+        # Gemma 4's (<|tool_call>call:NAME{k:v}<tool_call|>, its thinking between <|channel>thought and <channel|>):
+        # rewritten too (GemmaRewriter)
+        src = getattr(template, "source", "")
+        self.gemma = not self.glm and not self.lfm and "<|tool_call>" in src and "<|channel>" in src
         # does the template's generation prompt open the thinking (Qwen, GLM-5, LFM2.5-24B: "<think>")?  One that does
-        # not (LFM2.5-8B-A1B) leaves it to the model, which may answer at once: the parser waits for the reply's start
-        self.think_opened = template_opens_think(template)
+        # not (LFM2.5-8B-A1B, Gemma 4) leaves it to the model, which may answer at once: the parser waits for the
+        # reply's start
+        self.think_opened = template_opens_think(template) and not self.gemma
         # #567: a prompt re-encodes only what follows the last special token it shares with a recent prompt (the
         # same ids as a full encode: tools/strata_tokenizer.py PromptEncoder).  Tokenizers without resume points
         # encode in full.
@@ -3939,6 +3947,10 @@ class Service:
                 kwargs["reasoning_effort"] = g
             else:
                 kwargs.pop("reasoning_effort")
+        if self.gemma and kwargs.get("reasoning_effort") and "enable_thinking" not in kwargs:
+            kwargs = {**kwargs, "enable_thinking": True}   # (Gemma 4 thinks only when asked: an effort asks)
+        if self.gemma and tools:                       # (Gemma 4's template reads tool['function']: OpenAI's form)
+            tools = [t if isinstance(t, dict) and "function" in t else {"type": "function", "function": t} for t in tools]
         effort = kwargs.get("reasoning_effort")
         off = kwargs.get("enable_thinking") is False
         if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
@@ -4128,7 +4140,8 @@ class Service:
             write_temporary(combined, [p for p, _ in encoded])
         if req is not None and req.get("strata_prefix") is not None:
             req["strata_prefix"] = self.resolve_prefix(req["strata_prefix"], messages, tools, kwargs, ids, bool(images))
-        return ids, kwargs.get("enable_thinking", True) is not False, max_new
+        # (Gemma 4's template thinks only when asked: enable_thinking defaults to false there)
+        return ids, kwargs.get("enable_thinking", not self.gemma or bool(kwargs.get("reasoning_effort"))) is not False, max_new
 
     PREFIX_END = "\u0001strata-prefix-end\u0001"          # marks where a message's shared part ends in the rendered prompt
 
@@ -4300,8 +4313,9 @@ class Service:
                 print(f"[momoe] thinking capped at {max_new - reserve} of max_tokens {max_new} to leave room for "
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
-        parser = OutputParser(thinking=thinking, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
-                              glm=self.glm, lfm=self.lfm, opened=opened is not None,
+        # (Gemma 4 writes an empty thought block of its own after a tool result, thinking or not: the reply's start says)
+        parser = OutputParser(thinking=thinking or self.gemma, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
+                              glm=self.glm, lfm=self.lfm, gemma=self.gemma, opened=opened is not None,
                               declared_only=declared_only)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
@@ -6029,6 +6043,8 @@ def make_handler(svc: Service):
                 force = glm_forced(force)
             elif svc.lfm:
                 force = lfm_forced(force)
+            elif svc.gemma:
+                force = gemma_forced(force)
             messages, validator = prepare_format(req.get("response_format"), messages)
             if validator is not None and (tools or req.get("strata_mcp")):
                 raise ValueError("structured response_format with tools/MCP is not supported")
@@ -6276,6 +6292,8 @@ def make_handler(svc: Service):
                 force = glm_forced(force)
             elif svc.lfm:
                 force = lfm_forced(force)
+            elif svc.gemma:
+                force = gemma_forced(force)
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
@@ -6993,7 +7011,8 @@ def main() -> int:
         tokens = [None] * len(vocab)
         for t, i in vocab.items():
             tokens[i] = t
-        merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
+        merges = (json.loads((tpath / "merges.json").read_text(encoding="utf-8")) if (tpath / "merges.json").exists()
+                  else (tpath / "merges.txt").read_text(encoding="utf-8").split("\n"))   # (merges.json: Gemma 4's)
         types = json.loads((tpath / "token_type.json").read_text())
         pre = "qwen35"                                  # the pre-tokenizer the pack was extracted with (Bolt: tekken)
         with contextlib.suppress(OSError, ValueError, AttributeError):

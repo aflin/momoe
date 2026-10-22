@@ -19,6 +19,11 @@ extern "C" {
 
 #define MOMOE_MAILBOX_MAGIC 0x4d4d4258u // "MMBX"
 
+// a GGML_OP_MUL_MAT_ID whose op_params[0] is this: a token may use one expert more than once (momoe-cuda --hybrid and
+// --helper-tier: every expert the card does not hold is its one slot of zeros). CUDA's batch kernels then map every use
+// to its own column and allow a token's columns to all go to one expert.
+#define MOMOE_MMID_REPEATS 0x50455252 // "RREP"
+
 enum momoe_mailbox_kind {
     MOMOE_MAILBOX_SEND = 1, // src[0] (F32, n_f32) and src[1] (I32, n_i32) into the mailbox, then *flag := *epoch
     MOMOE_MAILBOX_WAIT = 2, // spin until *flag == *epoch, then n_f32 32-bit words from the mailbox into dst (F32 or I32)

@@ -76,6 +76,8 @@ HF_REVISIONS = {
     "bartowski/Ornith-1.5-35B-A3B-GGUF": "64b0493d34a5ca4c1b4ad67bb99b41d74b4f07d6",
     "unsloth/Ornith-1.5-122B-GGUF": "3842d003341507c216295c6f28dfcd30349925c6",
     "unsloth/flint-GGUF": "9167d02e3b32c8592d94d17e2316f0be8d7caab8",
+    "unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF": "f2d3fe3694501008786e81e5f20360cbf715496a",   # 2026-10-21
+    "unsloth/gemma-4-26B-A4B-it-GGUF": "c099eb48e663fd284577b04978a94ffccb261841",                     # 2026-10-21
     "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF": "5c2410d71524f4f72b023ce8daf7a80528226d5f",   # its mmproj (images)
     "Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF": "e4ae9970325413d582ba2c294122fc5567ec1dd7",
     "unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF": "34841e360524d421c564cc3ed247aa04a865473b",   # 2026-10-16
@@ -628,6 +630,18 @@ FLINT_FILES = {
     "flint-UD-IQ3_XXS.gguf": (14535427520, "7a0a095dde1d931063a5d571e19497d997edbc783eb1ed6b86529bfab9d94804"),
     "flint-UD-Q4_K_XL.gguf": (25054688704, "63c2ecc461ca545134b670c660e76fa20f47240f8d39b6510bfd21c4dd6e072f"),
 }
+# Nemotron 3.5 Lightning 30B-A3B (NVIDIA; Unsloth's GGUFs): Bolt's Mamba-2 + attention + MoE without its latent
+# projections, 128 experts, 3B active (src/metal: nemotron_h_moe)
+LIGHTNING_FILES = {
+    "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-UD-IQ3_XXS.gguf": (19758307392, "f3e042bb0e6c0081d37b87aa97f24b645b20cd80459dc629ea1b71b5bb46bd10"),
+    "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-UD-Q4_K_XL.gguf": (25505724480, "112bf957489a497c18f60bf8bd44ee1dfa05e87368b8ed7f68998a4e38f275c9"),
+}
+# Gemma 4 26B-A4B (Google; Unsloth's GGUFs): sliding-window + full attention, a dense GELU FFN beside a 128-expert MoE,
+# 4B active (src/metal: gemma4)
+GEMMA4_FILES = {
+    "gemma-4-26B-A4B-it-UD-IQ3_XXS.gguf": (11416548832, "3b7aec683e176e1d957d007e0fb590611d82aec4db358d99b7f9714b6bc7bfc2"),
+    "gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf": (17010980576, "ef728c8e0c337fd1067b947af006e38a9ef2419e56feced4fd29b4bf0636e30c"),
+}
 GGML_FAMILIES = {
     "bolt": {"title": "Nemotron 3.5 Bolt 74B-A9B", "by": "NVIDIA; Unsloth's GGUFs",
              "about": "Mamba-2 + attention + latent MoE, 9B active; a 32 GB download, ~56 GB of RAM",
@@ -686,6 +700,29 @@ GGML_FAMILIES = {
               "sha256": FLINT_FILES, "default": "UD-IQ3_XXS",
               "context": 32768, "min_vram_gb": 0,
               "license": "Apache 2.0: https://huggingface.co/RecursiveSI/flint"},
+    "lightning": {"title": "Nemotron 3.5 Lightning 30B-A3B", "by": "NVIDIA; Unsloth's GGUFs",
+                  "about": "Mamba-2 + attention + MoE, 3B active; 19.8-25.5 GB",
+                  "hf": hf("unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF"),
+                  "file": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-{q}.gguf", "tag": "nemotron35l-",
+                  "name": "nemotron-3.5-lightning-30b-a3b",
+                  # which size: lightning_size (by the machine); ram_gb: the memory each was measured to run well with
+                  "models": {"UD-IQ3_XXS": {"about": "3-bit (Unsloth Dynamic), measured: for 12 GB cards and 32 GB Macs",
+                                            "ram_gb": 28},
+                             "UD-Q4_K_XL": {"about": "4-bit, larger (Unsloth Dynamic), measured", "ram_gb": 36}},
+                  "sha256": LIGHTNING_FILES, "default": "UD-IQ3_XXS",
+                  "context": 65536, "min_vram_gb": 0,
+                  "license": "OpenMDW-1.1: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B"},
+    "gemma4": {"title": "Gemma 4 26B-A4B", "by": "Google; Unsloth's GGUFs",
+               "about": "sliding-window attention + a dense FFN beside 128 experts, 4B active; 11.4-17 GB",
+               "hf": hf("unsloth/gemma-4-26B-A4B-it-GGUF"), "file": "gemma-4-26B-A4B-it-{q}.gguf", "tag": "gemma4-",
+               "name": "gemma-4-26b-a4b",
+               # which size: gemma4_size (by the machine); ram_gb: the memory each was measured to run well with
+               "models": {"UD-IQ3_XXS": {"about": "3-bit (Unsloth Dynamic), measured: for 12 GB cards and 32 GB Macs",
+                                         "ram_gb": 20},
+                          "UD-Q4_K_XL": {"about": "4-bit, larger (Unsloth Dynamic), measured", "ram_gb": 28}},
+               "sha256": GEMMA4_FILES, "default": "UD-IQ3_XXS",
+               "context": 32768, "min_vram_gb": 0,
+               "license": "Apache 2.0: https://ai.google.dev/gemma/docs/gemma_4_license"},
     "lfm25": {"title": "LFM2.5-24B-A2B", "by": "Liquid AI; Unsloth's GGUFs",
               "about": "short convolutions + attention + MoE, 2.4B active, an agent model that always thinks; "
                        "7.5-15 GB, for small machines (measured on an 8 GB Jetson Orin Nano Super)",
@@ -5496,6 +5533,7 @@ SAMPLING_FLASH_NEXT = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}   # Qwen3
 SAMPLING_NEMOTRON = {"temperature": 1.0, "top_p": 0.95}                  # Nemotron 3.5 (Bolt): the card's text sampling
 SAMPLING_GLM53 = {"temperature": 1.0, "top_p": 0.95}                     # GLM-5.3-Flash: its card's evaluation settings
 SAMPLING_FLINT = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}       # Flint: its card's (and the file's)
+SAMPLING_GEMMA4 = {"temperature": 1.0, "top_p": 0.95, "top_k": 64}      # Gemma 4: its card's (and the file's)
 SAMPLING_LFM25 = {"temperature": 0.1, "top_k": 50}                       # LFM2.5: the card's (and its repetition
                                                                           # penalty 1.05, which momoe-cuda does not apply)
 SAMPLING_LFM25_8B = {"temperature": 0.2, "top_k": 64}                    # LFM2.5-8B-A1B: its card's (top_k 80 there: the
@@ -5514,6 +5552,8 @@ def recommended_sampling(model_name) -> dict | None:
         return dict(SAMPLING_GLM53)
     if name.startswith("flint-"):
         return dict(SAMPLING_FLINT)
+    if name.startswith("gemma-4-"):
+        return dict(SAMPLING_GEMMA4)
     if name.startswith("lfm2.5-8b-"):
         return dict(SAMPLING_LFM25_8B)
     if name.startswith("lfm2.5-"):
@@ -6833,13 +6873,36 @@ def flint_size(ram: float, shared: bool, vram_gb: float) -> str:
     return "UD-Q4_K_XL" if vram_gb >= 16 and ram >= 32 else "UD-IQ3_XXS"
 
 
+def lightning_size(ram: float, shared: bool, vram_gb: float) -> str:
+    """Nemotron 3.5 Lightning's size for this machine.  Measured: an RTX 4070 Ti (12 GB) + 63 GB, the CPU computing the
+    experts the card does not hold: UD-IQ3_XXS 71 tok/s, UD-Q4_K_XL 38 (llama.cpp at its best --n-cpu-moe: 65.3,
+    40.2).  So the 4-bit file where it fits in memory beside the system or on a card that holds most of it, else the
+    3-bit one."""
+    if shared:
+        return "UD-Q4_K_XL" if ram >= 48 else "UD-IQ3_XXS"
+    return "UD-Q4_K_XL" if vram_gb >= 24 and ram >= 48 else "UD-IQ3_XXS"
+
+
+def gemma4_size(ram: float, shared: bool, vram_gb: float) -> str:
+    """Gemma 4 26B-A4B's size for this machine.  Measured: an RTX 4070 Ti (12 GB) + 63 GB, 32K context, the CPU
+    computing the experts the card does not hold: UD-IQ3_XXS 92 tok/s, UD-Q4_K_XL 75 (llama.cpp at its best
+    --n-cpu-moe: 90.5, 54.8 at 8K).  So the 4-bit file where it fits in memory beside the system or on a card that
+    holds it, else the 3-bit one."""
+    if shared:
+        return "UD-Q4_K_XL" if ram >= 48 else "UD-IQ3_XXS"
+    return "UD-Q4_K_XL" if vram_gb >= 20 and ram >= 32 else "UD-IQ3_XXS"
+
+
+SIZE_RULES = {"flint": "flint_size", "lightning": "lightning_size", "gemma4": "gemma4_size"}   # (by name: tests patch them)
+
+
 def momoe_title(family: str) -> str:
     return (GGML_FAMILIES.get(family) or FAMILIES[family])["title"]
 
 
 # the families momoe_setup offers, in its menu's order (NVFP4's packs are Strata's own format: its engine only)
 MOMOE_MENU = ("ornith", "qwen36", "qwen36-bartowski", "kat-coder", "qwen", "swift", "coder", "unsloth", "bolt",
-              "ornith122", "glm53", "flint", "lfm25", "lfm25-8b")
+              "ornith122", "glm53", "flint", "lightning", "gemma4", "lfm25", "lfm25-8b")
 
 
 def momoe_menu(a, ram: float) -> str:
@@ -6873,11 +6936,12 @@ def kv_bytes_per_token(files: list) -> int:
     blocks = int(md.get(f"{a}.block_count", 0) or 0)
     head = int(md.get(f"{a}.attention.key_length") or 0) or (
         int(md.get(f"{a}.embedding_length", 0) or 0) // max(1, int(md.get(f"{a}.attention.head_count", 1) or 1)))
+    swa = md.get(f"{a}.attention.sliding_window_pattern")
+    if isinstance(swa, list):                           # flint, gemma4: only the full-attention blocks keep every
+        kvs = kv if isinstance(kv, list) else [kv] * blocks   # position (the others: kv_ring_gib); gemma4: KV heads
+        return sum(int(kvs[i] or 0) for i in range(min(blocks, len(swa))) if not swa[i]) * head * 2 * 2   # per block
     if isinstance(kv, list):
         return sum(int(x) for x in kv) * head * 2 * 2
-    swa = md.get(f"{a}.attention.sliding_window_pattern")
-    if isinstance(swa, list):                           # flint: only the full-attention blocks keep every position
-        return sum(1 for x in swa[:blocks] if not x) * int(kv or 0) * head * 2 * 2   # (the others: kv_ring_gib)
     every = int(md.get(f"{a}.full_attention_interval", 0) or 0)
     layers = blocks // every if every else blocks
     return layers * int(kv or 0) * head * 2 * 2
@@ -6897,9 +6961,10 @@ def kv_ring_gib(files: list) -> float:
     if not isinstance(swa, list):
         return 0.0
     blocks = int(md.get(f"{a}.block_count", 0) or 0)
-    head = int(md.get(f"{a}.attention.key_length") or 0)
-    kv = int(md.get(f"{a}.attention.head_count_kv") or 0)
-    return sum(1 for x in swa[:blocks] if x) * KV_RING_ROWS * kv * head * 2 * 2 / 2**30
+    head = int(md.get(f"{a}.attention.key_length_swa") or md.get(f"{a}.attention.key_length") or 0)   # (gemma4: its
+    kv = md.get(f"{a}.attention.head_count_kv")                                                        # own size)
+    kvs = kv if isinstance(kv, list) else [kv] * blocks
+    return sum(int(kvs[i] or 0) for i in range(min(blocks, len(swa))) if swa[i]) * KV_RING_ROWS * head * 2 * 2 / 2**30
 
 
 def weights_gib(files: list) -> tuple:
@@ -6984,8 +7049,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     if a.helper_tier and len(cards) != 2:
         fail("--helper-tier takes two cards: --gpus MAIN,HELPER")
     q = momoe_size(family, a.model, ram)
-    if family == "flint" and not a.model:
-        q = flint_size(ram, mac or unified, 0.0 if mac or unified else gpu["vram_gb"])
+    if family in SIZE_RULES and not a.model:
+        q = globals()[SIZE_RULES[family]](ram, mac or unified, 0.0 if mac or unified else gpu["vram_gb"])
     need = momoe_sizes(family)[q][1]
     files = momoe_files(family, q)
     if ram < need:

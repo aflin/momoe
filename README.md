@@ -43,7 +43,7 @@ and Strata is still its base:
 MoMoE's other two engines are its own: **`momoe-cuda`** (Linux with NVIDIA) and **`momoe-metal`** (Apple Silicon), in
 [src/metal](src/metal/README.md), written for MoMoE on [ggml](https://github.com/ggml-org/llama.cpp) (llama.cpp's
 library: its kernels, and its model code for the families they add). They run every model on a Mac, the DGX Spark and
-the Jetson, and Nemotron 3.5 Bolt, GLM-5.3-Flash, LFM2.5, Ornith-1.5-122B and Flint on a PC. They read a model's GGUF as
+the Jetson, and Nemotron 3.5 Bolt and Lightning, GLM-5.3-Flash, LFM2.5, Ornith-1.5-122B, Flint and Gemma 4 on a PC. They read a model's GGUF as
 it is (nothing packed), keep the experts they can in a pool on the GPU, and fetch or compute the rest as each layer
 needs them: read from the SSD (on the Spark past the page cache), copied in from RAM, or computed by the CPU through
 mailboxes the GPU waits on (for Ornith-122B and Flint, a trial while the model runs picks the faster way). Their graphs
@@ -63,7 +63,8 @@ default behaviour unchanged. MoMoE is the place for those changes:
 
 - **More MoE models.** Strata runs Qwen3.8-Flash-Next and its variants. MoMoE also runs Qwen3.6-35B-A3B and its
   fine-tunes (Ornith 1.5, KAT-Coder), which fit 8-12 GB cards and 16-32 GB of RAM; larger ones (Ornith-1.5-122B,
-  Nemotron 3.5 Bolt, GLM-5.3-Flash), Flint and small ones (LFM2.5) on its own ggml engine. Each one installs with
+  Nemotron 3.5 Bolt, GLM-5.3-Flash), Flint, Nemotron 3.5 Lightning, Gemma 4 and small ones (LFM2.5) on its own ggml
+  engine. Each one installs with
   `momoe setup`; the chart below shows where each was run (all but GLM on a 12 GB card, and the 8 GB Jetson).
 - **Agents first.** `momoe run claude` (or Codex, OpenCode, Unsloth Studio, LM Studio) starts the model and the tool,
   already connected to each other. There is no web page: the server is for your apps and agents.
@@ -83,10 +84,10 @@ this note.
 
 Early, and maintained by one person. MoMoE has three engines:
 - **Strata's engine** (`momoe`), on Linux with an NVIDIA card: Qwen3.8-Flash-Next and the Qwen3.6 family.
-- **MoMoE's ggml engine** (`momoe-cuda`), on Linux with an NVIDIA card: Nemotron 3.5 Bolt, GLM-5.3-Flash,
-  Ornith-1.5-122B, Flint and LFM2.5 everywhere, and every family on a GPU that shares the system's memory (the DGX
-  Spark, a Jetson), where Strata's engine is not built. On a card of its own, the CPU computes the Bolt, Ornith-122B and
-  Flint experts the card does not hold (for Ornith a trial at load, and again when the speed changes, picks that or
+- **MoMoE's ggml engine** (`momoe-cuda`), on Linux with an NVIDIA card: Nemotron 3.5 Bolt and Lightning,
+  GLM-5.3-Flash, Ornith-1.5-122B, Flint, Gemma 4 and LFM2.5 everywhere, and every family on a GPU that shares the system's memory (the DGX
+  Spark, a Jetson), where Strata's engine is not built. On a card of its own, the CPU computes the Bolt, Lightning,
+  Ornith-122B, Flint and Gemma 4 experts the card does not hold (for Ornith a trial at load, and again when the speed changes, picks that or
   copying them in). On the Spark the experts that don't fit are read from the SSD directly, at 10-13 GB/s; on an 8 GB
   Jetson they are copied from the file cache. Two cards share a model with the layer split or the helper tier.
 - **MoMoE's Metal engine** (`momoe-metal`, [src/metal](src/metal/README.md)), on Apple Silicon Macs: every family
@@ -118,7 +119,9 @@ The machines the models were tested on:
 Writing speed in tokens per second; "-" means not tried. Every model here was installed with `momoe setup` on the
 machine; its greedy output was compared with llama.cpp's (48 or 64 tokens: the same, or parting only where the top two
 tokens are within a few hundredths of each other, which was checked); and the server answered a chat, made a tool call
-(whole and streamed) and answered after the tool's result.
+(whole and streamed) and answered after the tool's result. (Nemotron 3.5 Lightning and Gemma 4: setup and the server
+on the PC only; elsewhere the engine itself, checked against llama.cpp's reference:
+[bench/results/2026-10-22-gemma4-lightning](bench/results/2026-10-22-gemma4-lightning/README.md).)
 
 | Model, size | PC | Spark | Jetson | M1 Ultra | M4 Air |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -134,6 +137,8 @@ tokens are within a few hundredths of each other, which was checked); and the se
 | Ornith-1.5-122B-A10B UD-IQ3_XXS | 19.2 | 33.2* | - | 19.8* | 4.5 |
 | GLM-5.3-Flash UD-IQ3_XXS | does not fit a 12 GB card | 19.7* | - | 4.5* | 1.4 |
 | Flint 40B-A2.5B | 89.9 (UD-IQ3_XXS) / 65.7 (UD-Q4_K_XL) | 73.2 (UD-Q4_K_XL) | - | 84.4 (UD-Q4_K_XL) | 42.2 (UD-IQ3_XXS) |
+| Nemotron 3.5 Lightning 30B-A3B | 71.1 (UD-IQ3_XXS) / 38.7 (UD-Q4_K_XL) | 66.9 (UD-Q4_K_XL) | - | 89.9 (UD-Q4_K_XL) | 25.9 (UD-IQ3_XXS) |
+| Gemma 4 26B-A4B | 92.4 (UD-IQ3_XXS) / 75.2 (UD-Q4_K_XL) | 59.3 (UD-Q4_K_XL) | - | 85.2 (UD-Q4_K_XL) | 28.8 (UD-IQ3_XXS) |
 | LFM2.5-24B-A2B | 75.9 (UD-Q4_K_XL) | 134.0 | 6.9 | 104.3 | 59.0 (11.9 as an 8 GB Mac) |
 | LFM2.5-8B-A1B UD-Q4_K_XL | 305.5 | 161.7 | 16.6 | 185.3 | 43.1 (as an 8 GB Mac) |
 | Flash-Next NVFP4 | Strata's own packs: a PC with an NVIDIA card only, not tested in MoMoE | | | | |
@@ -216,6 +221,17 @@ and the Jetson; `momoe-metal` on the Macs.
 | Flint UD-Q4_K_XL | M1 Ultra | 84.2-84.4 | 77.4-77.8 |
 | Flint UD-IQ3_XXS | M4 Air | 42.2 | 41.0 |
 | Flint UD-Q4_K_XL | M4 Air | 16.7-19.1 (a 14-16 GiB pool, the rest from the SSD) | 20.8 (every layer on the CPU: the file is larger than Metal's limit) |
+| Gemma 4 26B-A4B UD-IQ3_XXS | PC | 89.4-92.4 (32K context) | 90.5 at 32K (4 layers' experts on the CPU, the best fit); 131.5 at `llama-bench`'s ~128 tokens (all on the card) |
+| Gemma 4 26B-A4B UD-Q4_K_XL | PC | 74.6-75.2 | 54.8 (11 layers' experts on the CPU, the best fit) |
+| Gemma 4 26B-A4B UD-Q4_K_XL | Spark | 58.5-59.3 | 57.5 |
+| Gemma 4 26B-A4B UD-Q4_K_XL | M1 Ultra | 84.9-85.2 | 86.7 |
+| Gemma 4 26B-A4B UD-IQ3_XXS | M4 Air | 27.9-28.8 | 26.8 |
+| Gemma 4 26B-A4B UD-Q4_K_XL | M4 Air | 23.6-24.0 | 24.1 |
+| Nemotron 3.5 Lightning UD-IQ3_XXS | PC | 70.9-71.1 | 65.3 (24 layers' experts on the CPU, the best fit) |
+| Nemotron 3.5 Lightning UD-Q4_K_XL | PC | 37.7-38.7 | 40.2 (36 layers' experts on the CPU, the best fit) |
+| Nemotron 3.5 Lightning UD-Q4_K_XL | Spark | 66.8-66.9 | 69.6 |
+| Nemotron 3.5 Lightning UD-Q4_K_XL | M1 Ultra | 89.9 | 92.1 |
+| Nemotron 3.5 Lightning UD-IQ3_XXS | M4 Air | 25.7-25.9 | 26.0 |
 | Nemotron 3.5 Bolt UD-Q3_K_XL | M1 Ultra | 37.5 | 38.5 (it cannot read a prompt: its Metal build has no kernel for 9 experts a token) |
 | Nemotron 3.5 Bolt UD-IQ3_XXS | PC | 30.0 / 30.6 (server, greedy / sampled) | 26.2 / 26.1 |
 | Ornith-1.5-122B-A10B UD-IQ3_XXS | PC | 19.2 (the CPU computes the experts the card does not hold) | 4.62 (48 layers' experts on the CPU, the best fit) |
@@ -245,6 +261,15 @@ does not hold, through the mailboxes, in a decode graph kept and replayed as a C
 copies -> 57 -> 66 tok/s). Against llama.cpp over 300 tokens fed its own: KL means 0.0015-0.0023, the same top token
 98-100% (a 6K-token prompt: 0.008, with the ring or without it). Setup picks the size by the machine: UD-Q4_K_XL where
 the GPU shares 48 GB or more, UD-IQ3_XXS on a 12 GB card and a 32 GB Mac.
+
+Gemma 4 26B-A4B and Nemotron 3.5 Lightning 30B-A3B (2026-10-22; llama.cpp a37cc46; greedy 300 tokens, two runs;
+llama.cpp `llama-bench` tg128 at its best fit, and for Gemma 4 UD-IQ3_XXS also its server at a 32K context, where the
+whole model no longer fits the 12 GB card): on the PC the CPU computes the experts the card does not hold; elsewhere
+every expert is in memory. Against llama.cpp over 299 tokens fed its own: Gemma 4 KL means 0.0005-0.0008 (all 299
+greedy tokens the same on the PC and the Spark), Lightning 0.0048-0.0078 with the same top token 98-99% (as much
+without the CPU's experts: llama.cpp's reference computed 45 of its MoE layers on its CPU). Setup picks UD-IQ3_XXS on a
+12 GB card and a 32 GB Mac, UD-Q4_K_XL where the GPU shares 48 GB or more. Details:
+[bench/results/2026-10-22-gemma4-lightning](bench/results/2026-10-22-gemma4-lightning/README.md).
 
 Where every expert fits on the GPU, MoMoE with its graphs kept is level with llama.cpp on LFM2.5 (the PC, the Jetson,
 the M1 Ultra, the M4 Air), and on the Qwen3.6 family on the M1 Ultra without drafting; with drafting llama.cpp is ahead
