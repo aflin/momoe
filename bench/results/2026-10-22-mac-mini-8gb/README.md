@@ -24,7 +24,10 @@ Found on macOS 11 and fixed (fcbb7f18 and the next commit):
 - ggml-metal's flash-attention vec kernel (one token) computed wrong results (Flint: KL 7.6); not used before macOS 14.
 - Gemma 4's dense weights (1.92 GiB) with setup's 3 GiB pool needed 6.45 GiB of a 5.33 GiB working set: the GPU's
   work failed and the engine read choices it never wrote (a crash). `momoe-metal` now reserves the largest graph's
-  buffers at load and shrinks the pool to the working set (Gemma 4: 2.15 GiB; Flint 3.00 -> 2.92, 8.8 -> 8.7 tok/s).
+  buffers at load (on a scheduler of its own, freed after) and shrinks the pool to the working set less 512 MiB: the
+  server needs more than the engine alone (Flint's, two chats and two 2,651-token prompts: no margin ran out of GPU
+  memory on the first long prompt, 256 and 512 MiB ran). Flint's pool 3.00 -> 2.42 GiB, its server 8.1-8.35 -> 7.8-8.0
+  tok/s overall; Gemma 4 measured at 2.15 GiB (8.4 tok/s, KL 0.0008), less with the margin (not measured).
 
 llama.cpp on the same machine: Flint on the GPU aborts (the missing bfloat kernel; with `GGML_METAL_BF16_DISABLE=1`,
 `GGML_ASSERT(buf_dst)`); its vec flash-attention kernel is the same as MoMoE's was (not checked how its output fares).
