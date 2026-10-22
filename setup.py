@@ -82,7 +82,7 @@ HF_REVISIONS = {
     "Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF": "e4ae9970325413d582ba2c294122fc5567ec1dd7",
     "unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF": "34841e360524d421c564cc3ed247aa04a865473b",   # 2026-10-16
     "unsloth/GLM-5.3-Flash-GGUF": "a38483c8cd5df544f53d70fb281afe97369d5ab6",   # 2026-10-17
-    "unsloth/LFM2.5-24B-A2B-GGUF": "faa77113e93335b63423e9e8d33395f86eaf8946",  # 2026-10-13
+    "unsloth/LFM2.5-24B-A2B-GGUF": "aacc77834f6aa568c93b4dbd6d295059736be98c",  # 2026-10-20 (faa77113 is gone; the same files)
     "unsloth/LFM2.5-8B-A1B-GGUF": "37563684c4a625e9958906fd924e15095cf9c896",
 }
 
