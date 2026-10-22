@@ -588,6 +588,10 @@ uint64_t ggml_backend_metal_pause_counter(ggml_backend_t backend) {
     return ggml_metal_pause_counter((ggml_metal_t) backend->context);
 }
 
+size_t ggml_backend_metal_allocated(ggml_backend_t backend) {
+    return ggml_metal_device_get_allocated((ggml_metal_device_t) ggml_backend_get_device(backend)->context);
+}
+
 uint64_t ggml_backend_metal_pause_signaled(ggml_backend_t backend) {
     return ggml_metal_pause_signaled((ggml_metal_t) backend->context);
 }

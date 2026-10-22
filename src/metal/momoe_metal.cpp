@@ -2067,6 +2067,9 @@ static void make_resident(Engine & e, int il, const int32_t * ids, int n_tok) {
     std::vector<Readers::Job> hjobs;
     for (size_t i = 0; i < (size_t) m.n_used * n_tok; ++i) {
         const int x = ids[i];
+        if (x < 0 || x >= m.n_expert)                        // (a GPU step that failed: out of its memory)
+            die("%s: the GPU's work failed (out of GPU memory? a smaller --pool-gib)",
+                ("layer " + std::to_string(il) + " chose expert " + std::to_string(x)).c_str());
         const int key = il * m.n_expert + x;
         ++P.freq[key];
         if (stage) {
@@ -5238,6 +5241,49 @@ static void fit_pool(Engine & e) {
 #endif
 }
 
+// momoe-metal: the GPU's working set (recommendedMaxWorkingSetSize: 5.7 GB on an 8 GB Mac) holds the dense weights,
+// the pool, the state and the compute buffers; past it the GPU's command buffers fail ("Insufficient Memory") and the
+// stops read choices the GPU never wrote (Gemma 4 on the 8 GB M1: setup's 3 GiB pool crashed, 2 GiB ran).  So the
+// largest graph's buffers are reserved and the pool shrinks by what is over (MOMOE_METAL_MARGIN_MIB: a margin, default
+// 0; measured there: 5.50 GiB allocated ran, 5.74 failed, against a working set of 5.33).  Nothing changes where it fits
+// (the M4 Air's configs: 20.8-22.2 GiB of 25.0).  MOMOE_NO_METAL_FIT=1: not done; MOMOE_METAL_FIT_DEBUG=1: the figures.
+static void fit_pool_metal(Engine & e) {
+    if (!kHostMem || !e.metal || getenv("MOMOE_NO_METAL_FIT")) return;
+    ggml_backend_dev_t dev = ggml_backend_get_device(e.metal);
+    size_t fr = 0, tot = 0;
+    if (dev) ggml_backend_dev_memory(dev, &fr, &tot);
+    if (!tot) return;
+    const int T = std::min(e.max_batch, e.n_ctx);
+    std::vector<int32_t> toks(T, 0);
+    e.reserve_only = true;
+    forward(e, toks.data(), T, e.n_ctx - T);
+    e.reserve_only = false;
+    const double margin = (getenv("MOMOE_METAL_MARGIN_MIB") ? atof(getenv("MOMOE_METAL_MARGIN_MIB")) : 0) * 1048576.0;
+#if !defined(MOMOE_CUDA)
+    const double used = (double) ggml_backend_metal_allocated(e.metal);
+#else
+    const double used = 0;
+#endif
+    const double over = used + margin - (double) tot;
+    if (getenv("MOMOE_METAL_FIT_DEBUG"))
+        fprintf(stderr, "momoe-metal: GPU working set %.3f GiB, allocated %.3f GiB (pool %.3f GiB)\n", tot / 1073741824.0,
+                used / 1073741824.0, e.pool.pool_bytes / 1073741824.0);
+    if (over <= 0) return;
+    Pool & P = e.pool;
+    const double want = (double) P.pool_bytes - over;
+    fprintf(stderr, "momoe-metal: the GPU's working set is %.2f GiB and this needs %.2f GiB with the %.2f GiB pool: the "
+            "pool gets %.2f GiB\n", tot / 1073741824.0, (used + margin) / 1073741824.0, P.pool_bytes / 1073741824.0,
+            std::max(0.0, want) / 1073741824.0);
+    if (want < 0.25 * 1073741824.0) die("too little of the GPU's working set is left for the expert pool");
+    double f = want / (double) P.all_bytes;
+    make_pool(e, f);
+    for (int i = 0; i < 12 && (double) P.pool_bytes > want; ++i) {   // (each group keeps its share and a floor of
+        f *= 0.98 * want / (double) P.pool_bytes;            // slots: the bytes come out above the share asked)
+        make_pool(e, f);
+    }
+    if ((double) P.pool_bytes > want) die("the expert pool cannot be made small enough for the GPU's working set");
+}
+
 // --helper-tier: the helper card's pool, a group for each of the main pool's (the same formats), each the same share
 // of its experts, with a slot of zeros; and each layer's expert -> helper slot table on that card.  Its size: the card's
 // free VRAM less --helper-reserve-mib (its compute buffers), at most --helper-gib
@@ -6183,6 +6229,7 @@ int main(int argc, char ** argv) {
     if (e.helper && e.m.nemo) e.hybrid = false;
     if (mtp_k > 0 && e.m.nemo) die("--mtp: not yet for Nemotron models");
     if (!kHostMem && pool_gib <= 0 && slots <= 0) fit_pool(e);
+    if (kHostMem) fit_pool_metal(e);
     if (e.helper && kHostMem) die("--helper-tier: NVIDIA cards only");
     if (e.helper && e.pool.n_slots + (int) e.pool.g.size() >= e.m.n_exp_all) {
         fprintf(stderr, "momoe-cuda: helper tier: not used (the main card holds every expert)\n");

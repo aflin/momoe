@@ -47,6 +47,8 @@ GGML_BACKEND_API void     ggml_backend_metal_set_pause     (ggml_backend_t backe
 GGML_BACKEND_API uint64_t ggml_backend_metal_pause_counter (ggml_backend_t backend);
 GGML_BACKEND_API uint64_t ggml_backend_metal_pause_signaled(ggml_backend_t backend);
 GGML_BACKEND_API void     ggml_backend_metal_pause_release (ggml_backend_t backend, uint64_t value);
+// Momoe: the bytes the device has allocated now (MTLDevice currentAllocatedSize: get_memory's free stops at 0)
+GGML_BACKEND_API size_t   ggml_backend_metal_allocated     (ggml_backend_t backend);
 
 GGML_BACKEND_API bool ggml_backend_is_metal(ggml_backend_t backend);
 

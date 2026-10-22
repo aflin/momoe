@@ -1507,6 +1507,10 @@ void ggml_metal_device_event_synchronize(ggml_metal_device_t dev, ggml_metal_eve
     GGML_UNUSED(dev);
 }
 
+size_t ggml_metal_device_get_allocated(ggml_metal_device_t dev) {   // Momoe: see ggml_backend_metal_allocated
+    return dev->mtl_device.currentAllocatedSize;
+}
+
 void ggml_metal_device_get_memory(ggml_metal_device_t dev, size_t * free, size_t * total) {
     if (@available(macOS 10.12, iOS 16.0, *)) {
         *total     = dev->mtl_device.recommendedMaxWorkingSetSize;

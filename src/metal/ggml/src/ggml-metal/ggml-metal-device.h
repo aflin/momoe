@@ -369,6 +369,8 @@ void   ggml_metal_buffer_clear        (ggml_metal_buffer_t buf, uint8_t value);
 //
 struct ggml_metal_buffer_id ggml_metal_buffer_get_id(ggml_metal_buffer_t buf, const struct ggml_tensor * t);
 
+size_t ggml_metal_device_get_allocated(ggml_metal_device_t dev);   // Momoe: currentAllocatedSize
+
 // Momoe: false on macOS before 14, where the flash-attention vec kernel computed wrong results (set at device init)
 extern bool ggml_metal_fa_vec_ok;
 
