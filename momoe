@@ -1,7 +1,13 @@
 #!/bin/sh
 # Momoe (more MoEs, built on Strata): momoe setup | start CONFIG | stop | status | list | run TOOL   (momoe help)
 # Link it into your PATH if you like: sudo ln -s "$PWD/momoe" /usr/local/bin/momoe
-HERE="$(dirname "$(readlink -f "$0")")"
+# this script's own folder, through any symlinks to it (readlink -f: not on macOS before 12.3)
+self="$0"
+while [ -L "$self" ]; do
+  link="$(readlink "$self")"
+  case "$link" in /*) self="$link" ;; *) self="$(dirname "$self")/$link" ;; esac
+done
+HERE="$(cd -P "$(dirname "$self")" && pwd)"
 if [ -x "$HERE/.venv/bin/python" ]; then
   exec "$HERE/.venv/bin/python" "$HERE/momoe.py" "$@"
 fi
