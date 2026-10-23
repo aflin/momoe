@@ -19,3 +19,4 @@ estimates.
 | [second-gpu-layer-split.md](second-gpu-layer-split.md) | Rejected (this PC) | An RTX 3060 beside the 4070 Ti for Flash-Next: more cache hits, no faster writing |
 | [mac-port.md](mac-port.md) | In development | Momoe on Apple Silicon: a Metal engine reading experts from the SSD into a pool |
 | [mac-binary-releases.md](mac-binary-releases.md) | Planned (after the repo is public) | The Mac engine as a ready-made download from GitHub Releases |
+| [pictures.md](pictures.md) | Implemented | Pictures on `momoe-cuda` / `momoe-metal`: how, where the encoder runs, the measurements behind setup's choices |
