@@ -2009,3 +2009,41 @@ class OutputParser:
         self._reset_scan()
         self.state, self.lead = "content", True
         return [Event("tool_call", call=call)]
+
+
+class UnaskedThought:
+    """Gemma 4 with thinking off: the thought block it writes of its own (after a tool result, empty as a rule) is held
+    back.  Answer text or a call after it sends it on as the reasoning it is; a reply that stops while still inside it
+    (seen after a picture in a tool result, M1 Ultra, UD-Q4_K_XL: the whole answer in an unclosed thought, so an empty
+    reply) gets it as the answer.  Everything else is the wrapped OutputParser's."""
+
+    def __init__(self, parser: OutputParser):
+        self.parser, self.held, self.answered = parser, [], False
+
+    def __getattr__(self, name):
+        return getattr(self.parser, name)
+
+    def _pass(self, events: list[Event]) -> list[Event]:
+        out = []
+        for ev in events:
+            if ev.kind == "reasoning" and not self.answered:
+                self.held.append(ev.text)
+                continue
+            if self.held:
+                out.append(Event("reasoning", "".join(self.held)))
+                self.held = []
+            self.answered = True
+            out.append(ev)
+        return out
+
+    def feed(self, delta: str) -> list[Event]:
+        return self._pass(self.parser.feed(delta))
+
+    def finish(self, reason: str | None = None) -> list[Event]:
+        out = self._pass(self.parser.finish(reason))
+        if self.held:
+            text = "".join(self.held)
+            self.held = []
+            stopped = reason in (None, "stop") and not self.answered
+            out.append(Event("content" if stopped else "reasoning", text.strip() if stopped else text))
+        return out

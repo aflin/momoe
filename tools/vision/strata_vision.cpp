@@ -304,9 +304,11 @@ int main(int argc, char** argv) {
         if (err.empty()) {
             const mtmd_image_tokens* it = mtmd_input_chunk_get_tokens_image(ichunk);
             const int n = (int) mtmd_input_chunk_get_n_tokens(ichunk);
-            // the grid from the decoder positions (nx/ny getters are deprecated): x and y of the last token
+            // the grid from the decoder positions (nx/ny getters are deprecated): x and y of the last token; a model
+            // without M-RoPE (Gemma 4) numbers the rows as text: one row of n
+            const bool mrope = mtmd_decode_use_mrope(ctx);
             const mtmd_decoder_pos last = mtmd_image_tokens_get_decoder_pos(it, 0, (size_t) n - 1);
-            const int nx = (int) last.x + 1, ny = (int) last.y + 1;
+            const int nx = mrope ? (int) last.x + 1 : n, ny = mrope ? (int) last.y + 1 : 1;
             if (nx * ny != n) err = "the image grid is not rectangular (" + std::to_string(n) + " tokens)";
             const float* embd = mtmd_get_output_embd(ctx);
             FILE* f = err.empty() ? std::fopen(out.c_str(), "wb") : nullptr;

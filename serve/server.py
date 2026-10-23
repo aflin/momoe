@@ -62,7 +62,7 @@ SHUTDOWN = threading.Event()                      # set by POST /shutdown (momoe
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (THINK_END, THINK_START, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
-                            forced_call, glm_forced, lfm_forced, gemma_forced, images_of, literal_tags, mark_think_literals,
+                            forced_call, glm_forced, lfm_forced, gemma_forced, images_of, literal_tags, UnaskedThought, mark_think_literals,
                             openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
@@ -75,6 +75,7 @@ from serve import images as images_api  # noqa: E402
 
 IM_END = "<|im_end|>"
 IMAGE_PAD = "<|image_pad|>"
+GEMMA_IMAGE = "<|image|>"                                   # Gemma 4's picture marker (and its rows' cells)
 
 
 def popen(what: str, args: list, **kw):
@@ -4040,6 +4041,24 @@ class Service:
         except Exception:  # noqa: BLE001 - a tokenizer without decode (tests): the template's rule
             return False
 
+    def _image_marks(self):
+        """How this model's template writes a picture, and where its rows go (llama.cpp's mtmd, per model):
+        -> (marker, its id, the id that must come right before it or None, (ids before the rows, ids after)).
+        Qwen3.5/3.6, Ornith and Flash-Next: <|vision_start|><|image_pad|><|vision_end|>, a row per <|image_pad|>;
+        Gemma 4: <|image|>, the rows between <|image> and <image|>; GLM-5: <|begin_of_image|><|image|><|end_of_image|>;
+        Nemotron 3.5 Bolt: <image>, the rows between <img> and </img>."""
+        one = lambda text: self.tok.encode(text, parse_special=True)[0]   # noqa: E731
+        src = getattr(self.template, "source", "") or ""
+        if self.gemma:
+            # (a blank line after the picture, as Gemma 3's processor writes one: a picture in a tool result, where the
+            # template ends the prompt right after it, made UD-Q4_K_XL answer with junk first or loop; with it, clean)
+            return GEMMA_IMAGE, one(GEMMA_IMAGE), None, ([one("<|image>")], [one("<image|>")] + self.tok.encode("\n\n"))
+        if self.glm:
+            return GEMMA_IMAGE, one(GEMMA_IMAGE), one("<|begin_of_image|>"), ([], [])
+        if "'<image>'" in src and "<|image_pad|>" not in src:
+            return "<image>", one("<image>"), None, ([one("<img>")], [one("</img>")])
+        return IMAGE_PAD, one(IMAGE_PAD), one(VISION_START), ([], [])
+
     def prepare(self, messages, tools, kwargs, max_new=None, force=None, req=None, cancel=None):
         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
         the rest of the context.  `force` (forced_call): without thinking the reply starts with it, so it ends the
@@ -4057,8 +4076,7 @@ class Service:
             if self.vision is None:
                 raise ValueError("this server was started without the vision encoder (run setup again and choose "
                                  "'vision'), so it cannot read images")
-            pad = self.tok.encode(IMAGE_PAD, parse_special=True)[0]
-            start = self.tok.encode(VISION_START, parse_special=True)[0]
+            marker, pad, start, wrap = self._image_marks()
             # An image URL is downloaded first, outside the FIFO: under it, a slow server held every other request
             # for as long as urlopen waited.
             def fetch(src):
@@ -4081,14 +4099,14 @@ class Service:
             # one <|image_pad|> per image -> one per image token.  Only the markers the template writes for an image
             # (right after <|vision_start|>) are images: the same text inside a message (an agent reading these docs,
             # #150) is kept as plain text, or it took an image's place and the counts no longer matched.
-            literal = self.tok.encode(IMAGE_PAD, parse_special=False)
+            literal = self.tok.encode(marker, parse_special=False)
             out, k = [], 0
             for j, t in enumerate(ids):
-                if t == pad and j > 0 and ids[j - 1] == start:
+                if t == pad and (start is None or (j > 0 and ids[j - 1] == start)):
                     # more pairs than images: text parts that cut both markers apart (the literal marks keep whole ones text)
                     if k == len(encoded):
                         raise ValueError("the prompt and its images do not match")
-                    out += [pad] * encoded[k][1]
+                    out += wrap[0] + [pad] * encoded[k][1] + wrap[1]
                     k += 1
                 elif t == pad:
                     out += literal
@@ -4317,6 +4335,8 @@ class Service:
         parser = OutputParser(thinking=thinking or self.gemma, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
                               glm=self.glm, lfm=self.lfm, gemma=self.gemma, opened=opened is not None,
                               declared_only=declared_only)
+        if self.gemma and not thinking:
+            parser = UnaskedThought(parser)
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)

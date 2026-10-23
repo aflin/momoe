@@ -181,6 +181,16 @@ def ms_meta(repo: str, path: str):
 HF = hf("ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF")
 LLAMA_CPP_COMMIT = "3cf03257f219afbe7334045ff7c6a06ac68c627d"
 LLAMA_CPP_ZIP = f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_CPP_COMMIT}.zip"
+# Pictures on Momoe's ggml engine (opt-in): the image encoder (tools/vision, llama.cpp's mtmd) from a newer llama.cpp than
+# the one above, whose mtmd also reads GLM-5's (glm5v) and Nemotron 3.5's (nemotron_omni) image encoders.  Checked on the
+# RTX 4070 Ti with Qwen3.6, Ornith-1.5 (35B and 122B), KAT-Coder, Flash-Next, Gemma 4 and Nemotron 3.5 Bolt
+VISION_LLAMA_COMMIT = "7182ef71e6d5dd0c8ea76486fac134fcd25025d4"   # 2026-10-16
+# The Qwen3.6 architecture's families (qwen35moe): a picture of at least 1,024 tokens (llama.cpp's encoder warns that
+# Qwen-VL needs it).  At 300, Qwen3.6, Ornith-1.5 (35B and 122B) and KAT-Coder misread a 2x2 grid of words (so did
+# llama.cpp with the same files); at 1,024 all read it, on the RTX 4070 Ti (CPU encoder: ~9 s a picture against 1-2),
+# the DGX Spark and the M1 Ultra.  The Flash-Next families read it at 300
+QWEN35_VISION = ("qwen36", "qwen36-bartowski", "ornith", "kat-coder", "ornith122")
+QWEN35_VISION_TOKENS = 1024
 
 MIN_DRIVER = 580                       # CUDA 13.0
 # Older NVIDIA GPUs (experimental): CUDA 13 dropped Pascal (sm_60/61) and Volta (sm_70), so a model whose GPUs include
@@ -655,6 +665,8 @@ GGML_FAMILIES = {
                         "UD-Q3_K_XL": {"about": "3-bit, larger (not measured yet)", "ram_gb": 64}},
              "sha256": BOLT_FILES,
              "context": 65536, "min_vram_gb": 11,                        # measured on a 12 GB card
+             # its image encoder (pictures, opt-in): name, bytes, SHA-256 at the pinned revision
+             "mmproj": ("mmproj-BF16.gguf", 1733692672, "acad03175d80ce7caea6854795e9ecc978e86d4b4caae0125efba5f970216f4f"),
              "license": "OpenMDW-1.1: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16"},
     "glm53": {"title": "GLM-5.3-Flash 320B-A18B", "by": "Z.ai; Unsloth's GGUFs",
               "about": "KDA + sparse MLA + MoE, 18B active; for a DGX Spark (128 GB shared memory): 121-157 GB, "
@@ -677,6 +689,7 @@ GGML_FAMILIES = {
               "engine_args": ["--mtp", "3"],
               # a 12 GB card cannot start it alone (dense 7.2 GiB + pool + staging): two share its layers (setup)
               "context": 65536, "min_vram_gb": 16,
+              "mmproj": ("mmproj-BF16.gguf", 1164010176, "82b7adb44411dbb298b1c689567804e5ed0790d80f308ed8b5b6b8ac0527d2ac"),
               "license": "MIT: https://huggingface.co/zai-org/GLM-5.3-Flash"},
     "ornith122": {"title": "Ornith-1.5-122B-A10B", "by": "ornith-ai's agentic-coding model; Unsloth's GGUFs",
                   "about": "Ornith-1.5's large sibling, 10B active; a 50 GB download, ~60 GB of RAM",
@@ -688,6 +701,7 @@ GGML_FAMILIES = {
                                             "ram_gb": 60}},
                   "sha256": ORNITH122_FILES, "default": "UD-IQ3_XXS", "draft_args": ["--mtp", "3"],
                   "context": 32768, "min_vram_gb": 11,                    # measured on a 12 GB card
+                  "mmproj": ("mmproj-BF16.gguf", 912263488, "a5ff159216cd31b8f0c034cae37fb875b6480bd96c62433b6a4109f6ed273904"),
                   "license": "MIT: https://huggingface.co/ornith-ai/Ornith-1.5-122B"},
     "flint": {"title": "Flint 40B-A2.5B", "by": "Recursive's coding-agent model; Unsloth's GGUFs",
               "about": "a coding-agent MoE, 2.5B active; 14.5-25 GB",
@@ -722,6 +736,7 @@ GGML_FAMILIES = {
                           "UD-Q4_K_XL": {"about": "4-bit, larger (Unsloth Dynamic), measured", "ram_gb": 28}},
                "sha256": GEMMA4_FILES, "default": "UD-IQ3_XXS",
                "context": 32768, "min_vram_gb": 0,
+               "mmproj": ("mmproj-BF16.gguf", 1194828256, "41926ed5f1403cf5add23b0684992805ea6f97253096132e769e65646b8cef9d"),
                "license": "Apache 2.0: https://ai.google.dev/gemma/docs/gemma_4_license"},
     "lfm25": {"title": "LFM2.5-24B-A2B", "by": "Liquid AI; Unsloth's GGUFs",
               "about": "short convolutions + attention + MoE, 2.4B active, an agent model that always thinks; "
@@ -3288,13 +3303,15 @@ def check_shards(shards):
                  f"delete {s.name} and its .done mark and run setup again")
 
 
-def get_llama_cpp():
-    """llama.cpp at the pinned commit (ggml for the build, gguf-py for the tools, mtmd for images), as a zip: no git."""
-    llama = ROOT / "third_party" / "llama.cpp"
+def get_llama_cpp(commit: str = LLAMA_CPP_COMMIT, folder: str = "llama.cpp"):
+    """llama.cpp at the pinned commit (ggml for the build, gguf-py for the tools, mtmd for images), as a zip: no git.
+    (commit, folder: another llama.cpp beside it - the ggml engine's image encoder, VISION_LLAMA_COMMIT)"""
+    llama = ROOT / "third_party" / folder
     if (llama / "ggml" / "CMakeLists.txt").exists() and (llama / "gguf-py").is_dir():
         return llama
-    z = ROOT / "third_party" / f"llama.cpp-{LLAMA_CPP_COMMIT[:7]}.zip"
-    download(LLAMA_CPP_ZIP, z, "llama.cpp source")
+    z = ROOT / "third_party" / f"llama.cpp-{commit[:7]}.zip"
+    download(LLAMA_CPP_ZIP if commit == LLAMA_CPP_COMMIT else f"https://github.com/ggml-org/llama.cpp/archive/{commit}.zip",
+             z, "llama.cpp source")
     tmp = ROOT / "third_party" / "_unpack"
     shutil.rmtree(tmp, ignore_errors=True)
     try:
@@ -6989,6 +7006,88 @@ def weights_gib(files: list) -> tuple:
     return exps / 2**30, rest / 2**30
 
 
+def momoe_mmproj(family: str, fam: dict):
+    """A family's image encoder for Momoe's ggml engine: (url, file name, bytes, SHA-256), or None (text only).  The
+    ggml families pin theirs (GGML_FAMILIES' "mmproj"); the Qwen families use the one setup pins for Strata's engine."""
+    if family in GGML_FAMILIES:
+        if not fam.get("mmproj"):
+            return None
+        name, size, sha = fam["mmproj"]
+        return fam["hf"] + name, name, size, sha
+    if fam.get("mmproj") and fam.get("mmproj_hf"):
+        pin = (fam.get("sha256") or {}).get(fam["mmproj"]) or (None, None)
+        return fam["mmproj_hf"] + fam["mmproj"], fam["mmproj"], pin[0], pin[1]
+    return None
+
+
+def build_momoe_vision(cuda: tuple | None = None) -> Path:
+    """The image encoder for Momoe's ggml engine: tools/vision from VISION_LLAMA_COMMIT, on the CPU (a separate card
+    keeps its memory for the experts); on a Mac with Metal (its GPU shares the memory, and an M1's CPU has no BF16:
+    a picture took ~50 s there, 1.8 s on the GPU); cuda (nvcc, archs): with CUDA, for a GPU that shares the system's
+    memory (the DGX Spark: 30-50 s a picture on its CPU, 1.7-2.7 s on the GPU).  Compiled once, and again when
+    tools/vision or the commit changes."""
+    mac = sys.platform == "darwin"
+    bdir = ROOT / ("build-vision-momoe-cuda" if cuda else "build-vision-momoe")
+    exe, stamp = bdir / "bin" / VEXE, bdir / "BUILD.json"
+    src = source_hash(VISION_SOURCES) + "-" + VISION_LLAMA_COMMIT[:12] + ("-metal" if mac else "") + \
+        (f"-cuda{cuda[1]}" if cuda else "")
+    if exe.exists() and stamp.exists() and json.loads(stamp.read_text(encoding="utf-8")).get("src") == src:
+        ok(f"image encoder already built: {exe}")
+        return exe
+    llama = get_llama_cpp(VISION_LLAMA_COMMIT, "llama.cpp-vision")
+    say("  Compiling the image encoder (" + ("with CUDA, 10-20 minutes" if cuda else "a few minutes") + ", once) ...")
+    defs = [f"-DLLAMA_DIR={llama}", f"-DSTRATA_VISION_CUDA={'ON' if cuda else 'OFF'}",
+            f"-DSTRATA_VISION_METAL={'ON' if mac else 'OFF'}", "-DSTRATA_PORTABLE=OFF", *host_compiler_defs(bool(cuda))]
+    if cuda:
+        defs += [f"-DCMAKE_CUDA_ARCHITECTURES={cuda[1]}", f"-DCMAKE_CUDA_COMPILER={cuda[0]}", *toolkit_root_defs(cuda[0])]
+    cmake_build(ROOT / "tools" / "vision", bdir, "strata-vision", defs, None, "build-vision-momoe.bat")
+    if not exe.exists():
+        fail("the image encoder did not build", f"see the output above (build folder {bdir})")
+    stamp.write_text(json.dumps({"src": src}), encoding="utf-8")
+    ok(f"image encoder: {exe}")
+    return exe
+
+
+def momoe_vision(a, family: str, fam: dict, folder: Path, model: Path, cuda: tuple | None = None):
+    """Pictures on Momoe's ggml engine (opt-in: --vision yes, or yes to the question; --yes alone keeps them off): the
+    family's image encoder file (pinned), the encoder program, and the config's "vision" section; None: text only.
+    The encoder runs on the GPU on a Mac and, with cuda (nvcc, archs), on a GPU that shares the system's memory."""
+    mm = momoe_mmproj(family, fam)
+    asked = getattr(a, "vision", None)
+    mac = sys.platform == "darwin"
+    on_gpu = mac or cuda is not None
+    if mm is None:
+        if asked not in (None, "no", "none"):
+            warn(f"--vision: {fam['title']} has no image encoder: text only")
+        return None
+    if asked in ("no", "none"):
+        return None
+    if asked is None:
+        say()
+        say(f"  Images: {fam['title']} can also read pictures (screenshots, photos, scanned pages). This adds a "
+            f"{(mm[2] or 9e8) / 1e9:.1f} GB download and an image encoder compiled here, which runs on the "
+            + ("GPU (a second or two a picture)." if on_gpu else
+               "CPU (a few seconds a picture; the GPU keeps its memory for the experts)."))
+        if ask("Do you want images?", ["y", "n"], "n", a.yes) != "y":
+            return None
+    elif asked == "gpu" and not on_gpu:
+        say("  The image encoder of Momoe's ggml engine runs on the CPU (--vision gpu is read as yes)")
+    url, name, size, sha = mm
+    f = folder / name
+    if not (f.exists() and done(f)):
+        download(url, f, pin=(size, sha) if size and sha else None)
+    if sha:
+        verify_sha256(f, size, sha)
+    enc = build_momoe_vision(cuda)
+    ok("images: on (the encoder on the " + ("GPU)" if on_gpu else "CPU)"))
+    v = {"exe": str(enc), "mmproj": str(f), "model": str(model), "gpu": on_gpu, "max_tokens": 300}
+    if family in QWEN35_VISION:
+        v["max_tokens"] = v["min_tokens"] = QWEN35_VISION_TOKENS
+    if not on_gpu:
+        v["threads"] = max(1, (os.cpu_count() or 8) // 2)
+    return v
+
+
 def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     """A model on Momoe's ggml engine: momoe-metal on an Apple Silicon Mac, momoe-cuda on Linux with an NVIDIA card.
     Every GGUF family: the ggml families (Bolt, GLM-5.3-Flash, LFM2.5) everywhere, the Qwen families on a Mac and on a
@@ -7009,7 +7108,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         if subprocess.run(["xcode-select", "-p"], capture_output=True).returncode != 0:
             fail("Xcode's command line tools are not installed (the engine is compiled here)",
                  "install them with:  xcode-select --install   then run momoe setup again")
-        for opt in ("gpu", "gpus", "backend", "vision", "kv"):
+        for opt in ("gpu", "gpus", "backend", "kv"):
             if getattr(a, opt, None):
                 warn(f"--{opt.replace('_', '-')}: not used on a Mac")
         gpu, unified = None, True
@@ -7063,7 +7162,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         warn(f"{fam['title']} wants a card of about {fam['min_vram_gb']} GB: on {gpu['vram_gb']:.0f} GB the dense weights, "
              "the compute buffers and the prompt staging leave little room for experts on the GPU (slower, or it does "
              "not start)")
-    for opt in ("backend", "vision", "kv") if not mac else ():
+    for opt in ("backend", "kv") if not mac else ():
         if getattr(a, opt, None):
             warn(f"--{opt.replace('_', '-')}: not used for {fam['title']} on Momoe's ggml engine")
     own_mtp = bool(fam.get("own_mtp"))
@@ -7130,6 +7229,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(paths[0]), "--out", str(pack)],
             quiet=True)
     ok(str(pack / "tokenizer"))
+    vision = momoe_vision(a, family, fam, folder, paths[0], cuda=(nvcc, archs) if unified and not mac else None)
 
     draft = None
     if mac and family in FAMILIES and not own_mtp:
@@ -7161,6 +7261,11 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     if mac:
         w, kvt, avail = weights_gib(paths), kv_bytes_per_token(paths), mac_available_gib()
         w = (w[0], w[1] + kv_ring_gib(paths))          # (flint's sliding-window rings: held with the other weights)
+        if vision and vision.get("gpu"):                # the image encoder on the GPU: held beside them too.  Measured on
+            # the M1 Ultra (64 GB): the encoder's process peaks at its file + 0.15-0.2 GB, but the engine beside it needs
+            # more room than that: GLM-5.3-Flash UD-IQ3_XXS ran with a 33 GiB pool alone and with pictures at 30, not 31
+            # (Metal out of memory); Swift IQ3_XXS with every expert in memory ran out at the first picture
+            w = (w[0], w[1] + Path(vision["mmproj"]).stat().st_size / 2**30 + 2.0)
         draft_gib = draft.stat().st_size / 2**30 if draft else 0.0
         fixed = a.context or fam.get("context")
         for c in ((fixed,) if fixed else (65536, 32768)):
@@ -7207,6 +7312,9 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     cfg = {"exe": str(exe), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{size_of(q).lower()}", "log": str(ROOT / "logs" / (cfg_path.stem + ".log")),
            "port": port, "setup_tag": tag, "fit_max_tokens": True}   # (the model card's sampling: write_setup_config)
+    if vision:
+        cfg["args"].append("--vision")
+        cfg["vision"] = vision
     if not mac:
         cfg["gpu"] = [g["index"] for g in cards] if cards else gpu["index"]
         if cards and a.helper_tier:                     # the first card runs the model, the second is its helper
@@ -7284,7 +7392,7 @@ def own_path_vision(a, fam: dict, gpu: dict, hip: bool) -> str:
                 " and the image encoder runs on the GPU (~1.4 GB of VRAM kept free, 0.1-0.5 s per picture)." if big else
                 "; the encoder runs on the CPU (a few seconds per picture), because the GPU encoder would take ~1.4 GB "
                 "of VRAM from the experts on this card."))
-        default = "n" if (hip and WIN) else "y" if (big or hip) else "n"
+        default = "n"                                  # (Momoe: off unless asked for, on every engine)
         if ask("Do you want images?", ["y", "n"], default, a.yes) != "y":
             return "none"
         asked = "cpu" if (hip or not big) else "gpu"
@@ -8299,8 +8407,8 @@ def main() -> int:
     elif hip:
         # MODEL-UPDATE: Unsloth's files on AMD (Linux) read images with the CPU encoder by default where their experts
         # all stay in RAM (it takes no VRAM; measured on an R9700 with UD-Q4_K_XL and UD-Q5_K_XL, docs/QUANTS.md)
-        vision = hip_vision(a.vision if a.vision is not None or not unsloth_images_default(model, family, ram, gpu)
-                            else "cpu")
+        # (Momoe: images are off unless asked for, on every engine - not Strata's on-by-default for Unsloth's files)
+        vision = hip_vision(a.vision)
     elif a.vision:
         vision = ({"yes": "gpu"}.get(a.vision, a.vision) if small_family(family) else flash_vision_encoder(a.vision, gpu)) \
             if a.vision != "no" else "none"
@@ -8319,8 +8427,9 @@ def main() -> int:
             say("  more on some PCs. --vision gpu if you want pictures in under a second.")
         else:
             say("  download and keeps ~1.4 GB of VRAM free for the image encoder, so text is a few % slower.")
-        # MODEL-UPDATE: on by default for Unsloth's files on a card with room for the encoder (16 GB and more)
-        default = "y" if unsloth_images_default(model, family, ram, gpu) else "n"
+        # Momoe: off by default for every model and card, as on its ggml engine (Strata: on for Unsloth's files on a
+        # card with room for the encoder, 16 GB and more - unsloth_images_default)
+        default = "n"
         yes = "gpu" if small_family(family) else flash_vision_encoder("yes", gpu)
         vision = yes if ask("Do you want images?", ["y", "n"], default, a.yes) == "y" else "none"
     ok("images: " + {"none": "off", "gpu": "on", "cpu": "on (encoder on the CPU)"}[vision])
@@ -8896,6 +9005,9 @@ def main() -> int:
                          "gpu": vision == "gpu", "max_tokens": vt}
         if vision == "cpu":
             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
+        if family in QWEN35_VISION:
+            cfg["vision"]["max_tokens"] = max(vt, QWEN35_VISION_TOKENS)
+            cfg["vision"]["min_tokens"] = QWEN35_VISION_TOKENS
     elif a.vision_tokens is not None:
         warn("--vision-tokens: images are off for this model, so it is not used")
     cfg_path = name_config(own_cfg, a)               # Momoe: the file's name is asked (the default: this model's)

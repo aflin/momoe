@@ -176,6 +176,7 @@ struct Model {
     std::vector<int32_t> eos_ids;                            // the tokens that end a reply (<|im_end|>, <|endoftext|>,
                                                              // the file's eos), from the vocabulary
     int32_t im_start = -1;                                   // <|im_start|>: the conversation checkpoints go before it
+    int32_t img_pad = -1;                                    // a picture's cells in the prompt (<|image_pad|>)
     int part0() const { return nemo || gemma4 ? 1 : 0; }     // the first expert part: gate (0) or, without a gate, up
                                                              // (gemma4: gate and up in one, ffn_gate_up_exps)
     int hc = 1, hc_lr = 0;                                   // hyper-connection streams, low rank
@@ -780,6 +781,12 @@ struct Engine {
     bool ns_graph = false;                                   // this graph
     uint64_t ns_tokens = 0, ns_wanted = 0, ns_missing = 0;
     double t_build = 0, t_compute = 0, t_wait = 0;
+    // pictures (--serve's GENI): each a run of n image cells from s on, its rows the encoder's embeddings (a grid of nx
+    // by ny, row i at x = i % nx, y = i / nx) in img_data from off; they stay until the next request (decode's positions)
+    struct Image { int s, n, nx, ny; size_t off; };
+    std::vector<Image> imgs;
+    std::vector<float> img_data;
+    bool img_now = false;                                    // this graph's tokens include image cells
 };
 
 // the backend of card d (one card, and Metal: the GPU backend)
@@ -1174,6 +1181,10 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
         for (size_t i = 0; i < nt; ++i) {
             const char * s = gguf_get_arr_str(g, ti, i);
             if (!strcmp(s, "<|im_start|>")) m.im_start = (int32_t) i;
+            else if (!strcmp(s, "<|image_pad|>")) m.img_pad = (int32_t) i;
+            else if (!strcmp(s, "<image>") && m.nemo) m.img_pad = (int32_t) i;   // (nemo: <img> <image>.. </img>)
+            else if (!strcmp(s, "<|image|>") && (m.gemma4 || m.glm5)) m.img_pad = (int32_t) i;   // (gemma4: <|image>
+                                                             // <|image|>.. <image|>; glm5: <|begin_of_image|> ..)
             else if (!strcmp(s, "<|im_end|>") || !strcmp(s, "<|endoftext|>")) m.eos_ids.push_back((int32_t) i);
             // GLM-5: a reply ends where the next turn would start (its eos_token_id list); the checkpoint goes in
             // front of the reply's own <|assistant|> as before <|im_start|>
@@ -2900,6 +2911,7 @@ static void preload(Engine & e) {
 // ------------------------------------------------------------------------------------------------ the graph
 struct Inputs {
     ggml_tensor *tokens, *pos, *mask;
+    ggml_tensor *img = nullptr, *img_keep = nullptr;         // pictures: F32 [n_embd, T] rows (0 on text), [1, T] 1 on text
     ggml_tensor *mask_swa = nullptr;                         // flint: the sliding window's mask [swa_rows, T]
     ggml_tensor *kv_idx_swa = nullptr;                       // flint: I64 [T], the ring rows written (p % swa_rows)
     ggml_tensor *kv_idx = nullptr;                           // I64 [T]: the positions written (a graph reused token
@@ -4256,6 +4268,15 @@ static uint64_t g_sched_gen = 1;                             // a reused decode 
 // newest position <= p0 + T - 1 that is r mod swa_rows (one the batch writes, or one before it); token i sees it when
 // it is no later than the token and fewer than n_swa positions back.  (A batch of at most swa_rows - n_swa + 1 tokens
 // overwrites no row an earlier token of it still sees: the ring's size, see load)
+// a picture whose cells see each other (llama.cpp's mtmd_decode_use_non_causal: Gemma 4 26B-A4B and 31B): the cells
+// [lo, hi) the cell q also attends; none (lo = hi = 0) for text and for every other model
+static void img_span(const Engine & e, int q, int & lo, int & hi) {
+    lo = hi = 0;
+    if (!e.m.gemma4 || e.m.n_embd == 1536 || e.m.n_embd == 2560) return;
+    for (const auto & I : e.imgs)
+        if (q >= I.s && q < I.s + I.n) { lo = I.s; hi = I.s + I.n; return; }
+}
+
 static void flint_swa_inputs(Engine & e, ggml_tensor * mask_t, ggml_tensor * idx_t, int p0, int T) {
     const Model & m = e.m;
     const int W = m.swa_rows, R = (int) mask_t->ne[0];      // the ring; the rows the graph reads (all once it wraps)
@@ -4267,7 +4288,9 @@ static void flint_swa_inputs(Engine & e, ggml_tensor * mask_t, ggml_tensor * idx
         const int p = last - (((last - r) % W) + W) % W;     // the position row r holds (< 0: never written)
         for (int i = 0; i < T; ++i) {
             const int q = p0 + i;
-            mask[(size_t) i * R + r] = p >= 0 && p <= q && q - p < m.n_swa ? zero : ninf;
+            int lo, hi;
+            img_span(e, q, lo, hi);
+            mask[(size_t) i * R + r] = p >= 0 && ((p <= q && q - p < m.n_swa) || (p >= lo && p < hi)) ? zero : ninf;
         }
     }
     ggml_backend_tensor_set(mask_t, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
@@ -4589,6 +4612,13 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
         x = on_gpu = ggml_scale(c, x, 1.0f);                 // GPU every graph), and everything after runs on the GPU
     }
     if (m.gemma4) x = ggml_scale(c, x, sqrtf((float) m.n_embd));   // (gemma4: the embeddings scaled)
+    if (e.img_now) {                                         // pictures: their cells take the encoder's rows (not scaled)
+        in.img = ggml_new_tensor_2d(c, GGML_TYPE_F32, m.n_embd, T);
+        ggml_set_input(in.img);
+        in.img_keep = ggml_new_tensor_2d(c, GGML_TYPE_F32, 1, T);
+        ggml_set_input(in.img_keep);
+        x = ggml_add(c, ggml_mul(c, x, in.img_keep), in.img);
+    }
     kpool_new(e, c, in, p0, T);
     ggml_tensor * ple_in = nullptr;
     if (m.ple_layer >= 0) {
@@ -4812,7 +4842,7 @@ static GraphCache * graph_cache(Engine & e, int T, int p0, int n_kv, const Out *
     kpool_shape(e, sh, p0, T);
     const std::array<int, 14> key = {T, n_kv, sh.n_new, sh.n_new && e.m.glm5 ? sh.j_first : -1, sh.n_pool, sh.sel, sh.n_sel,
                                      out && out->logits, out && e.m.has_mtp, out && out->all, out && out->snap,
-                                     e.predict, e.predict2, 0};
+                                     e.predict, e.predict2, e.img_now};
     static uint64_t clock = 0;
     GraphCache * lru = &g_gc[0];
     for (GraphCache & g : g_gc) {
@@ -4833,6 +4863,34 @@ static GraphCache * graph_cache(Engine & e, int T, int p0, int n_kv, const Out *
 }
 
 static int forward_once(Engine & e, const int32_t * toks, int T, int p0, Out * out);
+
+// the rope positions of cells p0.., section-major [t.., h.., w.., e..]: text [p, p, p, 0]; a picture's cells mtmd's
+// M-RoPE grid (t = q, h = q + y, w = q + x, q its first cell's position), the text after it at q + max(nx, ny); a
+// model without M-RoPE (gemma4) numbers a picture's cells as text
+static void rope_positions(const Engine & e, int p0, int T, std::vector<int32_t> & pos) {
+    pos.assign((size_t) T * 4, 0);
+    int delta = 0;
+    size_t k = 0;
+    const bool mrope = e.m.sections[0] > 0;
+    for (int i = 0; i < T; ++i) {
+        const int cell = p0 + i;
+        while (mrope && k < e.imgs.size() && e.imgs[k].s + e.imgs[k].n <= cell) {
+            delta += std::max(e.imgs[k].nx, e.imgs[k].ny) - e.imgs[k].n;
+            ++k;
+        }
+        int t = cell + delta, h = t, w = t;
+        if (mrope && k < e.imgs.size() && cell >= e.imgs[k].s) {
+            const auto & I = e.imgs[k];
+            const int r = cell - I.s;
+            t = I.s + delta;
+            h = t + r / I.nx;
+            w = t + r % I.nx;
+        }
+        pos[i] = t;
+        pos[(size_t) T + i] = h;
+        pos[(size_t) 2 * T + i] = w;
+    }
+}
 
 // qwen35moe with the experts in a pool (momoe-cuda): which expert path is faster depends on the model, the cards, the CPU
 // and what else runs on the machine (see hybrid_model), so the engine measures both on decode calls - a few warm-up
@@ -4912,8 +4970,10 @@ static int forward(Engine & e, const int32_t * toks, int T, int p0, Out * out = 
 
 static int forward_once(Engine & e, const int32_t * toks, int T, int p0, Out * out) {
     Model & m = e.m;
+    e.img_now = false;
+    for (const auto & I : e.imgs) e.img_now |= I.s < p0 + T && I.s + I.n > p0;
 #if defined(MOMOE_CUDA)
-    if (decode_cache_ok(e, T, out)) return forward_decode(e, toks, p0, out);
+    if (!e.img_now && decode_cache_ok(e, T, out)) return forward_decode(e, toks, p0, out);
 #endif
     const double tb0 = now_s();
     const int n_kv = std::min(e.n_ctx, ((p0 + T + 255) / 256) * 256);
@@ -4953,15 +5013,27 @@ static int forward_once(Engine & e, const int32_t * toks, int T, int p0, Out * o
         g_built_s += now_s() - tb0;
     }
     ggml_backend_tensor_set(in.tokens, toks, 0, (size_t) T * sizeof(int32_t));
-    std::vector<int32_t> pos((size_t) T * 4);
-    for (int i = 0; i < T; ++i) {                            // text: [p, p, p, 0] per token, section-major
-        for (int j = 0; j < 4; ++j) pos[(size_t) j * T + i] = j < 3 ? p0 + i : 0;
+    std::vector<int32_t> pos;
+    rope_positions(e, p0, T, pos);
+    if (in.img) {
+        std::vector<float> rows((size_t) m.n_embd * T, 0.0f), keep(T, 1.0f);
+        for (const auto & I : e.imgs)
+            for (int i = std::max(0, I.s - p0); i < T && p0 + i < I.s + I.n; ++i) {
+                const size_t r = (size_t) (p0 + i - I.s);
+                memcpy(&rows[(size_t) i * m.n_embd], &e.img_data[I.off + r * m.n_embd], sizeof(float) * m.n_embd);
+                keep[i] = 0.0f;
+            }
+        ggml_backend_tensor_set(in.img, rows.data(), 0, rows.size() * sizeof(float));
+        ggml_backend_tensor_set(in.img_keep, keep.data(), 0, keep.size() * sizeof(float));
     }
     if (in.pos->buffer) ggml_backend_tensor_set(in.pos, pos.data(), 0, pos.size() * sizeof(int32_t));   // (nemo: NoPE)
     std::vector<ggml_fp16_t> mask((size_t) n_kv * T);
     const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(-INFINITY);
-    for (int i = 0; i < T; ++i)
-        for (int j = 0; j < n_kv; ++j) mask[(size_t) i * n_kv + j] = j <= p0 + i ? zero : ninf;
+    for (int i = 0; i < T; ++i) {
+        int lo, hi;
+        img_span(e, p0 + i, lo, hi);
+        for (int j = 0; j < n_kv; ++j) mask[(size_t) i * n_kv + j] = j <= p0 + i || (j >= lo && j < hi) ? zero : ninf;
+    }
     ggml_backend_tensor_set(in.mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
     if (in.mask_swa) flint_swa_inputs(e, in.mask_swa, in.kv_idx_swa, p0, T);
     if (in.kv_idx) {
@@ -5609,9 +5681,8 @@ static int mtp_forward(Engine & e, const float * h, const int32_t * toks, int T,
     ggml_backend_sched_t sched = G ? G->sched : e.sched;
     ggml_backend_tensor_set(in.tokens, toks, 0, (size_t) T * sizeof(int32_t));
     ggml_backend_tensor_set(hin, h, 0, (size_t) T * m.h_dim() * sizeof(float));
-    std::vector<int32_t> pos((size_t) T * 4);
-    for (int i = 0; i < T; ++i)
-        for (int j = 0; j < 4; ++j) pos[(size_t) j * T + i] = j < 3 ? p0 + i : 0;
+    std::vector<int32_t> pos;
+    rope_positions(e, p0, T, pos);                           // (after a picture: the model's positions)
     if (in.pos->buffer) ggml_backend_tensor_set(in.pos, pos.data(), 0, pos.size() * sizeof(int32_t));   // (glm5-next: NoPE)
     std::vector<ggml_fp16_t> mask((size_t) n_kv * T);
     const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(-INFINITY);
@@ -5856,12 +5927,14 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
         }
         if (line == "QUIT") break;
         if (line.rfind("VRAM", 0) == 0) { out_line("ERR VRAM is not supported by momoe-metal"); continue; }
-        if (line.rfind("GEN ", 0) != 0) { out_line("ERR unknown command"); continue; }
+        const bool geni = line.rfind("GENI ", 0) == 0;
+        if (!geni && line.rfind("GEN ", 0) != 0) { out_line("ERR unknown command"); continue; }
         sv.stop = false;
         sv.busy = true;
-        // GEN <max_new>[ key=value...] <ids>
+        // GEN <max_new>[ key=value...] <ids>; GENI <max_new>[ key=value...] <embeddings file> <ids>
         std::vector<std::string> w;
-        for (size_t a = 4, b; a < line.size(); a = b + 1) {
+        std::string emb_file;
+        for (size_t a = geni ? 5 : 4, b; a < line.size(); a = b + 1) {
             b = line.find(' ', a);
             if (b == std::string::npos) b = line.size();
             if (b > a) w.push_back(line.substr(a, b - a));
@@ -5871,6 +5944,7 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
         int max_new = w.empty() ? 0 : atoi(w[0].c_str());
         for (size_t i = 1; i < w.size(); ++i) {
             const size_t eq = w[i].find('=');
+            if (eq == std::string::npos && geni && emb_file.empty()) { emb_file = w[i]; continue; }
             if (eq == std::string::npos) {
                 for (size_t a = 0, b; a < w[i].size(); a = b + 1) {
                     b = w[i].find(',', a);
@@ -5896,6 +5970,57 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
         bool bad = false;
         for (int32_t t : prompt) bad |= t < 0 || t >= m.n_vocab;
         if (bad) { sv.busy = false; out_line("ERR a token id is outside the vocabulary"); continue; }
+        // pictures: the file's records (strata-vision's: int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats) go
+        // to the prompt's runs of image cells in order.  `ptoks` is what the model reads; in `prompt` (the key the
+        // caches are matched by) a picture's cells become negative numbers from its rows, so a cached state is
+        // reused only up to the first picture that differs
+        std::vector<int32_t> ptoks = prompt;
+        e.imgs.clear();
+        e.img_data.clear();
+        if (geni) {
+            std::string err;
+            FILE * f = fopen(emb_file.c_str(), "rb");
+            if (!f) err = "cannot open the embeddings file " + emb_file;
+            for (size_t i = 0; err.empty() && i < prompt.size();) {
+                if (prompt[i] != m.img_pad || m.img_pad < 0) { ++i; continue; }
+                size_t n = 0;
+                while (i + n < prompt.size() && prompt[i + n] == m.img_pad) ++n;
+                int32_t hdr[5];
+                if (fread(hdr, sizeof hdr, 1, f) != 1 || hdr[0] != 0x31455653) { err = "the embeddings file has fewer "
+                    "pictures than the prompt"; break; }
+                if (hdr[4] != m.n_embd) { err = "the pictures' rows are " + std::to_string(hdr[4]) + " wide, the model's "
+                    + std::to_string(m.n_embd) + " (an mmproj file of another model?)"; break; }
+                if ((size_t) hdr[1] != n || hdr[2] * hdr[3] != hdr[1]) { err = "a picture has " + std::to_string(hdr[1]) +
+                    " rows for " + std::to_string(n) + " image cells in the prompt"; break; }
+                Engine::Image I{(int) i, (int) n, hdr[2], hdr[3], e.img_data.size()};
+                e.img_data.resize(I.off + n * (size_t) m.n_embd);
+                if (fread(&e.img_data[I.off], sizeof(float) * m.n_embd, n, f) != n) { err = "the embeddings file is "
+                    "cut short"; break; }
+                uint64_t h = 1469598103934665603ull;                 // FNV-1a over the rows
+                const unsigned char * bp = (const unsigned char *) &e.img_data[I.off];
+                for (size_t b = 0; b < n * m.n_embd * sizeof(float); ++b) h = (h ^ bp[b]) * 1099511628211ull;
+                for (size_t r = 0; r < n; ++r)
+                    prompt[i + r] = -1 - (int32_t) ((h + r * 0x9E3779B97F4A7C15ull) >> 34);
+                e.imgs.push_back(I);
+                i += n;
+            }
+            if (f) fclose(f);
+            if (err.empty() && e.imgs.empty()) err = "GENI without image cells in the prompt";
+            for (const auto & I : e.imgs) {                  // (cells that see each other are read in one batch)
+                int lo, hi;
+                img_span(e, I.s, lo, hi);
+                if (err.empty() && hi > lo && I.n > e.max_batch)
+                    err = "a picture of " + std::to_string(I.n) + " rows is more than the engine's batch (" +
+                          std::to_string(e.max_batch) + "): fewer image tokens (the vision section's max_tokens)";
+            }
+            if (!err.empty()) {
+                e.imgs.clear();
+                e.img_data.clear();
+                sv.busy = false;
+                out_line("ERR %s", err.c_str());
+                continue;
+            }
+        }
         Awake awake;                                         // (macOS: see Awake)
         // where to start: the state continues when the prompt extends it; else the longest checkpoint the prompt
         // starts with whose positions the caches still hold (an agent's next turn); else the parked conversation's,
@@ -5989,11 +6114,16 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
         for (size_t i = reused; i < prompt.size();) {
             if (sv.stop) { cancelled = true; break; }
             size_t end = std::min(prompt.size(), i + (size_t) e.max_batch);
+            for (const auto & I : e.imgs) {                  // a picture whose cells see each other is not cut
+                int lo, hi;
+                img_span(e, I.s, lo, hi);
+                if (hi > lo && (size_t) I.s > i && (size_t) I.s < end && (size_t) (I.s + I.n) > end) end = I.s;
+            }
             if (i < ck_pos && end > ck_pos) end = ck_pos;
             const int T = (int) (end - i);
             Out o;
             o.logits = !greedy && end == prompt.size();
-            next = forward(e, prompt.data() + i, T, p, &o);
+            next = forward(e, ptoks.data() + i, T, p, &o);
             if (m.has_mtp) H.insert(H.end(), o.hidden.begin(), o.hidden.end());
             if (o.logits) lg = o.last_logits;
             p += T;
@@ -6037,12 +6167,12 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                 int q0 = reused + 1;                         // the MTP position of a pair: its token's
                 if (reused > 0 && (int) h_before.size() == ne) {
                     hh = h_before;                           // (state before the new tokens, the first new token)
-                    tt.push_back(prompt[reused]);
+                    tt.push_back(ptoks[reused]);
                     q0 = reused;
                 }
                 for (size_t i = 0; i < n_new; ++i) {
                     hh.insert(hh.end(), H.begin() + i * ne, H.begin() + (i + 1) * ne);
-                    tt.push_back(i + 1 < n_new ? prompt[reused + i + 1] : next);
+                    tt.push_back(i + 1 < n_new ? ptoks[reused + i + 1] : next);
                 }
                 float pb = 0;
                 int d = 0;
@@ -6165,6 +6295,7 @@ int main(int argc, char ** argv) {
         else if (a == "--bench-window") bench_window = true;
         else if (a == "--mtp") mtp_k = atoi(next());
         else if (a == "--serve") serve = true;
+        else if (a == "--vision") {}                         // (the server's flag for pictures: GENI always works)
         else if (a == "--draft-vocab") e.draft_vocab = next();
         else if (a == "--mtp-gguf") e.mtp_gguf = next();
         else if (a == "--nostall") nostall_arg = next();

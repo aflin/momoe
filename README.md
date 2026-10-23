@@ -250,6 +250,12 @@ momoe remove ornith-8gb               # delete a model: its GGUF, its pack, the 
     asking).
   - It touches nothing outside `models/`, `packs/`, `config/` and `logs/`.
   - Given a folder in `models/` (a download without a config, say), it deletes that folder and its pack.
+- **Pictures** (off unless asked for): `momoe setup --vision yes` downloads the model's image encoder and builds it,
+  for every family that has one (all but Flint, Lightning and LFM2.5). Pictures work in a message and in a tool result
+  (Claude Code's Read of an image). The encoder runs on the GPU on a Mac and a DGX Spark (1-3 s a picture) and on the
+  CPU with a separate card (1-2 s; ~9 s for the Qwen3.6 family, which needs 1,024 tokens a picture to read text
+  right). Checked on the RTX 4070 Ti (against llama.cpp's answers), the M1 Ultra and the Spark. On a Mac the encoder's
+  memory comes out of the expert pool.
 - **Other apps:** any OpenAI- or Anthropic-compatible client can use `http://127.0.0.1:<port>/v1`; `momoe status`
   shows the port. The server listens on 127.0.0.1 only. To reach it from another device, give `--host` together with
   `--api-key`, for example `momoe start ornith-8gb --host 0.0.0.0 --api-key KEY`. They apply to that start only; add
@@ -318,6 +324,7 @@ slower: 12.0-12.2 tok/s against 19-21 on the 4070 Ti alone. More in
 | `models/`, `packs/`, `mtp/` | the downloaded models and what setup prepares from them (not in git) |
 | `engine/` | Strata's compiled engine (`momoe`, `momoe-vision`) |
 | `build-cuda/`, `build-metal/` | MoMoE's compiled engines (`momoe-cuda`, `momoe-metal`) |
+| `build-vision-momoe*/` | their image encoder (`momoe-vision`), when pictures are on |
 | `logs/` | every log (above) |
 | `.momoe/` | the server's state (which config runs) |
 | `design/` | MoMoE's design notes: what was measured, chosen or rejected |

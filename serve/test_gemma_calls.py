@@ -2,18 +2,20 @@
 rewritten into the parser's own as they arrive, whole or a few characters a delta."""
 import unittest
 
-from serve.frontend import OutputParser, gemma_call, gemma_forced
+from serve.frontend import OutputParser, UnaskedThought, gemma_call, gemma_forced
 
 TOOLS = [{"name": "read_file", "parameters": {"type": "object", "properties": {"path": {"type": "string"},
                                                                             "limit": {"type": "integer"}}}}]
 
 
-def run(text, step, thinking=True):
+def run(text, step, thinking=True, unasked=False, reason="stop"):
     p = OutputParser(thinking=thinking, tools=TOOLS, gemma=True, opened=False)
+    if unasked:                                    # the server's wrapper when the request did not ask for thinking
+        p = UnaskedThought(p)
     ev = []
     for i in range(0, len(text), step):
         ev += p.feed(text[i:i + step])
-    ev += p.finish("stop")
+    ev += p.finish(reason)
     out = []
     for e in ev:
         if e.kind == "tool_call":
@@ -56,6 +58,28 @@ class GemmaCalls(unittest.TestCase):
     def test_forced(self):
         self.assertEqual(gemma_forced("<tool_call>\n<function="), "<|tool_call>call:")
         self.assertEqual(gemma_forced("<tool_call>\n<function=read_file>\n"), "<|tool_call>call:read_file{")
+
+
+
+class UnaskedThoughts(unittest.TestCase):
+    """Thinking off: Gemma 4's own thought block is held; it stays reasoning when an answer or a call follows it, and
+    is the answer when the reply stops inside it (after a picture in a tool result)."""
+
+    def test_an_unclosed_thought_is_the_answer(self):
+        for step in (1, 3, 1000):
+            self.assertEqual(run("<|channel>thought\nThe text is MOMOE 7319.", step, unasked=True),
+                             [("content", "The text is MOMOE 7319.")])
+
+    def test_a_closed_thought_stays_reasoning(self):
+        for step in (1, 3, 1000):
+            self.assertEqual(run("<|channel>thought\nhmm<channel|>The answer.", step, unasked=True),
+                             [("reasoning", "hmm"), ("content", "The answer.")])
+            self.assertEqual(run('<|channel>thought\n<channel|><|tool_call>call:read_file{path:<|"|>x.py<|"|>}<tool_call|>',
+                                 step, unasked=True)[-1], ("tool_call", "read_file", {"path": "x.py"}))
+
+    def test_a_cut_reply_keeps_it_reasoning(self):
+        self.assertEqual(run("<|channel>thought\nstill going", 1000, unasked=True, reason="length"),
+                         [("reasoning", "still going")])
 
 
 if __name__ == "__main__":

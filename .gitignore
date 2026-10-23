@@ -29,6 +29,7 @@ td.log
 /.venv/
 /build/
 /third_party/llama.cpp
+/third_party/llama.cpp-vision
 /models/*
 !/models/.gitkeep
 /config/*
