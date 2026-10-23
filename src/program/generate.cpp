@@ -3292,13 +3292,12 @@ int main(int argc, char** argv) {
             return 2;
         }
         if (!model_geom.has_ple) o.no_ple = true;   // the model has no PLE block: every PLE path stays off
-        // Qwen3.6 / Ornith (one residual stream): one GPU.  The layer split, the peer tier and the remote expert caches
-        // carry Flash-Next's shapes (10 experts per token, 2560 wide) and have not been run with this model.
-        if (!model_geom.has_hc() && (o.peer_device >= 1 || !o.layer_split.empty() || o.expert_cache_remote[0] > 0)) {
-            std::fprintf(stderr, "momoe generate: a %s model runs on one GPU: %s is not supported for it\n",
-                         strata::core::arch_name(model_geom.arch),
-                         o.peer_device >= 1 ? "--peer-device" : !o.layer_split.empty() ? "--layer-split"
-                                                                                       : "--expert-cache-device1..3");
+        // Qwen3.6 / Ornith (one residual stream): the layer split and the helper GPU's expert cache (--helper-tier,
+        // --expert-cache-device1..3) run it (measured on an RTX 4070 Ti + RTX 3060).  The peer tier still carries
+        // Flash-Next's shapes (10 experts a token, 2560 wide: peer_experts.cpp) and is refused.
+        if (!model_geom.has_hc() && o.peer_device >= 1) {
+            std::fprintf(stderr, "momoe generate: a %s model does not run with --peer-device (--helper-tier puts a "
+                                 "second GPU to the same use)\n", strata::core::arch_name(model_geom.arch));
             return 2;
         }
         o.stream_token = true;
@@ -4386,7 +4385,9 @@ int main(int argc, char** argv) {
                          (unsigned long long) (total_b >> 20));
             return false;
         }
-        if (!o.native_dense_gguf.empty() && !st.dense.load(o.native_dense_gguf, st.wt, err, o.native_ple_key)) {
+        // (as on the first card: a file's MTP layers after its main ones, qwen35moe, are the draft's)
+        if (!o.native_dense_gguf.empty() &&
+            !st.dense.load(o.native_dense_gguf, st.wt, err, o.native_ple_key, 0, g.n_mtp_layers > 0 ? g.n_layers : -1)) {
             std::fprintf(stderr, "momoe generate: layer split, CUDA%d native dense projections: %s\n", st.dev,
                          err.c_str());
             return false;
@@ -6780,7 +6781,10 @@ int main(int argc, char** argv) {
                      (long long) (peer.resident() + xcache.slots()), (long long) (g.n_layers * g.n_expert));
     }
 
-    if (remote_opt && !remote_opt->init(err)) { std::fprintf(stderr, "momoe generate: %s\n", err.c_str()); return 1; }
+    if (remote_opt && (!remote_opt->set_shape((int) g.n_expert_used, g.n_embd, err) || !remote_opt->init(err))) {
+        std::fprintf(stderr, "momoe generate: %s\n", err.c_str());
+        return 1;
+    }
     Drive drive;
     // #731 (opt-in, STRATA_DISJOINT_ADAPT=1): the adaptive tiers leave an expert a helper GPU holds out of the primary's
     // promotion candidates (it would sit in both caches).  Asked live, from the helper's own cache (RemoteExperts::holds,
@@ -8906,7 +8910,13 @@ int main(int argc, char** argv) {
         // (~1 GB at 8K-token chunks: size its cache with an explicit --expert-cache-device1).  Not bit-identical to the
         // primary's rows (another MMQ grouping).
         static const bool helper_rows = [] { const char* v = std::getenv("STRATA_PREFILL_HELPER_ROWS"); return v != nullptr && std::atoi(v) != 0; }();
-        if (helper_rows && !peer.valid() && drive.d.remote_count == 1 && !multi_gpu && stages.empty() && o.batch <= 0) {
+        // (a one-stream model, Qwen3.6: off - the peer prompt path carries Flash-Next's shapes, prefill.cpp's
+        // N = 2560, K = 10, and read out of bounds there: an illegal memory access on the first long prompt)
+        if (helper_rows && g.hc <= 1)
+            std::fprintf(stderr, "momoe serve: STRATA_PREFILL_HELPER_ROWS: not for a one-stream model: the primary "
+                                 "reads the prompt rows (the helper's experts copied from the helper)\n");
+        if (helper_rows && g.hc > 1 && !peer.valid() && drive.d.remote_count == 1 && !multi_gpu && stages.empty() &&
+            o.batch <= 0) {
             const int64_t rows = o.peer_prefill_rows > 0 ? o.peer_prefill_rows : o.prefill_chunk * K / 2;
             if (!sp.set_peer(drive.d.remote[0], rows, err)) {
                 std::fprintf(stderr, "momoe serve: STRATA_PREFILL_HELPER_ROWS: %s - the prompt path stays on the primary GPU\n",

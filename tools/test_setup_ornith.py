@@ -20,7 +20,7 @@ class Tables(unittest.TestCase):
         self.assertEqual(list(setup.FAMILIES).index("ornith"), 5)         # after qwen36: the menu's numbers stay
         self.assertTrue(setup.small_family("ornith") and setup.small_family("qwen36"))
         self.assertFalse(setup.small_family("qwen") or setup.small_family("unsloth"))
-        for k, v in {"tag": "ornith15-", "own_mtp": True, "ple": False, "one_gpu": True,
+        for k, v in {"tag": "ornith15-", "own_mtp": True, "ple": False, "two_gpus_opt_in": True,
                      "mmproj": "mmproj-Ornith-1.5-35B-A3B-bf16.gguf", "profile": "expert-profile-qwen36.bin", "shards": 1}.items():
             self.assertEqual(fam[k], v, k)
         self.assertIn("/bartowski/Ornith-1.5-35B-A3B-GGUF/resolve/64b0493d34a5ca4c1b4ad67bb99b41d74b4f07d6/", fam["hf"])

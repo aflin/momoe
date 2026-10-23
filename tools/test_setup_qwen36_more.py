@@ -39,7 +39,7 @@ class Tables(unittest.TestCase):
         for f in ("qwen36-bartowski", "kat-coder"):
             fam = setup.FAMILIES[f]
             self.assertTrue(setup.small_family(f))
-            for k, v in {"own_mtp": True, "ple": False, "one_gpu": True, "shards": 1, "nvidia_only": True,
+            for k, v in {"own_mtp": True, "ple": False, "two_gpus_opt_in": True, "shards": 1, "nvidia_only": True,
                          "mmproj": "mmproj-Qwen_Qwen3.6-35B-A3B-bf16.gguf", "profile": "expert-profile-qwen36.bin",
                          "pack_args": ["--compat-bf16"]}.items():
                 self.assertEqual(fam[k], v, (f, k))

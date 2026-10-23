@@ -113,6 +113,7 @@ private:
     cudaStream_t stream_ = nullptr;
     cudaStream_t read_stream_ = nullptr;   ///< STRATA_PREFILL_HELPER_SOURCE: cache -> host copies
     cudaEvent_t swap_read_ev_ = nullptr;   ///< STRATA_HELPER_PROMOTE: a queued swap's copy back has landed
+    int64_t w_ = 2560;                     ///< the model's width, from the last begin (Qwen3.6: 2048)
     cudaEvent_t swap_done_ev_ = nullptr;   ///< STRATA_HELPER_PROMOTE: a round's queued swaps have landed
     std::mutex read_mu_;                   ///< one cache reader at a time (the stager is threaded)
     float* h_x_ = nullptr;

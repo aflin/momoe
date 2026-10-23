@@ -226,6 +226,13 @@ void doorbell_wait(const uint32_t* d_flag, const uint32_t* d_seq, void* stream) 
     check_launch("doorbell_wait");
 }
 
+// (a count that is not a multiple of 4, or an address the float4 kernel cannot take: a one-stream model's hand-off of
+// T x 1 inject weights between the cards of a layer split, Qwen3.6)
+__global__ void copy_from_mapped_scalar_kernel(float* __restrict__ dst, const volatile float* src, int64_t n) {
+    for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (int64_t) gridDim.x * blockDim.x)
+        dst[i] = src[i];
+}
+
 __global__ void copy_from_mapped_kernel(float4* __restrict__ dst, const volatile float4* src, int64_t n4) {
     for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (int64_t) gridDim.x * blockDim.x) {
         const float4 v = const_cast<const float4*>(src)[i];
@@ -299,8 +306,10 @@ void copy_rows_from_mapped_after(const uint32_t* flag, uint32_t value, float* ds
 void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream) {
     if (n <= 0) return;
     if ((n & 3) != 0 || ((uintptr_t) dst & 15) != 0 || ((uintptr_t) src & 15) != 0) {
-        std::fprintf(stderr, "copy_from_mapped: n must be a multiple of 4 and both pointers 16-byte aligned\n");
-        std::exit(1);
+        const int sb = (int) ((n + 255) / 256 < 64 ? (n + 255) / 256 : 64);
+        copy_from_mapped_scalar_kernel<<<sb, 256, 0, (cudaStream_t) stream>>>(dst, (const volatile float*) src, n);
+        check_launch("copy_from_mapped (scalar)");
+        return;
     }
     const int64_t n4 = n / 4;
     const int blocks = (int) ((n4 + 255) / 256 < 64 ? (n4 + 255) / 256 : 64);

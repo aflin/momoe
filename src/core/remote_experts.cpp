@@ -274,7 +274,8 @@ bool RemoteExperts::begin(int64_t layer, const float* x, const int32_t* ids, int
     struct Timer { double& acc; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
         ~Timer() { acc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); } } timer{ms_begin_};
     const int64_t n = n_tok * k;
-    if (n <= 0 || n > CAP || n_tok > strata::kernels::cpu::MAXT || k != 10 || layer < 0 ||
+    // k: the experts a token routes to, at most the 10 the buffers are sized for (Flash-Next 10, Qwen3.6 8)
+    if (n <= 0 || n > CAP || n_tok > strata::kernels::cpu::MAXT || k < 1 || k > 10 || layer < 0 ||
         (size_t) layer >= layers_present_.size() || device_ < 0) {
         err = "CUDA" + std::to_string(device_) + " experts: invalid layer, routing width or window size";
         return false;
@@ -315,7 +316,10 @@ bool RemoteExperts::begin(int64_t layer, const float* x, const int32_t* ids, int
     start_.push_back((int32_t) dst_.size());
     // Private pinned buffers survive until this GPU has consumed them. The CPU
     // pool can write other output rows without a cross-device race.
-    std::memcpy(h_x_, x, (size_t) n_tok * H * sizeof(float));
+    // the model's width (Qwen3.6: 2048; the buffers are sized for Flash-Next's 2560)
+    const int64_t W = strata::kernels::cpu::expert_layout().n_embd;
+    w_ = W;
+    std::memcpy(h_x_, x, (size_t) n_tok * W * sizeof(float));
     auto* meta = (RemoteMeta*) h_meta_;
     std::memcpy(meta->ptr, ptr_.data(), ptr_.size() * sizeof(ptr_[0]));
     std::memcpy(meta->start, start_.data(), start_.size() * sizeof(start_[0]));
@@ -329,7 +333,7 @@ bool RemoteExperts::begin(int64_t layer, const float* x, const int32_t* ids, int
     groups_ = (int32_t) group_id_.size();
     const cudaStream_t s = stream_;
     const bool staged =
-        (zero_copy_ || check(cudaMemcpyAsync(d_x_, h_x_, (size_t) n_tok * H * sizeof(float), cudaMemcpyHostToDevice, s), "copy input", err, device_)) &&
+        (zero_copy_ || check(cudaMemcpyAsync(d_x_, h_x_, (size_t) n_tok * W * sizeof(float), cudaMemcpyHostToDevice, s), "copy input", err, device_)) &&
         check(cudaMemcpyAsync(d_meta_, h_meta_, sizeof(RemoteMeta) + (reduce ? remote_opt_->metadata_bytes() : 0),
                               cudaMemcpyHostToDevice, s), "copy group metadata", err, device_);
     if (!staged) return false;
@@ -338,27 +342,27 @@ bool RemoteExperts::begin(int64_t layer, const float* x, const int32_t* ids, int
         const auto& fmt = lay.fmt[(size_t) layer];
         const float* xe = zero_copy_ ? z_x_ : d_x_;
         if (fmt.had_gu) {   // APR: Hadamard-folded gate/up take H (s * x)
-            strata::kernels::hadamard_rows(xe, d_xr_, n_tok, H, fmt.had_block, d_sx_, s);
+            strata::kernels::hadamard_rows(xe, d_xr_, n_tok, W, fmt.had_block, d_sx_, s);
             xe = d_xr_;
         }
-        strata::kernels::quantize_q8_1_rows(xe, n_tok, H, d_q8_, s);
+        strata::kernels::quantize_q8_1_rows(xe, n_tok, W, d_q8_, s);
         auto L = strata::kernels::native_expert_layout(fmt.gu_type, fmt.d_type, fmt.n_embd, fmt.n_ff);
         if (fmt.had_d) { L.had_block = fmt.had_block; L.d_signs = d_sh_; }
         strata::kernels::native_expert_grouped(L, d_ptr_, d_start_, d_count_, d_dst_, d_tok_,
                                                groups_, (int64_t) dst_.size(), d_q8_, d_scratch_, zero_copy_ && !reduce ? z_out_ : d_out_, s);
     } else {
-        strata::kernels::quantize_q8_0_scaled(zero_copy_ ? z_x_ : d_x_, d_q8_, d_scales_, n_tok * H, s);
+        strata::kernels::quantize_q8_0_scaled(zero_copy_ ? z_x_ : d_x_, d_q8_, d_scales_, n_tok * W, s);
         strata::kernels::moe_grouped_s2(d_ptr_, d_start_, d_count_, d_dst_, d_tok_,
                                         groups_, (int64_t) dst_.size(), d_q8_, d_scales_, d_scratch_, zero_copy_ && !reduce ? z_out_ : d_out_, s);
     }
-    const uint64_t compact_bytes = (uint64_t) (reduce ? n_tok : dst_.size()) * H * sizeof(float);
+    const uint64_t compact_bytes = (uint64_t) (reduce ? n_tok : dst_.size()) * W * sizeof(float);
     if (reduce) {
         if (!remote_opt_->reduce(*this, (RemoteMeta*) d_meta_ + 1, err)) return false;
     } else if (!zero_copy_ && !check(cudaMemcpyAsync(h_out_, d_out_, (size_t) compact_bytes, cudaMemcpyDeviceToHost, s),
                "copy results", err, device_)) return false;
     ++launched_layers_;
     returned_bytes_ += compact_bytes;
-    full_row_bytes_ += (uint64_t) n * H * sizeof(float);
+    full_row_bytes_ += (uint64_t) n * W * sizeof(float);
     return true;
 }
 
@@ -391,7 +395,7 @@ bool RemoteExperts::finish(float* out, std::string& err) {
     ms_wait_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count();
     if (remote_opt_ && remote_opt_->active()) { remote_opt_->accumulate(*this); return true; }
     for (size_t i = 0; i < original_row_.size(); ++i)
-        std::memcpy(out + (size_t) original_row_[i] * H, h_out_ + i * H, (size_t) H * sizeof(float));
+        std::memcpy(out + (size_t) original_row_[i] * w_, h_out_ + i * w_, (size_t) w_ * sizeof(float));
     return true;
 }
 

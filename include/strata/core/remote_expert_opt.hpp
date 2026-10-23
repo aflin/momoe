@@ -20,6 +20,8 @@ public:
 
     void attach(RemoteExperts& remote); // before RemoteExperts::open
     bool init(std::string& err);        // after all helper caches are open
+    /// The model's experts a token and width (default Flash-Next's 10 and 2560; Qwen3.6: 8 and 2048), before init.
+    bool set_shape(int k, int64_t n_embd, std::string& err);
     bool owns(int64_t layer, int32_t expert) const;
     bool adapt(const std::vector<float>& usage, const std::vector<int32_t>& primary,
                const std::vector<std::pair<int32_t, int32_t>>& pending, int max_swaps,
@@ -53,6 +55,8 @@ private:
     int32_t* m_mask_ = nullptr;
     const float* weights_ = nullptr;
     int token_begin_ = 0, tokens_ = 0;
+    int k_ = 10;                         ///< experts a token (set_shape)
+    int64_t w_ = 2560;                   ///< the model's width (set_shape)
     int64_t helper_exchanged_ = 0, helper_exchange_failed_ = 0;
     // STRATA_HELPER_ASYNC: the page-locked copy-back buffers and the queued round's RAM exchanges
     struct PendingExchange { int32_t layer, in, out; uint8_t* bytes; };

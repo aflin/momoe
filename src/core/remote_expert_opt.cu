@@ -12,6 +12,8 @@
 
 namespace strata::core {
 namespace {
+// the largest shape (Flash-Next: 10 experts a token, 2560 wide) sizes the buffers; set_shape gives the model's own
+// (Qwen3.6: 8, 2048), which every row stride and count below uses
 constexpr int64_t H = strata::kernels::cpu::H;
 constexpr int K = 10, MAXT = strata::kernels::cpu::MAXT, CAP = MAXT * K;
 struct ReduceMeta { int32_t row[CAP]; float weight[CAP]; };
@@ -22,20 +24,20 @@ bool check(cudaError_t status, std::string& err) {
     return false;
 }
 
-__global__ void reduce_experts(const float* parts, const ReduceMeta* meta, float* sum) {
+__global__ void reduce_experts(const float* parts, const ReduceMeta* meta, float* sum, int k, int64_t w) {
     const int t = blockIdx.y, c = blockIdx.x * blockDim.x + threadIdx.x;
-    if (c >= H) return;
+    if (c >= w) return;
     float v = 0.0f;
-    for (int j = 0; j < K; ++j) {
-        const int i = t * K + j, r = meta->row[i];
-        if (r >= 0) v += parts[(int64_t) r * H + c] * meta->weight[i];
+    for (int j = 0; j < k; ++j) {
+        const int i = t * k + j, r = meta->row[i];
+        if (r >= 0) v += parts[(int64_t) r * w + c] * meta->weight[i];
     }
-    sum[(int64_t) t * H + c] = v;
+    sum[(int64_t) t * w + c] = v;
 }
 
 // Like the upstream mapped-row copy, also skip rows returned in the remote sum.
 __global__ void copy_cpu_rows(float4* dst, const volatile float4* src, const int32_t* mask,
-                              const int32_t* hit_rows, const int32_t* count) {
+                              const int32_t* hit_rows, const int32_t* count, int64_t w4) {
     const int row = blockIdx.x;
     __shared__ int skip;
     if (threadIdx.x == 0) {
@@ -44,11 +46,23 @@ __global__ void copy_cpu_rows(float4* dst, const volatile float4* src, const int
         skip = s;
     }
     __syncthreads();
-    const int64_t start = (int64_t) row * (H / 4);
-    for (int i = threadIdx.x; i < H / 4; i += blockDim.x)
+    const int64_t start = (int64_t) row * w4;
+    for (int i = threadIdx.x; i < w4; i += blockDim.x)
         dst[start + i] = skip ? make_float4(0, 0, 0, 0) : const_cast<const float4*>(src)[start + i];
 }
 } // namespace
+
+bool RemoteExpertOpt::set_shape(int k, int64_t n_embd, std::string& err) {
+    if (k < 1 || k > K || n_embd < 4 || n_embd > H || n_embd % 4 != 0) {
+        err = "remote expert decode optimization: " + std::to_string(k) + " experts a token, " +
+              std::to_string(n_embd) + " wide: more than its buffers hold (" + std::to_string(K) + ", " +
+              std::to_string(H) + ")";
+        return false;
+    }
+    k_ = k;
+    w_ = n_embd;
+    return true;
+}
 
 void RemoteExpertOpt::attach(RemoteExperts& remote) {
     remote.remote_opt_ = this;
@@ -87,16 +101,16 @@ void RemoteExpertOpt::begin(const float* weights, int token_begin, int tokens) {
     weights_ = weights;
     token_begin_ = token_begin;
     tokens_ = tokens;
-    std::memset(h_sum_ + token_begin * H, 0, tokens * H * sizeof(float));
-    std::memset(h_mask_ + token_begin * K, 0, tokens * K * sizeof(int32_t));
+    std::memset(h_sum_ + token_begin * w_, 0, tokens * w_ * sizeof(float));
+    std::memset(h_mask_ + token_begin * k_, 0, tokens * k_ * sizeof(int32_t));
 }
 
 void RemoteExpertOpt::prepare(const RemoteExperts& remote, void* metadata) const {
     auto* m = (ReduceMeta*) metadata;
-    std::fill(m->row, m->row + tokens_ * K, -1);
+    std::fill(m->row, m->row + tokens_ * k_, -1);
     for (size_t i = 0; i < remote.original_row_.size(); ++i)
         m->row[remote.original_row_[i]] = (int32_t) i;
-    std::memcpy(m->weight, weights_, tokens_ * K * sizeof(float));
+    std::memcpy(m->weight, weights_, tokens_ * k_ * sizeof(float));
 }
 
 bool RemoteExpertOpt::reduce(RemoteExperts& remote, const void* metadata, std::string& err) {
@@ -104,34 +118,34 @@ bool RemoteExpertOpt::reduce(RemoteExperts& remote, const void* metadata, std::s
     // finish() synchronizes this stream before the host reads h_out_. When mapped output is available,
     // write the reduced rows there directly, avoiding a separate device-to-host copy for every layer.
     float* sum = remote.zero_copy_ ? remote.z_out_ : p.sum;
-    reduce_experts<<<dim3((H + 255) / 256, tokens_), 256, 0, remote.stream_>>>(
-        remote.d_out_, (const ReduceMeta*) metadata, sum);
+    reduce_experts<<<dim3((unsigned) ((w_ + 255) / 256), tokens_), 256, 0, remote.stream_>>>(
+        remote.d_out_, (const ReduceMeta*) metadata, sum, k_, w_);
     if (remote.zero_copy_) return check(cudaGetLastError(), err);
-    return check(cudaMemcpyAsync(remote.h_out_, p.sum, tokens_ * H * sizeof(float),
+    return check(cudaMemcpyAsync(remote.h_out_, p.sum, tokens_ * w_ * sizeof(float),
                                   cudaMemcpyDeviceToHost, remote.stream_), err);
 }
 
 void RemoteExpertOpt::accumulate(const RemoteExperts& remote) {
-    for (int64_t i = 0; i < tokens_ * H; ++i) h_sum_[token_begin_ * H + i] += remote.h_out_[i];
-    for (int i = 0; i < tokens_ * K; ++i)
-        h_mask_[token_begin_ * K + i] |= remote.owned_[(size_t) i] != 0;
+    for (int64_t i = 0; i < tokens_ * w_; ++i) h_sum_[token_begin_ * w_ + i] += remote.h_out_[i];
+    for (int i = 0; i < tokens_ * k_; ++i)
+        h_mask_[token_begin_ * k_ + i] |= remote.owned_[(size_t) i] != 0;
 }
 
 void RemoteExpertOpt::copy_rows(float* dst, const float* src, int token_begin, int tokens,
                          const int32_t* hit_rows, const int32_t* count, void* stream) const {
-    copy_cpu_rows<<<tokens * K, 128, 0, (cudaStream_t) stream>>>(
-        (float4*) dst, (const volatile float4*) src, m_mask_ + token_begin * K, hit_rows, count);
+    copy_cpu_rows<<<tokens * k_, 128, 0, (cudaStream_t) stream>>>(
+        (float4*) dst, (const volatile float4*) src, m_mask_ + token_begin * k_, hit_rows, count, w_ / 4);
 }
 
 void RemoteExpertOpt::combine(float* dst, float* scratch, int token_begin, int tokens,
                        const uint32_t* skip, uint32_t ring, void* stream) const {
-    const float* sum = m_sum_ + token_begin * H;
+    const float* sum = m_sum_ + token_begin * w_;
     if (skip) {
         // An all-primary device-planned group bypasses the host: ignore its stale sum.
-        strata::kernels::copy_or_zero_from_mapped(scratch, sum, tokens * H, skip, ring, stream);
+        strata::kernels::copy_or_zero_from_mapped(scratch, sum, tokens * w_, skip, ring, stream);
         sum = scratch;
     }
-    strata::kernels::add_inplace(dst, sum, tokens * H, stream);
+    strata::kernels::add_inplace(dst, sum, tokens * w_, stream);
 }
 
 bool RemoteExpertOpt::owns(int64_t layer, int32_t expert) const {

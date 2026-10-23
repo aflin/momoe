@@ -65,7 +65,7 @@ and keeps its default behaviour unchanged. MoMoE's aims:
 - **agents first:** `momoe run claude` (or Codex, OpenCode, Unsloth Studio, LM Studio) starts the model and the tool,
   already connected; there is no web page;
 - **Linux with NVIDIA, and Apple Silicon Macs** (Windows and AMD or Intel cards may work, but need help from people
-  who run them; with the Qwen3.6 family MoMoE runs on one GPU);
+  who run them);
 - **built from source:** setup compiles the engine on your machine.
 
 Status: early, and maintained by one person.
@@ -311,6 +311,22 @@ Measured with Flash-Next IQ3_XXS: RTX 4070 Ti (main) + RTX 3060 12 GB (helper, a
 
 Writing speed is about the same (the agent session varied 64.5-71.1 between runs of the same configuration); short
 prompts are read faster and long ones slower. The answers are not bit-identical to one card's.
+
+The Qwen3.6 family (Qwen3.6, Ornith-1.5-35B, KAT-Coder) runs on two cards too, but only when asked: `--gpus a,b`
+(a layer split) or `--gpus a,b --helper-tier`. A second card is no clear gain there, because one 12 GB card already
+holds most of its experts. Measured with Ornith-1.5-35B IQ4_XS on the same two cards (the 3060 also holding ~3.9 GB of
+another program), `tools/strata_bench.py`, 2026-10-23, tok/s:
+
+| | one card | layer split | `--helper-tier` |
+| --- | ---: | ---: | ---: |
+| 32K context: short chat / agent session | 126.3 / 136.6 | 128.3 / 106.6 | 130.8 / 130.8 |
+| 32K context: reads a 16K-token prompt | 4,475 | 3,569 | 3,513 |
+| 256K context: short chat / agent session | 103.5 / 114.3 | 121.7 / 110.3 | 127.2 / 118.0 |
+| 256K context: reads a 16K-token prompt | 4,459 | 3,712 | 3,497 |
+
+With a large context (where the KV cache takes the card's room for experts) the helper writes short chats ~20%
+faster; agent sessions are about the same and long prompts ~20% slower. (256K: the English draft vocabulary, for the
+split's room.) Its helper does not compute prompt rows for this family: the primary card reads them.
 
 With Ornith-1.5-122B the helper tier also works with the CPU computing the experts neither card holds, but it is
 slower: 12.0-12.2 tok/s against 19-21 on the 4070 Ti alone. More in

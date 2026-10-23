@@ -534,7 +534,7 @@ FAMILIES = {
     # Qwen3.6-35B-A3B (general.architecture qwen35moe): one GGUF file, no PLE table (no --ple-gguf), its MTP draft
     # layer inside the file (blk.40: --mtp is the model file, nothing else is fetched), the pack built like Unsloth's
     # (--compat-bf16).  Images: the stock encoder (tools/vision) reads Qwen3.6's mmproj, bartowski's copy for its
-    # distinct name (Unsloth's is "mmproj-BF16.gguf"); one GPU (no layer split yet); its batched prompt path is
+    # distinct name (Unsloth's is "mmproj-BF16.gguf"); two cards only when asked (QWEN36_TWO_GPUS); its batched prompt path is
     # NVIDIA-only (sm_75+) and it has not been run on AMD.  Suggested where no Flash-Next size fits the RAM (qwen36_recommended).
     "qwen36": {"title": "Qwen3.6-35B-A3B", "by": "Qwen's smaller MoE; Unsloth's GGUFs with its MTP layer",
                "about": "a smaller model for 16-32 GB of RAM and 8-12 GB cards (18 GB download)",
@@ -543,9 +543,9 @@ FAMILIES = {
                "mmproj": "mmproj-Qwen_Qwen3.6-35B-A3B-bf16.gguf", "name": "qwen3.6-35b-a3b",
                "pack_args": ["--compat-bf16"], "sha256": QWEN36_FILES, "profile": "expert-profile-qwen36.bin",
                "license": "Apache 2.0: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
-               "own_mtp": True, "ple": False, "one_gpu": True, "nvidia_only": True},
+               "own_mtp": True, "ple": False, "two_gpus_opt_in": True, "nvidia_only": True},
     # Ornith-1.5-35B-A3B: a fine-tune of the same architecture (agentic coding), the same engine path as qwen36 (its
-    # draft layer in the file, no PLE, one GPU, NVIDIA's batched prompt path); the Qwen3.6 expert profile and draft
+    # draft layer in the file, no PLE, two cards opt-in, NVIDIA's batched prompt path); the Qwen3.6 expert profile and draft
     # vocabulary apply (the same geometry and tokenizer).  Images: bartowski's mmproj of it.
     "ornith": {"title": "Ornith-1.5-35B-A3B", "by": "ornith-ai's agentic-coding fine-tune of the same 35B-A3B model",
                "about": "Qwen3.6-35B-A3B's size, tuned for coding agents (19 GB download)",
@@ -554,7 +554,7 @@ FAMILIES = {
                "mmproj": "mmproj-Ornith-1.5-35B-A3B-bf16.gguf", "name": "ornith-1.5-35b-a3b",
                "pack_args": ["--compat-bf16"], "sha256": ORNITH_FILES, "profile": "expert-profile-qwen36.bin",
                "license": "MIT: https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B",
-               "own_mtp": True, "ple": False, "one_gpu": True, "nvidia_only": True},
+               "own_mtp": True, "ple": False, "two_gpus_opt_in": True, "nvidia_only": True},
     # Qwen3.6-35B-A3B in bartowski's GGUFs (each with the MTP layer, stored Q8_0) and KAT-Coder-V2.5-Dev, Kwaipilot's
     # coding fine-tune of it, in Myric's APEX GGUFs with Qwen3.6's draft layer: the same engine path as qwen36.  Their
     # sizes are MORE_SIZES (docs/QWEN35MOE_GGUFS.md).  Their tags must not start with another family's ("qwen36-").
@@ -567,7 +567,7 @@ FAMILIES = {
                          "pack_args": ["--compat-bf16"], "sha256": BARTOWSKI36_FILES,
                          "profile": "expert-profile-qwen36.bin",
                          "license": "Apache 2.0: https://huggingface.co/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF",
-                         "own_mtp": True, "ple": False, "one_gpu": True, "nvidia_only": True},
+                         "own_mtp": True, "ple": False, "two_gpus_opt_in": True, "nvidia_only": True},
     "kat-coder": {"title": "KAT-Coder-V2.5-Dev", "by": "Kwaipilot's agentic-coding fine-tune of Qwen3.6-35B-A3B",
                   "about": "Myric's APEX GGUFs with Qwen3.6's draft layer (21 GB download)",
                   "hf": hf("Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF"), "file": "KAT-Coder-V2.5-Dev-MTP-APEX-{q}.gguf",
@@ -575,7 +575,7 @@ FAMILIES = {
                   "mmproj": "mmproj-Qwen_Qwen3.6-35B-A3B-bf16.gguf", "name": "kat-coder-v2.5-dev",
                   "pack_args": ["--compat-bf16"], "sha256": KAT_FILES, "profile": "expert-profile-qwen36.bin",
                   "license": "Apache 2.0: https://huggingface.co/Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF",
-                  "own_mtp": True, "ple": False, "one_gpu": True, "nvidia_only": True},
+                  "own_mtp": True, "ple": False, "two_gpus_opt_in": True, "nvidia_only": True},
     # MODEL-UPDATE Phase 4: the original model with NVFP4 experts, as ready-made packs (NVFP4_REPOS): the files come
     # as the engine reads them (no GGUF to pack), each size has its own repository ("repo" in MODELS)
     "nvfp4": {"title": "Qwen3.8-Flash-Next (NVFP4)", "by": "NVFP4 packs by sergqwer (strata-nvfp4)",
@@ -1920,9 +1920,20 @@ def config_family(cfg_path: Path) -> str:
     return next((f for f, d in FAMILIES.items() if d["tag"] and tag.startswith(d["tag"])), "qwen")
 
 
-def one_gpu_family(cfg_path: Path) -> bool:
-    """A family the engine runs on one GPU only (no layer split yet: Qwen3.6-35B-A3B)."""
-    return bool(FAMILIES[config_family(cfg_path)].get("one_gpu"))
+def two_gpus_opt_in_family(cfg_path: Path) -> bool:
+    """A family two cards run only when asked for (--gpus, --helper-tier): Qwen3.6-35B-A3B and its fine-tunes, where
+    a second card is no clear gain (QWEN36_TWO_GPUS)."""
+    return bool(FAMILIES[config_family(cfg_path)].get("two_gpus_opt_in"))
+
+
+# The Qwen3.6 family (Ornith-1.5-35B IQ4_XS) on an RTX 4070 Ti + RTX 3060 (the 3060 also holding ~3.9 GB of another
+# program and the desktop), tools/strata_bench.py, 2026-10-23, tok/s, one card / layer split / --helper-tier:
+#   32K context:  short chat 126.3 / 128.3 / 130.8, agent session 136.6 / 106.6 / 130.8, 16K prompt 4,475 / 3,569 / 3,513
+#   256K context: short chat 103.5 / 121.7 / 127.2, agent session 114.3 / 110.3 / 118.0, 16K prompt 4,459 / 3,712 / 3,497
+# Writing is faster with a big context, agent sessions about the same, long prompts ~20% slower: setup offers it, does
+# not choose it.
+QWEN36_TWO_GPUS = ("a second card is opt-in for this model: measured on an RTX 4070 Ti + RTX 3060, it writes short chats "
+                   "~20% faster at 256K context, agent sessions about the same, and reads long prompts ~20% slower")
 
 
 FLASH_NEXT_FLOOR_SLACK_GB = 4    # step 1's tolerance under a size's RAM line ("the smallest model needs ...")
@@ -2070,8 +2081,8 @@ def recommend_remote_expert_opt(cfg: dict, off: bool = False) -> None:
 def offer_together(cfg_path: Path, cfg: dict, yes: bool) -> dict:
     """Starting a model set up for one card on a PC with two or more that can share it: asked once (the answer is
     saved in its config)."""
-    if isinstance(cfg.get("gpu"), list) or cfg.get("gpus_asked") or one_gpu_family(cfg_path):
-        return cfg                                     # (Qwen3.6-35B-A3B: one GPU, no layer split yet)
+    if isinstance(cfg.get("gpu"), list) or cfg.get("gpus_asked") or two_gpus_opt_in_family(cfg_path):
+        return cfg                                     # (Qwen3.6-35B-A3B: two cards only when asked for)
     found = gpus()
     can = together_ok(found)
     if not can:
@@ -6076,10 +6087,6 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
                             once.get("draft_vocab") or cfg.get("draft_vocab", "cjk"))
     if point_draft_vocab(cfg):
         write_config(cfg_path, cfg)
-    if isinstance(gpu, list) and one_gpu_family(cfg_path):
-        warn(f"{FAMILIES[config_family(cfg_path)]['title']} runs on one GPU for now (the engine has no layer split "
-             f"for it yet): this start uses GPU {gpu[0]} only")
-        gpu = gpu[0]
     cmd = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
            "--port", str(port or cfg.get("port", 8080))]
     if cfg.get("backend") == "hip":                    # AMD, numbered as HIP numbers them (setup's KFD order)
@@ -8277,9 +8284,13 @@ def main() -> int:
                      "it anyway", "  Try it anyway?")
         warn(f"installing {fam['title']} {size_of(model)} on {gpu_name(gpu)}, as you chose (untested: please report "
              "how it runs)")
-    if helper is not None and (fam.get("one_gpu") or small_family(family)):
-        warn(f"{fam['title']}: the helper tier is measured with Qwen3.8-Flash-Next only: using {gpu_name(gpu)} alone")
+    if fam.get("two_gpus_opt_in") and (multi or helper is not None) and not a.gpus:
+        # (the cards came from the question or its default, not from --gpus)
+        say(f"  {fam['title']}: {QWEN36_TWO_GPUS}. Using {gpu_name(gpu)}; for both: --gpus "
+            + ",".join(str(i) for i in sel[:2]) + " (layer split) or --gpus " + ",".join(str(i) for i in sel[:2])
+            + " --helper-tier")
         helper = None
+        multi, sel, chosen = [], [gpu["index"]], [gpu]
     if fam.get("one_gpu") and multi:
         # like UD-Q4_K_XL's RAM budget: the engine has no layer split for this model yet, so one card runs it
         warn(f"{fam['title']} runs on one GPU for now (the engine has no layer split for it yet): using "

@@ -58,7 +58,7 @@ class Tables(unittest.TestCase):
         self.assertEqual(fam["profile"], "expert-profile-qwen36.bin")
         self.assertNotIn("vision", fam)                                     # images: Qwen3.6's mmproj (bartowski's)
         self.assertEqual(fam["mmproj"], "mmproj-Qwen_Qwen3.6-35B-A3B-bf16.gguf")
-        self.assertTrue(fam["own_mtp"] and fam["one_gpu"] and fam["nvidia_only"])
+        self.assertTrue(fam["own_mtp"] and fam["two_gpus_opt_in"] and fam["nvidia_only"])
         self.assertIs(fam["ple"], False)
         self.assertIn("Apache 2.0", fam["license"])
 
@@ -118,8 +118,8 @@ class Tables(unittest.TestCase):
             p.write_text(json.dumps({"args": []}))
             self.assertEqual((setup.choices_from_config(p)["family"], setup.choices_from_config(p)["model"]),
                              ("unsloth", "UD-IQ4_XS"))
-        self.assertTrue(setup.one_gpu_family(Path("strata-qwen36-ud-iq4_xs.json")))
-        self.assertFalse(setup.one_gpu_family(Path("strata-iq2_xs.json")))
+        self.assertTrue(setup.two_gpus_opt_in_family(Path("strata-qwen36-ud-iq4_xs.json")))
+        self.assertFalse(setup.two_gpus_opt_in_family(Path("strata-iq2_xs.json")))
 
 
 class RamFit(unittest.TestCase):
@@ -626,15 +626,29 @@ class Pascal(Base):
         self.assertNotIn("untested below", out)
 
 
-class OneGpu(Base):
-    def test_gpus_keeps_one(self):
+class TwoGpusOptIn(Base):
+    """QWEN36_TWO_GPUS: two cards when asked for with --gpus (a layer split, or --helper-tier), else one."""
+    def test_gpus_keeps_both(self):
         code, out, cfg = self.main(["--family", "qwen36", "--model", "UD-IQ4_XS", "--gpus", "0,1"],
                                    found=nvidia(2))
         self.assertEqual(code, 0, out)
-        self.assertEqual(cfg["gpu"], 0)
+        self.assertEqual(cfg["gpu"], [0, 1])
+        self.assertEqual(cfg.get("layer_split"), "auto")
+        self.assertNotIn("--helper-tier", cfg["args"])
+
+    def test_gpus_helper_tier(self):
+        code, out, cfg = self.main(["--family", "qwen36", "--model", "UD-IQ4_XS", "--gpus", "0,1", "--helper-tier"],
+                                   found=nvidia(2))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(cfg["gpu"], [0, 1])
         self.assertNotIn("layer_split", cfg)
-        self.assertNotIn("--remote-expert-opt", cfg["args"])
-        self.assertIn("runs on one GPU for now", out)
+        self.assertIn("--helper-tier", cfg["args"])
+
+    def test_yes_alone_keeps_one(self):
+        code, out, cfg = self.main(["--family", "qwen36", "--model", "UD-IQ4_XS"], found=nvidia(2))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(cfg["gpu"], 0)
+        self.assertIn("opt-in", out)
 
     def test_not_offered_at_a_start(self):
         p = self.t / "strata-qwen36-ud-iq4_xs.json"
@@ -644,7 +658,7 @@ class OneGpu(Base):
         self.assertEqual(code, {"args": []})                              # unchanged, nothing asked
         self.assertEqual(out, "")
 
-    def test_start_with_gpus_uses_the_first(self):
+    def test_start_with_gpus_uses_both(self):
         exe = self.t / "strata"
         exe.write_bytes(b"")
         p = self.t / "strata-qwen36-ud-iq4_xs.json"
@@ -656,10 +670,9 @@ class OneGpu(Base):
                 mock.patch.object(setup.subprocess, "call", call):
             code, out = quiet(setup.start, p, None, [0, 1], False, True)
         self.assertEqual(code, 0, out)
-        self.assertIn("runs on one GPU for now", out)
-        self.assertEqual(json.loads(p.read_text())["gpu"], 0)
         cmd = call.call_args[0][0]
-        self.assertEqual(cmd[cmd.index("--gpu") + 1], "0")
+        self.assertNotIn("--gpu", cmd)                                    # both cards, from the config
+        self.assertEqual(json.loads(p.read_text())["gpu"], [0, 1])
 
 
 class DraftVocabAtStart(unittest.TestCase):
