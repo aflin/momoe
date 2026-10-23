@@ -93,7 +93,12 @@ The machines:
 ### Which model runs where
 
 Writing speed in tokens per second, with setup's config on each machine; "-" means not tried. \* = drafting with the
-model's own multi-token-prediction layer.
+model's own multi-token-prediction layer. These are short tests: a short prompt (a few short questions, or a
+few hundred tokens) on setup's config, whose context is small (16K to 64K tokens). Real use is slower, for two
+reasons. A larger context leaves less memory for the expert cache: Ornith-1.5-35B on the PC wrote 128.8
+tok/s with setup's 32K config (a 7.6 GiB cache) and 99.0 with a 256K one (5.1 GiB). And the attention over a long
+conversation costs more for each new token: in a Claude Code session on that 256K config it wrote about 85 tok/s at 40K
+tokens of conversation and 55-60 at 100K, with the same share of experts found in the cache (about 75-80%) at both.
 
 | Model, size | PC | Spark | Jetson | M1 Ultra | M4 Air |
 | --- | ---: | ---: | ---: | ---: | ---: |
