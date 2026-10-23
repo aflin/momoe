@@ -61,6 +61,13 @@ call (whole and streamed) and answered after the tool's result; Lightning and Ge
   45.3 / 62.6 / 77.8 / 75.1 (9 GiB does not fit); the 8 GiB cache with MTP drafting 63.5 (2 drafted; 3 does not fit).
   MoMoE's servers on the same chat, drafting as setup writes: 65.5 / 76.7 and 131.6 / 153.5 (two runs; 85% and 89% of
   the drafts kept).
+- **GLM-5.3-Flash UD-IQ3_XXS on the Spark** (2026-10-22, llama.cpp a37cc46, `llama-bench` tg64 under a watchdog that
+  kills it under 8 GB of available memory). Every layer on the GPU does not fit beside the system (its 112 GiB are RAM
+  on the Spark: killed at 7 GB available), nor every expert on the CPU with llama.cpp's defaults (its host buffer and
+  repacked copies are RAM too). With `--no-host 1 --repack 0 -lm mmap` the CPU's experts stay in the mapped file:
+  `--n-cpu-moe` 99 / 26 / 16 / 10 / 6 / 5: 3.27 / 3.74 / 5.08 / 7.10 / 9.73 / 10.85 tok/s, the lowest available memory
+  108 / 62 / 38 / 23 / 13 / 11 GB (4 would leave about 8). The table's earlier 1.3 was a 48-token check with every
+  expert on the CPU, cold. UD-IQ4_XS's 2.3 / 2.5 there is from the same older check, not a placement sweep.
 - **Flint** (2026-10-22; llama.cpp a37cc46, the commit that added it; 32K context; greedy 300 tokens, two runs): MoMoE
   runs it as LFM2.5 with every block attention, attention sinks, a 513-token sliding window on 35 of its 49 blocks
   (their keys and values in a ring of 1,792 positions: 0.14 GiB, not 2.3 at 32K), a shared expert, and llama.cpp's

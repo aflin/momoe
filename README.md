@@ -146,7 +146,7 @@ layer. "MoMoE" is with setup's config.
 | LFM2.5-24B-A2B UD-Q4_K_XL | 75.9 | 105.1 (10 on CPU) |
 | LFM2.5-8B-A1B UD-Q4_K_XL | 305.5 | 305.8 |
 | **Spark** (128 GB shared) | | |
-| GLM-5.3-Flash UD-IQ3_XXS | 19.7* (13.3 without) | 1.3 (all on CPU: a 48-token check, cold) |
+| GLM-5.3-Flash UD-IQ3_XXS | 19.7* (13.3 without) | 10.85 (5 on CPU; `--no-host 1 --repack 0 -lm mmap`) |
 | GLM-5.3-Flash UD-IQ4_XS | 11.7* (9.3 without) | 2.3 |
 | Flint / Gemma 4 / Lightning UD-Q4_K_XL | 73.2 / 59.3 / 66.9 | 76.0 / 57.5 / 69.6 |
 | **Jetson** (8 GB shared) | | |
@@ -174,7 +174,8 @@ layer. "MoMoE" is with setup's config.
 
 In short:
 - **Where the experts don't fit the GPU, MoMoE is well ahead.** On the PC that holds even against llama.cpp's MoE
-  cache: Flash-Next 3x, Ornith-35B 2x, Ornith-122B 4x. MoMoE is also ahead with GLM on the Spark, LFM2.5-24B on the
+  cache: Flash-Next 3x, Ornith-35B 2x, Ornith-122B 4x. MoMoE is also ahead with GLM on the Spark (13.3 against
+  10.85 without drafting, 19.7 with it), LFM2.5-24B on the
   Jetson, and the three larger models on the Mac mini.
 - **Where every expert fits in memory, the two are level.** That's Flint, Gemma 4 and Lightning on the Spark and the
   Macs, LFM2.5 on the Jetson, the M1 Ultra and the M4 Air, LFM2.5-8B on the PC, and Qwen3.6 on the M1 Ultra without
