@@ -68,16 +68,15 @@ def read_json(path: Path):
 
 
 def configs() -> list:
-    """The model configs in config/, the most recently started first: strata-*.json, and *.json named at setup
-    (they carry "setup_tag")."""
+    """The model configs in config/, the most recently started first: every *.json with an engine ("exe") and its
+    "args" - setup's (strata-*.json, or named at setup: "setup_tag") and ones made by hand."""
     move_configs()
     found = []
     for p in config_dir().glob("*.json"):
         if p.name.endswith(".shared-settings.json"):
             continue
         c = read_json(p)
-        if isinstance(c, dict) and c.get("exe") and isinstance(c.get("args"), list) and (
-                p.name.startswith("strata-") or isinstance(c.get("setup_tag"), str)):
+        if isinstance(c, dict) and c.get("exe") and isinstance(c.get("args"), list):
             found.append(p)
     return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
 

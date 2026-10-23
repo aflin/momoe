@@ -265,8 +265,9 @@ class Momoe(unittest.TestCase):
         (self.t / "strata-q2_0.shared-settings.json").write_text("{}")   # with its Chat settings
         (self.t / "config").mkdir()
         (self.t / "config" / "mine.json").write_text(json.dumps({**cfg, "setup_tag": "ornith15-IQ4_XS"}))
-        (self.t / "config" / "other.json").write_text(json.dumps(cfg))   # no setup_tag: not one of setup's
-        self.assertEqual(sorted(p.name for p in momoe.configs()), ["mine.json", "strata-q2_0.json"])
+        (self.t / "config" / "other.json").write_text(json.dumps(cfg))   # no setup_tag: made by hand, listed too
+        (self.t / "config" / "notes.json").write_text(json.dumps({"x": 1}))   # no engine: not a config
+        self.assertEqual(sorted(p.name for p in momoe.configs()), ["mine.json", "other.json", "strata-q2_0.json"])
         self.assertTrue((self.t / "config" / "strata-q2_0.shared-settings.json").is_file())
         self.assertFalse(list(self.t.glob("*.json")))
         self.assertEqual(momoe.find_config("mine").name, "mine.json")
