@@ -1004,9 +1004,15 @@ print(r.choices[0].message.content)
   `ANTHROPIC_AUTH_TOKEN` (or your `api_key`, if you set one).
 - **Codex CLI** (0.1.39): see [the Responses API](#the-responses-api-and-codex-cli) below.
 - **Context.** Chosen in setup (8K-262K). Requests longer than that are refused, never silently cut. A request whose
-  `max_tokens` would run past the context is refused too (400); agents that always ask for their full output cap
-  can instead get it shortened to the room left: add `"fit_max_tokens": true` to `strata-<model>.json` (or pass
-  `--fit-max-tokens` to `serve/server.py`). A prompt that leaves no room at all is still refused.
+  `max_tokens` would run past the context is answered with `max_tokens` shortened to the room left (agents such as
+  Claude Code ask for 32,000 on every request); the thinking budget follows the shortened cap. For the strict llama.cpp
+  behaviour (400) set `"fit_max_tokens": false` in `strata-<model>.json` or pass `--no-fit-max-tokens` to
+  `serve/server.py`. A prompt that leaves no room at all is always refused.
+- **`max_tokens` and the `model` field.** `max_tokens`, `max_completion_tokens` and `max_output_tokens` of `-1` or `0`, like a
+  field that is left out, mean "no cap": the answer may use the room left in the context (clients send `-1` for that). The `model` field is not matched
+  against the loaded model on purpose: one server serves one model, and OpenAI clients often send a name of their own (`gpt-4o`, `local`),
+  so any name is answered by the loaded model (a name from `aliases` and the model's own name work the same). Only `GET /v1/models` says what
+  is loaded.
 - **Model aliases** (0.1.32). `"aliases": ["qwen", "local-model"]` in `strata-<model>.json` lists the model under
   those names too in `/v1/models` (each with its own `id`, and in the model's `aliases`), like llama-server's
   `--alias`; a request naming one is answered under that name. Any other name is still served, as before.
