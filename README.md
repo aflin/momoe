@@ -147,7 +147,7 @@ layer. "MoMoE" is with setup's config.
 | LFM2.5-8B-A1B UD-Q4_K_XL | 305.5 | 305.8 |
 | **Spark** (128 GB shared) | | |
 | GLM-5.3-Flash UD-IQ3_XXS | 19.7* (13.3 without) | 10.85 (5 on CPU; `--no-host 1 --repack 0 -lm mmap`) |
-| GLM-5.3-Flash UD-IQ4_XS | 11.7* (9.3 without) | 2.3 |
+| GLM-5.3-Flash UD-IQ4_XS | 11.7* (9.3 without) | 3.52 (20 on CPU, the same settings; larger than the memory) |
 | Flint / Gemma 4 / Lightning UD-Q4_K_XL | 73.2 / 59.3 / 66.9 | 76.0 / 57.5 / 69.6 |
 | **Jetson** (8 GB shared) | | |
 | LFM2.5-24B-A2B UD-IQ3_XXS | 6.9 | 4.8 (16 layers' experts on the GPU, the most that fit) |
