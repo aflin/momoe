@@ -105,7 +105,7 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 | Qwen3.8-Flash-Next IQ3_XXS | 57.9* | 35.5 | - | 38.2 | 7.9* |
 | Flash-Next Coder IQ1_M | 54.8* | 33.3 | - | 48.9* | 12.4* |
 | Swift 1.5 IQ3_XXS | 63.4* | 34.6 | - | 37.9 | 11.4* (IQ2_XS) |
-| Flash-Next (Unsloth) UD-IQ4_XS | 12.4* | 30.2 | - | 19.0* | 6.1* |
+| Flash-Next (Unsloth) UD-IQ4_XS | 18.4* | 30.2 | - | 19.0* | 6.1* |
 | Qwen3.6-35B-A3B (Unsloth) UD-IQ4_XS | 158.7* | 125.2* | - | 129.3* | 56.5* |
 | Qwen3.6-35B-A3B (bartowski) IQ4_XS | 157.5* | 123.6* | - | 117.1* | 60.2* |
 | Ornith-1.5-35B-A3B IQ4_XS | 128.8* | 104.1* | - | 92.7* | 49.3* (a 14 GiB pool: 31.2*) |
@@ -126,8 +126,8 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 - **Checked:** every model's greedy output against llama.cpp's, and the server's chat and tool calls (whole, streamed,
   after the result).
 - **Reading prompts on the PC** (Strata's engine, 4K / 16K tokens): Flash-Next IQ3_XXS 1,178 / 2,133 tok/s, the
-  Coder 1,931 / 2,615, Swift 1,196 / 2,163, Unsloth's UD-IQ4_XS 67 / 91, the Qwen3.6 family 3,081-3,767 /
-  3,974-4,521.
+  Coder 1,931 / 2,615, Swift 1,196 / 2,163, Unsloth's UD-IQ4_XS 213 / 265 (88 GB, more than the RAM: with ~52 GB
+  free; 108 / 157, writing 14.2, with 36 GB free), the Qwen3.6 family 3,081-3,767 / 3,974-4,521.
 - **Details:** how each column was measured, drafting per model, and the engines' speed-ups:
   [design/benchmark-notes.md](design/benchmark-notes.md). The raw numbers are in [bench/results](bench/results).
 
@@ -291,26 +291,30 @@ hand in the config: both cards in `"gpu"`, the main card first.
   3. The RAM holds the rest.
 
   Each expert is in one place only: what the main card lets go moves down to the helper, and the helper's evictions
-  move to RAM. **The PC keeps much more memory free**, at about the same speed. `--helper-gib G` limits the helper's
+  move to RAM. With Flash-Next it **writes and reads faster**, and with IQ3_XXS **the PC keeps more memory free** (the
+  measurements below). `--helper-gib G` limits the helper's
   VRAM for experts; every setting it turns on can be changed on its own
   ([docs/SECOND_GPU.md](docs/SECOND_GPU.md#the-helper-tier---helper-tier)).
 
-Measured with Flash-Next IQ3_XXS: RTX 4070 Ti (main) + RTX 3060 12 GB (helper, also driving the desktop), 64K context,
-`tools/strata_bench.py`, three runs per test, 2026-10-18.
+Measured with Flash-Next on an RTX 4070 Ti (main) + RTX 3060 12 GB (helper, also driving the desktop), Ryzen 9 5950X,
+64 GB of RAM (~52 GB of it available before each run), `tools/strata_bench.py`, three runs per test, 2026-10-24:
 
-| | 4070 Ti alone (two runs) | `--helper-tier` |
-| --- | ---: | ---: |
-| experts on the 3060 | | 5,492 (8.83 GiB) |
-| experts in RAM | ~41 GiB | 29.9 GiB |
-| the PC's available memory | 2.1 GB | 11.8 GB |
-| writes, short chat | 58.2 / 55.9 | 59.7 |
-| writes, agent session | 63.7 / 63.8 | 68.3 |
-| reads, 4K-token prompt | 1,178 | 1,478 |
-| reads, 16K-token prompt | 2,130 | 1,813 |
-| agent turn, first token | 3.37 s | 2.51 s |
+| | IQ3_XXS, 64K: 4070 Ti alone | `--helper-tier` | UD-IQ4_XS, 256K: 4070 Ti alone | `--helper-tier` |
+| --- | ---: | ---: | ---: | ---: |
+| experts on the 3060 | | 5,525 (8.90 GiB) | | 3,939 (8.89 GiB) |
+| the PC's available memory, loaded | 8.6 GB | 19.0 GB | 10.4 GB | 8.8 GB |
+| writes, short chat | 55.6 | 70.0 | 18.4 | 21.7 |
+| writes, agent session | 63.9 | 78.7 | 18.9 | 25.3 |
+| reads, 4K-token prompt | 1,145 | 1,479 | 213 | 407 |
+| reads, 16K-token prompt | 2,113 | 1,856 | 265 | 576 |
+| agent turn, first token | 3.37 s | 2.48 s | 18.4 s | 8.4 s |
 
-Writing speed is about the same (the agent session varied 64.5-71.1 between runs of the same configuration); short
-prompts are read faster and long ones slower. The answers are not bit-identical to one card's.
+With the helper Flash-Next writes 18-34% faster; IQ3_XXS reads long prompts ~12% slower, and UD-IQ4_XS (88 GB, the
+larger share of it read from the SSD on one card: the helper holds experts that would otherwise come from there) reads
+prompts about twice as fast.
+The answers are not bit-identical to one card's. Until 2026-10-24 the helper tier ran without the route tail skip
+(missed experts at the bottom of a token's routing are skipped, on by default on one card; docs/DETAILS.md); with it,
+agent turns on UD-IQ4_XS went from 19.2 to 23.7 tok/s (`tools/agent_turns_bench.py`, 8 turns, 2 rounds).
 
 The Qwen3.6 family (Qwen3.6, Ornith-1.5-35B, KAT-Coder) runs on two cards too, but only when asked: `--gpus a,b`
 (a layer split) or `--gpus a,b --helper-tier`. A second card is no clear gain there, because one 12 GB card already

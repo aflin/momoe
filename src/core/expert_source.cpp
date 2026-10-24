@@ -4945,7 +4945,10 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         const int tail_rank = tail_skip_rank();
         bool skip_d[kMaxWindowEntries];
         for (int q = 0; q < nd; ++q) skip_d[q] = false;
-        if (tail_rank > 0 && d.peer == nullptr && d.remote_count == 0) {
+        // (Momoe: with a helper GPU too, for the experts it does not hold - it was off there, which cost the helper tier
+        // the skip's +30% on agent turns: Flash-Next UD-IQ4_XS, RTX 4070 Ti + 3060 helper, 19.1 tok/s against 22.4 on the
+        // 4070 Ti alone; an expert the helper holds is never skipped)
+        if (tail_rank > 0 && d.peer == nullptr) {
             int minr[kMaxWindowEntries];
             for (int q = 0; q < nd; ++q) minr[q] = 99;
             for (int64_t i = 0; i < n; ++i) {
@@ -4957,6 +4960,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 const int32_t e = ids[distinct[q]];
                 if (e < 0 || e >= d.n_expert || minr[q] < tail_rank) continue;
                 if (d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e] >= 0) continue;   // resident
+                if (helper_holds(e)) continue;                                                          // (the helper's)
                 skip_d[q] = true;
                 --nmiss;
                 ++d.tail_experts;

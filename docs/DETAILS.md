@@ -1805,7 +1805,8 @@ Since 0.1.43 the same default holds on HIP for gfx1200 / gfx1201 (RDNA4), under 
 
 Where it applies: serve on a CUDA build with one GPU or a layer split (every stage skips by itself). Not applied, and no line printed: when every expert is
 in VRAM (nothing is missed), with `--batch` / `parallel` slots (a window then mixes requests, and one request's skip would depend on another's
-tokens: kept off until measured), with a peer-expert tier or a helper GPU, on HIP and SYCL builds, for the qwen35moe models (Qwen3.6-35B-A3B and its fine-tunes: measured
+tokens: kept off until measured), with a peer-expert tier (MoMoE: with a helper GPU too, for the experts the helper does not
+hold: agent turns 19.2 -> 23.7 tok/s, Flash-Next UD-IQ4_XS on an RTX 4070 Ti + 3060), on HIP and SYCL builds, for the qwen35moe models (Qwen3.6-35B-A3B and its fine-tunes: measured
 on Flash-Next's 10-of-512 routing only; `STRATA_ROUTE_TAIL_SKIP=7` turns it on there), and (0.1.42.1, #1884) when 90% or more
 of all the experts are in the GPU cache: the few misses are cheap there and the skip costs more draft acceptance than it saves (a Tesla V100 32 GB
 with Coder IQ1_M, 94.8% of the experts cached, 99.9% decode hits: draft acceptance 70.1% to 68.2%, decode 1-2% slower than 0.1.41). A start-up line
