@@ -2807,7 +2807,50 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
     return res;
 }
 
-static void ggml_cuda_graph_update_executable(ggml_backend_cuda_context * cuda_ctx, const void * graph_key) {
+// Momoe: a graph's executable that does not fit in the free VRAM (cudaErrorMemoryAllocation: the graphs a long agent
+// session keeps took the room left beside the expert pool - Flint on a 12 GB card, the margin used up after ~50 requests,
+// the engine aborted) frees the other graphs' executables (each is made again from its captured graph at its next use)
+// and is made again.  false: it still does not fit - the caller runs this graph's kernels directly, and the graph is not
+// captured again until ggml drops it (unused for 10 s).
+static bool momoe_graph_instantiate(ggml_backend_cuda_context * cuda_ctx, ggml_cuda_graph * graph) {
+    cudaError_t err = cudaGraphInstantiate(&graph->instance, graph->graph, NULL, NULL, 0);
+    if (err != cudaErrorMemoryAllocation) {
+        CUDA_CHECK(err);
+        return true;
+    }
+    (void) cudaGetLastError();
+    graph->instance = nullptr;
+    int freed = 0;
+    for (auto & [key, g] : cuda_ctx->cuda_graphs) {
+        if (g.get() != graph && g->instance != nullptr) {
+            CUDA_CHECK(cudaGraphExecDestroy(g->instance));
+            g->instance = nullptr;
+            ++freed;
+        }
+    }
+    err = cudaGraphInstantiate(&graph->instance, graph->graph, NULL, NULL, 0);
+    static int said = 0;
+    if (err == cudaSuccess) {
+        if (said++ < 4) {
+            GGML_LOG_WARN("momoe: a CUDA graph's executable did not fit in the free VRAM: %d other graphs' executables "
+                          "freed (made again when next used), and it fits now\n", freed);
+        }
+        return true;
+    }
+    if (err != cudaErrorMemoryAllocation) {
+        CUDA_CHECK(err);
+    }
+    (void) cudaGetLastError();
+    graph->instance = nullptr;
+    graph->disable_due_to_oom = true;
+    if (said++ < 4) {
+        GGML_LOG_WARN("momoe: a CUDA graph's executable does not fit in the free VRAM even with %d others freed: this "
+                      "graph runs its kernels directly (a little slower) until it is dropped\n", freed);
+    }
+    return false;
+}
+
+static bool ggml_cuda_graph_update_executable(ggml_backend_cuda_context * cuda_ctx, const void * graph_key) {
     ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
 
 #if CUDART_VERSION >= 12000
@@ -2829,10 +2872,11 @@ static void ggml_cuda_graph_update_executable(ggml_backend_cuda_context * cuda_c
         (void)cudaGetLastError();
         CUDA_CHECK(cudaGraphExecDestroy(graph->instance));
         graph->instance = nullptr;
-        CUDA_CHECK(cudaGraphInstantiate(&graph->instance, graph->graph, NULL, NULL, 0));
+        return momoe_graph_instantiate(cuda_ctx, graph);   // (Momoe: false when it does not fit)
     } else {
         GGML_ASSERT(stat == cudaSuccess);
     }
+    return true;
 }
 #endif // USE_CUDA_GRAPH
 
@@ -4793,11 +4837,18 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
 
     if (use_cuda_graph) {
         ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
-        if (graph->instance == nullptr) { // Create executable graph from captured graph.
-            CUDA_CHECK(cudaGraphInstantiate(&graph->instance, graph->graph, NULL, NULL, 0));
+        // Create executable graph from captured graph (Momoe: when it does not fit in the free VRAM, the kernels the
+        // capture recorded run directly instead: nothing ran yet, the capture only recorded them)
+        bool fits = true;
+        if (graph->instance == nullptr) {
+            fits = momoe_graph_instantiate(cuda_ctx, graph);
         }
-        if (cuda_graph_update_required) { // Update graph executable
-            ggml_cuda_graph_update_executable(cuda_ctx, graph_key);
+        if (fits && cuda_graph_update_required) { // Update graph executable
+            fits = ggml_cuda_graph_update_executable(cuda_ctx, graph_key);
+        }
+        if (!fits) {
+            ggml_cuda_graph_evaluate_and_capture(cuda_ctx, cgraph, false, false, graph_key);
+            return;
         }
         // Launch graph
         CUDA_CHECK(cudaGraphLaunch(graph->instance, cuda_ctx->stream()));
