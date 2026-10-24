@@ -136,7 +136,9 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 Writing speed in tokens per second. llama.cpp is shown at the best of the placements tried: "N on CPU" is
 `--n-cpu-moe N` (the experts of N layers in RAM); "MoE cache G" is `--cpu-moe --moe-cache-mib` (every expert in RAM, a
 cache of G on the GPU, llama.cpp's own expert cache since 2026-10-07). \* = drafting, both sides with the same MTP
-layer. "MoMoE" is with setup's config.
+layer. "MoMoE" is with setup's config, on the same prompt as llama.cpp's, not the one in the table above, so with
+drafting (\*) it can differ from it: how many drafted tokens are kept depends on the text (on this chat 85-89%, so
+the PC's Flash-Next wrote 65.5-76.7 here against 57.9 above).
 
 | Model | MoMoE | llama.cpp |
 | --- | ---: | ---: |
@@ -144,7 +146,7 @@ layer. "MoMoE" is with setup's config.
 | Qwen3.8-Flash-Next IQ3_XXS | 65.5-76.7* | 23.1 (MoE cache 5 GiB; its default fit 22.5) |
 | Ornith-1.5-35B-A3B IQ4_XS | 131.6-153.5* | 77.8 (MoE cache 8 GiB; its default fit 57.2; drafting 63.5*) |
 | Ornith-1.5-122B-A10B UD-IQ3_XXS | 19.2 | 4.62 (48 on CPU) |
-| Nemotron 3.5 Bolt UD-IQ3_XXS | 30.0 (server, sampled 30.6) | 26.2 (26.1) |
+| Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 (server 30.0, sampled 30.6) | 26.2 (26.1) |
 | Nemotron 3.5 Lightning UD-IQ3_XXS / UD-Q4_K_XL | 71.1 / 38.7 | 65.3 (24 on CPU) / 40.2 (36) |
 | Gemma 4 26B-A4B UD-IQ3_XXS / UD-Q4_K_XL | 92.4 / 75.2 | 90.5 at 32K context (4 on CPU) / 54.8 (11) |
 | Flint UD-IQ3_XXS / UD-Q4_K_XL | 89.9 / 65.7 | 102.6 (15 on CPU) / 58.5 (30) |
