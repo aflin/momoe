@@ -55,7 +55,7 @@ class Warn(unittest.TestCase):
         text = self.said(1024, 93700)
         self.assertIn("93700 image tokens", text)
         self.assertIn("limit of 1024", text)
-        self.assertIn("warmed up at N image tokens", text)
+        self.assertIn("does not apply the limit", text)   # (MoMoE: Bolt's reader by design)
 
     def test_a_picture_within_four_times_the_limit_is_quiet(self):
         self.assertEqual(self.said(1024, 1024), "")

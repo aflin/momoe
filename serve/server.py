@@ -2613,9 +2613,11 @@ class Vision:
         stderr has the warm-up line).  A reader built before the limit was enforced inside it (strata-vision refuses these now) still lets them by."""
         limit = getattr(self, "max_tokens", 0)
         if limit and tokens > 4 * limit:
-            print(f"[strata] images: one picture became {tokens} image tokens, more than 4 times the limit of {limit} (vision.max_tokens); "
-                  "the picture reader is not applying its limit. Update the engine, and send the line 'strata-vision: warmed up at N image "
-                  "tokens' from the reader's log with the report", flush=True)
+            # (MoMoE: Nemotron 3.5 Bolt's encoder does not apply the limit by design - a wide diagram: 3,239 tokens under 300 - and the
+            # reader refuses a picture only past 16 times it)
+            print(f"[momoe] images: one picture became {tokens} image tokens, more than 4 times the limit of {limit} "
+                  "(vision.max_tokens): this model's picture reader does not apply the limit (it refuses a picture only past 16 "
+                  "times it); the picture takes that much of the context", flush=True)
 
     def close(self):
         proc, self.proc = self.proc, None
