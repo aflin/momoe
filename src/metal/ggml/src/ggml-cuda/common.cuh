@@ -1276,6 +1276,7 @@ struct ggml_cuda_graph {
     size_t num_nodes = 0;
     std::vector<cudaGraphNode_t> nodes;
     bool disable_due_to_gpu_arch = false;
+    bool disable_due_to_oom = false;   // Momoe: its executable did not fit in the free VRAM: runs without a CUDA graph
     bool warmup_complete = false;
     uint64_t uid = 0;
     int64_t last_used_time = 0;
@@ -1291,7 +1292,7 @@ struct ggml_cuda_graph {
         // Momoe: read each time, not once: momoe-cuda sets it after loading (it knows then whether the token is one
         // graph), and the scheduler's reserve has asked before that
         const bool disable_cuda_graphs_due_to_env = (getenv("GGML_CUDA_DISABLE_GRAPHS") != nullptr);
-        return !(disable_due_to_gpu_arch || disable_cuda_graphs_due_to_env);
+        return !(disable_due_to_gpu_arch || disable_due_to_oom || disable_cuda_graphs_due_to_env);
     }
 #endif
 };
