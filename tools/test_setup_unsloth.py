@@ -663,7 +663,7 @@ class LayerSplit(unittest.TestCase):
                     mock.patch.object(setup, "ensure_engine_for", lambda cards, path, cfg, yes: cfg), \
                     mock.patch.object(setup, "is_wsl", lambda: False), \
                     mock.patch.object(setup.subprocess, "call", call):
-                code, out, asked = run(setup.start, p, None, list(gpu) if gpu else None, False, offered is None,
+                code, out, asked = run(setup.start, p, None, list(gpu) if gpu else None, offered is None,
                                        stdin=offered)
             return code, out, json.loads(p.read_text()), call.called
 

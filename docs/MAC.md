@@ -58,7 +58,7 @@ The config uses the Mac defaults: `--spec 2` and the Q8_0 hyper-connection read 
 - the Anthropic API on `/v1/messages`;
 - the chat page on `http://127.0.0.1:8080/`.
 
-Options: `--model Q2_0|IQ3_XXS|IQ3_S|UD-Q4_K_XL|UD-Q5_K_XL|UD-Q6_K_XL` (the UD files are Unsloth's), `--vision yes|no`, `--context N`, `--port`, `--host` / `--api-key`, `--draft-vocab`, `--no-browser`,
+Options: `--model Q2_0|IQ3_XXS|IQ3_S|UD-Q4_K_XL|UD-Q5_K_XL|UD-Q6_K_XL` (the UD files are Unsloth's), `--vision yes|no`, `--context N`, `--port`, `--host` / `--api-key`, `--draft-vocab`,
 `--data-dir`, `--models-dir`, `--gguf-dir`, `--setup` (another model or new settings), `--no-start`, `--check` (only
 check the Mac), `--build` (build the engine again).
 

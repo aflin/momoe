@@ -5464,7 +5464,7 @@ def write_config(path: Path, cfg: dict):
 
 
 # #629: the run config's keys setup writes itself (and rewrites on every setup run); any other key is the user's - a
-# "sampling" or "mcp_servers" block, "allowed_hosts", "cors_origins", "open_browser" - and is kept when setup runs again
+# "sampling" or "mcp_servers" block, "allowed_hosts", "cors_origins" - and is kept when setup runs again
 SETUP_KEYS = frozenset({"exe", "args", "cwd", "tokenizer", "model_name", "log", "lib_dirs", "port", "backend", "env",
                         "gpu", "gpus_asked", "layer_split", "host", "api_key", "draft_vocab", "vision"})
 SETUP_ENV = frozenset({"STRATA_HIPBLASLT_TUNING", "STRATA_ROCBLAS_TUNING", "STRATA_RESIDENT_PIN", "STRATA_NO_ARENA_THP", "STRATA_MMQ_KQ", "STRATA_HC_Q8",
@@ -5904,8 +5904,6 @@ def settings_summary(cfg: dict, port=None) -> str:
     srv = [f"{cfg.get('host', '127.0.0.1')}:{port or cfg.get('port', 8080)}"]
     if cfg.get("api_key"):
         srv.append("api key set")
-    if cfg.get("open_browser") is False:               # #609
-        srv.append("no browser")
     for k in ("gpu", "layer_split", "draft_vocab", "fit_max_tokens", "reasoning_budget_tokens", "anthropic_thinking"):
         if cfg.get(k) is not None:
             v = cfg[k]
@@ -5919,7 +5917,7 @@ def ggml_engine(cfg: dict) -> bool:
     return Path(cfg.get("exe", "")).name in ("momoe-metal", "momoe-cuda")
 
 
-def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_browser=True, yes=False,
+def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, yes=False,
           layer_split=None, keep=None, save=False) -> int:
     """keep: settings given on this start (--host, --api-key, --draft-vocab, --vram-reserve-mib).  Momoe: they apply
     to this start only (the server gets them as --config-override; the config file is left as it is), unless `save`
@@ -5936,8 +5934,7 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
             once["vram_reserve_mib"] = reserve
         if once:
             ok("this start only (--save keeps it): " + ", ".join(
-                "api key" if k == "api_key" else ("the browser opens" if v else "no browser") if k == "open_browser"
-                else f"{k.replace('_', ' ')} {v}" for k, v in once.items()))
+                "api key" if k == "api_key" else f"{k.replace('_', ' ')} {v}" for k, v in once.items()))
         keep, reserve = {}, None
     else:
         once = {}
@@ -5962,8 +5959,7 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
         cfg.update(keep)
         write_config(cfg_path, cfg)
         ok("saved for this model: " + ", ".join(
-            "api key" if k == "api_key" else ("the browser opens" if v else "no browser") if k == "open_browser"
-            else f"{k.replace('_', ' ')} {v}" for k, v in keep.items()))
+            "api key" if k == "api_key" else f"{k.replace('_', ' ')} {v}" for k, v in keep.items()))
     cfg_path.touch()                                     # the most recently used model
     if "--mtp" in cfg["args"][:-1]:
         refresh_draft_vocab(Path(cfg["args"][cfg["args"].index("--mtp") + 1]),
@@ -6040,7 +6036,6 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
             if not ggml_engine(cfg):
                 cfg = ensure_engine_for([g], cfg_path, cfg, yes)
             ok("GPU: " + gpu_name(g))
-    browser = False                                    # Momoe has no web page
     gb = 0.0
     if "--native" in cfg["args"]:
         try:
@@ -6555,10 +6550,10 @@ def use_cuda12(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
     return cfg
 
 
-def write_run_script(model, cfg_path, port, open_browser=True):
-    """run-<model>.bat / .sh: the server with this config; `open_browser` False (#609: --no-browser) leaves --open out."""
+def write_run_script(model, cfg_path, port):
+    """run-<model>.bat / .sh: the server with this config (Momoe has no web page to open: no --open)."""
     serve = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
-             "--port", str(port)] + (["--open"] if open_browser else [])
+             "--port", str(port)]
     if WIN:
         script = ROOT / f"run-{model.lower()}.bat"
         script.write_text("@echo off\r\ntitle Momoe " + model + "\r\ncd /d \"" + str(ROOT) + "\"\r\n" +
@@ -7511,8 +7506,6 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         cfg["host"] = a.host
     if a.api_key:
         cfg["api_key"] = a.api_key
-    if a.browser is not None:
-        cfg["open_browser"] = a.browser
     cfg["args"] = recommend_pool_workers(cfg["args"])   # --pool-workers: this engine path's CPU expert threads too
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     if vision != "none":
@@ -7535,7 +7528,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
             cfg["parallel"] = 1
             ok("parallel requests: one at a time (--parallel 1)")
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
-    script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
+    script = write_run_script(tag, cfg_path, port)
     ok(f"start script: {script.name}")
     say()
     say("All set.")
@@ -7658,11 +7651,6 @@ def main() -> int:
     ap.add_argument("--save", action="store_true",
                     help="momoe start: also write --host, --api-key, --draft-vocab and --vram-reserve-mib into the "
                          "config (without it they apply to this start only)")
-    ap.add_argument("--no-browser", dest="browser", action="store_false", default=None,
-                    help="do not open the chat page in the browser when the model is ready (for a harness or an app "
-                         "that uses the API; remembered for this model, also in run-<model>.bat/.sh)")
-    ap.add_argument("--browser", dest="browser", action="store_true",
-                    help="open the chat page again when the model is ready (the default; undoes --no-browser)")
     ap.add_argument("--data-dir", help="where the model files go (~20-120 GB): default this folder (models/, packs/, "
                                        "mtp/); a folder given here is remembered for every Momoe folder on this PC")
     ap.add_argument("--models-dir", help="where the GGUF files go (default: <data folder>/models)")
@@ -7814,7 +7802,7 @@ def main() -> int:
         if len(have) == 1:
             return start(have[0], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split, save=a.save,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
-                           "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
+                           "vram_reserve_mib": a.vram_reserve_mib})
         say()
         for i, c in enumerate(have, 1):
             say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
@@ -7823,7 +7811,7 @@ def main() -> int:
         if pick <= len(have):
             return start(have[pick - 1], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split, save=a.save,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
-                           "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
+                           "vram_reserve_mib": a.vram_reserve_mib})
 
     if a.family in GGML_FAMILIES:                    # Momoe's ggml engine (Bolt, GLM-5.3-Flash, LFM2.5)
         return momoe_setup(a, data, port, a.family)
@@ -8857,8 +8845,6 @@ def main() -> int:
         cfg["api_key"] = a.api_key
     if draft_vocab:
         cfg["draft_vocab"] = draft_vocab
-    if a.browser is not None:                          # #609: only when given (else an earlier choice is carried over)
-        cfg["open_browser"] = a.browser
     # #465: requests at once - written only when given (else an earlier "parallel" is carried over); a recommendation
     streaming = "--kv-resident" in args
     if a.parallel is not None:

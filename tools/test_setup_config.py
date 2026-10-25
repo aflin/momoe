@@ -172,35 +172,23 @@ class CarryOver(unittest.TestCase):
 
 
 class NoBrowser(unittest.TestCase):
-    """#609 (#631): --no-browser keeps the chat page from opening: "open_browser": false in the run config, no --open
-    on the start's server command or in run-<model>.bat/.sh.  Without the flag nothing changes."""
+    """Momoe has no web page: setup has no --browser / --no-browser, and neither run-<model>.bat/.sh nor a start
+    passes --open (an old config's "open_browser" changes nothing)."""
 
     def setUp(self):
         self.ram, self.found = PROFILES["64GB-1x32GB"]
 
-    def run_setup(self, *extra, configs=()):
-        return install(self.ram, self.found, ["--family", "qwen", "--model", "Q2_0", "--no-start", *extra],
-                       configs=configs)
-
-    def test_at_setup(self):
-        code, out, cfg, _ = self.run_setup("--no-browser")
-        self.assertEqual(code, 0, out)
-        self.assertIs(cfg["open_browser"], False)
-        code, out, cfg, _ = self.run_setup()
-        self.assertNotIn("open_browser", cfg)                             # not given: the config as before
-        # setup run again without the flag keeps the choice (#629); --browser undoes it
-        code, out, cfg, _ = self.run_setup(configs=[("strata-q2_0.json", {"open_browser": False})])
-        self.assertIs(cfg["open_browser"], False)
-        code, out, cfg, _ = self.run_setup("--browser", configs=[("strata-q2_0.json", {"open_browser": False})])
-        self.assertIs(cfg["open_browser"], True)
+    def test_the_flags_are_gone(self):
+        for flag in ("--no-browser", "--browser"):
+            with contextlib.redirect_stderr(io.StringIO()):
+                code, _, _, _ = install(self.ram, self.found, ["--family", "qwen", "--model", "Q2_0", "--no-start", flag])
+            self.assertEqual(code, 2, flag)                              # argparse: an unknown option
 
     def test_run_script(self):
         with tempfile.TemporaryDirectory() as d, unittest.mock.patch.object(setup, "ROOT", Path(d)):
-            text = lambda p: p.read_text(encoding="utf-8")   # noqa: E731
-            self.assertIn('"--open"', text(setup.write_run_script("Q2_0", Path(d) / "strata-q2_0.json", 8080)))
-            script = setup.write_run_script("Q2_0", Path(d) / "strata-q2_0.json", 8080, False)
-            self.assertNotIn("--open", text(script))
-            self.assertIn('"--port" "8080"', text(script))
+            text = setup.write_run_script("Q2_0", Path(d) / "strata-q2_0.json", 8080).read_text(encoding="utf-8")
+            self.assertNotIn("--open", text)
+            self.assertIn('"--port" "8080"', text)
 
     def start_cmd(self, cfg, keep=None):
         with tempfile.TemporaryDirectory() as d:
@@ -213,7 +201,7 @@ class NoBrowser(unittest.TestCase):
                     unittest.mock.patch.object(setup, "is_wsl", lambda: False), \
                     unittest.mock.patch.object(setup, "ensure_engine_for", lambda cards, path, c, yes: c), \
                     unittest.mock.patch.object(setup.subprocess, "call", call):
-                _, out = quiet(setup.start, p, None, None, True, True, None, keep)
+                _, out = quiet(setup.start, p, None, None, yes=True, keep=keep)
             return call.call_args[0][0], out, json.loads(p.read_text())
 
     def test_on_a_start(self):

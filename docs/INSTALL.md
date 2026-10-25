@@ -243,8 +243,6 @@ START-HERE.bat --port 8081                      another port
 START-HERE.bat --gpu 1                          another GPU (setup picks the one with the most VRAM)
 START-HERE.bat --gpus 0,2                       several GPUs sharing the model
 START-HERE.bat --vram-reserve-mib 2048          leave 2 GB of VRAM free for other programs (remembered)
-START-HERE.bat --no-browser                     do not open the chat page when the model is ready (remembered;
-                                                --browser undoes it)
 START-HERE.bat --setup --backend hip            the AMD engine on a PC that also has an NVIDIA card
 START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>     reachable from other devices, with a key
 START-HERE.bat --check                          only check this PC
