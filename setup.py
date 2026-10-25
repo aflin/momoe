@@ -5965,7 +5965,7 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, yes=F
         ok("saved for this model: " + ", ".join(
             "api key" if k == "api_key" else f"{k.replace('_', ' ')} {v}" for k, v in keep.items()))
     cfg_path.touch()                                     # the most recently used model
-    if "--mtp" in cfg["args"][:-1]:
+    if "--mtp" in cfg["args"][:-1] and not ggml_engine(cfg):   # (the ggml engine's --mtp is a count, no folder)
         refresh_draft_vocab(Path(cfg["args"][cfg["args"].index("--mtp") + 1]),
                             once.get("draft_vocab") or cfg.get("draft_vocab", "cjk"))
     if point_draft_vocab(cfg):
@@ -6467,11 +6467,13 @@ def point_draft_vocab(cfg: dict) -> bool:
     """Qwen3.6-35B-A3B: its draft layer is the model file's own, so the token subset is named by --mtp-draft-vocab
     (there is no MTP folder to copy it into, as refresh_draft_vocab does): pointed at the chosen subset ("draft_vocab",
     cjk by default) in this Strata folder's data/.  A file of the user's own (not a shipped subset's name) is kept.
-    True when the config changed."""
+    Momoe's ggml engine names it with --draft-vocab, changed only when the config has a "draft_vocab" (its setup
+    writes the file it chose, en by default).  True when the config changed."""
     a = cfg.get("args", [])
-    if "--mtp-draft-vocab" not in a[:-1]:
+    flag = "--draft-vocab" if ggml_engine(cfg) else "--mtp-draft-vocab"
+    if flag not in a[:-1] or (flag == "--draft-vocab" and not cfg.get("draft_vocab")):
         return False
-    i = a.index("--mtp-draft-vocab") + 1
+    i = a.index(flag) + 1
     new = str(ROOT / "data" / DRAFT_VOCABS.get(cfg.get("draft_vocab") or "cjk", "draft_vocab.bin"))
     if Path(a[i]).name not in DRAFT_VOCABS.values() or a[i] == new or not Path(new).exists():
         return False
@@ -7214,6 +7216,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
             cfg["args"].append("--helper-tier")
         elif cards and a.layer_split:
             cfg["layer_split"] = a.layer_split
+    if own_mtp and a.draft_vocab:                      # the subset chosen, for a later momoe start --draft-vocab
+        cfg["draft_vocab"] = a.draft_vocab
     if a.host:
         cfg["host"] = a.host
     if a.api_key:

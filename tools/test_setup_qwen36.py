@@ -685,6 +685,18 @@ class DraftVocabAtStart(unittest.TestCase):
         self.assertFalse(setup.point_draft_vocab(own))                    # a file of the user's own is kept
         self.assertFalse(setup.point_draft_vocab({"args": ["--mtp", "rt"]}))   # Flash-Next: refresh_draft_vocab
 
+    def test_the_ggml_engine_s_draft_vocab(self):
+        """momoe-cuda / momoe-metal name the subset with --draft-vocab: changed when the config (or this start's
+        --draft-vocab) names one; without, the file its setup chose stays (en by default)."""
+        data = setup.ROOT / "data"
+        en = str(data / "draft_vocab_en.bin")
+        cfg = {"exe": "/m/build-cuda/momoe-cuda", "args": ["-m", "x.gguf", "--mtp", "4", "--draft-vocab", en]}
+        self.assertFalse(setup.point_draft_vocab(dict(cfg, args=list(cfg["args"]))))
+        cfg["draft_vocab"] = "cyrillic"
+        self.assertTrue(setup.point_draft_vocab(cfg))
+        self.assertEqual(cfg["args"][-1], str(data / "draft_vocab_cyrillic.bin"))
+        self.assertEqual(cfg["args"][:4], ["-m", "x.gguf", "--mtp", "4"])
+
 
 if __name__ == "__main__":
     unittest.main()
