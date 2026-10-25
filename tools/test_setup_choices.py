@@ -444,6 +444,20 @@ class VramReserve(unittest.TestCase):
         self.assertIn("this start only (--save keeps it): vram reserve mib 512", out2)
         self.assertTrue(call.called)
 
+    def test_refused_for_the_ggml_engines(self):
+        """momoe-cuda / momoe-metal end at an option they do not know: the start says what to set instead."""
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "momoe-cuda"
+            exe.write_bytes(b"")
+            p = Path(d) / "lfm25.json"
+            p.write_text(json.dumps({"exe": str(exe), "args": ["-m", "x"], "gpu": 0}))
+            before = p.read_text()
+            for save in (False, True):
+                with mock.patch.object(setup.subprocess, "call", side_effect=AssertionError("started")):
+                    with self.assertRaises(SystemExit):
+                        quiet(setup.start, p, None, None, True, None, {"vram_reserve_mib": 2048}, save=save)
+            self.assertEqual(p.read_text(), before)
+
     def test_host_and_key_on_a_start(self):
         """Momoe: momoe start --host/--api-key apply to that start only; --save keeps them in the config."""
         with tempfile.TemporaryDirectory() as d:

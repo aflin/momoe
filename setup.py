@@ -5928,6 +5928,10 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, yes=F
         fail(f"{cfg_path.name} refers to missing files: {missing[0]}", "run it again with --setup to repair")
     keep = {k: v for k, v in (keep or {}).items() if v is not None}
     reserve = keep.pop("vram_reserve_mib", None)       # #493: an engine argument, kept in the config's args
+    if reserve is not None and ggml_engine(cfg):       # (momoe-cuda / momoe-metal end at an option they do not know)
+        fail(f"--vram-reserve-mib: {Path(cfg['exe']).name} does not take it",
+             "its expert pool leaves MOMOE_VRAM_MARGIN_MIB free (512 MiB; on a Mac MOMOE_METAL_MARGIN_MIB): set it in "
+             "the config's \"env\", for example \"env\": {\"MOMOE_VRAM_MARGIN_MIB\": \"2048\"}")
     if not save:                                       # Momoe: this start only, laid over the config at the launch
         once = {k: v for k, v in keep.items() if cfg.get(k) != v}
         if reserve is not None:

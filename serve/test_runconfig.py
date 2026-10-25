@@ -64,6 +64,8 @@ class Apply(unittest.TestCase):
             runconfig.apply(CFG, {"fit_max_tokens": True, "sampling.top_k": 0})
         with self.assertRaises(ValueError):
             runconfig.apply({**CFG, "vision": {"gpu": True}}, {"lazy_load": True})
+        with self.assertRaises(ValueError):                              # momoe-cuda / momoe-metal: no such option
+            runconfig.apply({**CFG, "exe": "/m/build-cuda/momoe-cuda"}, {"vram_reserve_mib": 2048})
 
     def test_view(self):
         v = runconfig.view({**CFG, "args": CFG["args"] + ["--vram-reserve-mib", "1500"]}, "x/strata-q2_0.json")
