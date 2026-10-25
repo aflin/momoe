@@ -6961,10 +6961,13 @@ def momoe_vision(a, family: str, fam: dict, folder: Path, model: Path, cuda: tup
         say("  The image encoder of Momoe's ggml engine runs on the CPU (--vision gpu is read as yes)")
     url, name, size, sha = mm
     f = folder / name
-    if not (f.exists() and done(f)):
+    own = getattr(a, "gguf_dir", None)
+    if own and not f.exists():
+        fail(f"{f} is missing (the image encoder)", f"put {name} in {folder}, or drop --gguf-dir to download it")
+    if not own and not (f.exists() and done(f)):
         download(url, f, pin=(size, sha) if size and sha else None)
     if sha:
-        verify_sha256(f, size, sha)
+        verify_sha256(f, size, sha, own=bool(own))
     enc = build_momoe_vision(cuda)
     ok("images: on (the encoder on the " + ("GPU)" if on_gpu else "CPU)"))
     n = getattr(a, "vision_tokens", None)              # --vision-tokens N: the most image tokens a picture becomes
@@ -7105,13 +7108,20 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         ok(f"{exe} (CUDA {ver[0]}.{ver[1]}, sm {archs.replace(';', ', ')})")
 
     tag = fam["tag"] + size_of(q)
-    folder = Path(a.models_dir) / tag
+    own = getattr(a, "gguf_dir", None)                 # --gguf-dir: GGUF files you already have, never downloaded
+    folder = Path(own) if own else Path(a.models_dir) / tag
     paths = [folder / f[1] for f in files]
     known = sum(f[2] or 0 for f in files)
-    step(3, f"downloading {fam['title']} {size_of(q)}"
+    step(3, f"{'checking' if own else 'downloading'} {fam['title']} {size_of(q)}"
             + (f" ({known / 1e9:.1f} GB" + (f", {len(files)} files)" if len(files) > 1 else ")") if known else ""))
-    say(f"  The model goes in {folder}")
+    say(f"  The model {'files are' if own else 'goes'} in {folder}")
     for (url, name, size, sha), f in zip(files, paths):
+        if own:                                        # (setup never deletes or rewrites a file of yours)
+            if not f.exists():
+                fail(f"{f} is missing", f"put {name} in {folder}, or drop --gguf-dir to download it")
+            if sha:
+                verify_sha256(f, size, sha, own=True)
+            continue
         if not (f.exists() and done(f)):
             # the original Flash-Next's shard 2 is the same file for all its sizes and the Coder's: one already here
             other = [p for p in Path(a.models_dir).glob("*/Qwen3.8-Flash-Next-GSQ-RCO-*-00002-of-00002.gguf") if done(p)]

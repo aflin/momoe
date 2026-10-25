@@ -234,6 +234,13 @@ class Routing(unittest.TestCase):
         cfg = self.run_setup(self.TWO, {"gpus": "0,1", "layer_split": "18"}, "bolt")
         self.assertEqual((cfg["gpu"], cfg["layer_split"]), ([0, 1], "18"))
 
+    def test_gguf_dir_uses_your_files(self):
+        with mock.patch.object(setup, "download", side_effect=AssertionError("downloaded")), \
+                mock.patch.object(setup, "verify_sha256") as verify:
+            cfg = self.run_setup(self.TWO, {"gguf_dir": "/g"}, "lfm25")
+        self.assertTrue(cfg["args"][cfg["args"].index("-m") + 1].startswith(str(Path("/g")) + "/"), cfg["args"])
+        self.assertTrue(all(c.kwargs.get("own") for c in verify.call_args_list), verify.call_args_list)
+
     def test_a_card_takes_a_ggml_family(self):
         calls = self.run_main("linux", self.CARD, ["--family", "lfm25"])
         self.assertEqual(calls[0][3], "lfm25")

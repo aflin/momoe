@@ -77,7 +77,7 @@ class OptIn(unittest.TestCase):
                     mock.patch.object(setup, "build_momoe_vision", return_value=Path("/x/momoe-vision")):
                 (folder / name).write_bytes(b"")
                 v = quiet(setup.momoe_vision, a, "gemma4", setup.GGML_FAMILIES["gemma4"], folder, folder / "m.gguf")
-            verify.assert_called_once_with(folder / name, size, sha)
+            verify.assert_called_once_with(folder / name, size, sha, own=False)
         self.assertEqual(v["mmproj"], str(folder / name))
         self.assertEqual(v["model"], str(folder / "m.gguf"))
         self.assertFalse(v["gpu"])
