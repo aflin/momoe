@@ -262,6 +262,7 @@ momoe remove ornith-8gb               # delete a model: its GGUF, its pack, the 
   shows the port. The server listens on 127.0.0.1 only. To reach it from another device, give `--host` together with
   `--api-key`, for example `momoe start ornith-8gb --host 0.0.0.0 --api-key KEY`. They apply to that start only; add
   `--save` to keep them in the config.
+- **Every option** of `momoe`, setup, the config file and the engines: [docs/OPTIONS.md](docs/OPTIONS.md).
 
 ### Logs
 
