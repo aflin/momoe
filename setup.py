@@ -1257,14 +1257,13 @@ def hybrid_pool_workers(cores) -> int | None:
 
 
 def recommend_pool_workers(args: list) -> list:
-    """`args` with setup's recommended `--pool-workers` for a hybrid CPU, unless they set one already (a calibration's
-    measured count, or the user's own).  A recommendation: the config line can be edited or removed."""
+    """`args` with setup's recommended `--pool-workers` for a hybrid CPU, unless they set one already (the user's own).  A recommendation: the config line can be edited or removed."""
     n = hybrid_pool_workers(cpu_cores())
     if n is None or "--pool-workers" in args:
         return args
     p, e = cpu_cores()
     ok(f"hybrid CPU ({p} performance + {e} efficiency cores): {n} CPU expert workers - the performance cores and half "
-       "of the efficiency cores (--pool-workers in the config; START-HERE --calibrate measures it on this PC)")
+       "of the efficiency cores (--pool-workers in the config)")
     return [*args, "--pool-workers", str(n)]
 
 
@@ -1317,7 +1316,7 @@ def two_socket_note(sockets) -> list[str]:
     n = sockets[1] - 1
     return [f"tip: this PC has {sockets[0]} CPU sockets of {sockets[1]} cores. Expert workers on the other socket have "
             f"been measured slower than fewer, local ones (35 vs 17-18 on 2-socket Xeons): try --pool-workers {n} in "
-            "the config's args (START-HERE --calibrate measures it on this PC)"]
+            "the config's args"]
 
 
 def cpu_info():
@@ -5283,11 +5282,6 @@ def load_settings() -> dict:
     try:
         return json.loads(settings_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        pass
-    try:                                               # first run: Strata's calibrations carry over, nothing else
-        old = json.loads(settings_path("strata").read_text(encoding="utf-8"))
-        return {"calibration": old["calibration"]} if isinstance(old.get("calibration"), dict) else {}
-    except (OSError, ValueError, AttributeError):
         return {}
 
 
@@ -5470,7 +5464,7 @@ def write_config(path: Path, cfg: dict):
 
 
 # #629: the run config's keys setup writes itself (and rewrites on every setup run); any other key is the user's - a
-# "sampling" or "mcp_servers" block, "allowed_hosts", "cors_origins", "open_browser" - and is kept when setup runs again
+# "sampling" or "mcp_servers" block, "allowed_hosts", "cors_origins" - and is kept when setup runs again
 SETUP_KEYS = frozenset({"exe", "args", "cwd", "tokenizer", "model_name", "log", "lib_dirs", "port", "backend", "env",
                         "gpu", "gpus_asked", "layer_split", "host", "api_key", "draft_vocab", "vision"})
 SETUP_ENV = frozenset({"STRATA_HIPBLASLT_TUNING", "STRATA_ROCBLAS_TUNING", "STRATA_RESIDENT_PIN", "STRATA_NO_ARENA_THP", "STRATA_MMQ_KQ", "STRATA_HC_Q8",
@@ -5709,20 +5703,6 @@ def choices_from_config(cfg_path: Path) -> dict:
                 vis is None or int(val("--vram-reserve-mib")) != VISION["gpu"]["reserve_mib"]) else None}
 
 
-def calibration_targets(have: list, model: str | None, family: str | None) -> list:
-    """#2036: the installed configs `--calibrate --model X` (and/or --family) means; every config with neither."""
-    if not (model or family):
-        return [c for c in have if choices_from_config(c)["family"] not in OWN_PATH_FAMILIES]
-    out = []
-    for c in have:
-        ch = choices_from_config(c)
-        if ch["family"] in OWN_PATH_FAMILIES:          # the tuning measures Flash-Next's engine settings
-            continue
-        if (not model or ch["model"] == model) and (not family or ch["family"] == family):
-            out.append(c)
-    return out
-
-
 def find_in(roots: list, rel: str):
     """The first of roots/rel that exists."""
     for r in roots:
@@ -5828,32 +5808,9 @@ def rotational_disk(path) -> str | None:
     return None
 
 
-def hip_config_cards(sel) -> list[dict]:
-    """#566: the AMD cards a HIP config runs on - its "gpu" (one index or a list) in HIP's numbering, as amd_gpus
-    lists them; no "gpu": the supported card with the most VRAM, as setup picks it.  Each card's name carries its
-    architecture (an RX 7900 XTX and an RX 7900 XT are both gfx1100; a card without a product name in sysfs is known
-    by its arch only).  A card that is not found is {} (the key then says "?")."""
-    amd = amd_gpus()
-    if sel is None:
-        usable = [g for g in amd if amd_problem(g) is None]
-        sel = min(usable, key=amd_rank)["index"] if usable else None
-    byid = {g["index"]: g for g in amd}
-    cards = []
-    for i in (sel if isinstance(sel, list) else [sel]):
-        g = byid.get(i)
-        if g is None:
-            cards.append({})
-            continue
-        arch = g.get("arch") or ""
-        name = g.get("name") or "?"
-        cards.append({**g, "name": name if not arch or arch in name else f"{name} ({arch})"})
-    return cards
-
-
 def gpu_sel(value) -> list:
     """A config's "gpu" as a list of card numbers: 0, [0, 2] or the string form "0,2" (which serve splits
-    the same way).  [] when it names none.  Without this, a string "0,1" reached gpu_info() whole and
-    calibrate died with "there is no GPU 0,1" on a dual-GPU config."""
+    the same way).  [] when it names none."""
     if value is None or value == "":
         return []
     items = value if isinstance(value, (list, tuple)) else str(value).split(",")
@@ -5864,80 +5821,6 @@ def gpu_sel(value) -> list:
             continue
         sel.append(int(x) if x.isdigit() else x)
     return sel
-
-
-def hardware_key(cfg: dict) -> str:
-    """What a calibration is valid for: this GPU, CPU and RAM, and the model with its context and images setting
-    (the context's KV cache and the image encoder take VRAM from the expert cache).  #566: a HIP config's cards are
-    AMD's (hip_config_cards) - nvidia-smi's list named them "?" (or another card with that number) before."""
-    sel = cfg.get("gpu")
-    if isinstance(sel, str):
-        sel = gpu_sel(sel)
-    if cfg.get("backend") == "hip":
-        gl = hip_config_cards(sel)
-    else:
-        gl = [gpu_info(i) or {} for i in sel] if isinstance(sel, list) else [gpu_info(sel) or {}]
-    g = {"name": " + ".join(x.get("name", "?") for x in gl), "vram_gb": sum(x.get("vram_gb", 0) for x in gl)}
-    a = cfg.get("args", [])
-    ctx = a[a.index("--max-context") + 1] if "--max-context" in a else "?"
-    return "|".join([g.get("name", "?"), f"{g.get('vram_gb', 0):.0f}GB", cpu_info()[0], f"{ram_gb():.0f}GB",
-                     cfg.get("model_name", "?"), ctx, "images" if "--vision" in a else "text"])
-
-
-def calibrate_config(cfg_path: Path) -> bool:
-    """Measure the engine's hardware-dependent settings on this PC (tools/calibrate.py), write them into the run
-    config and remember them per PC and model in the settings file, so an update or a reinstall keeps them."""
-    sys.path.insert(0, str(ROOT / "tools"))
-    import calibrate as CAL
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
-    say()
-    say("  Tuning Momoe for this PC: the output speed is measured with a few engine settings (the PCIe share, the")
-    say("  draft depth, the CPU threads, the expert cache; on two or more cards also the prompt chunks). It takes")
-    say("  roughly 15-30 minutes (3 rounds of each value); the PC is busy meanwhile.")
-    try:
-        since = os.path.getsize(cfg["log"]) if cfg.get("log") and os.path.isfile(cfg["log"]) else 0
-    except OSError:
-        since = 0
-    try:
-        res = CAL.run(cfg, say=say)
-    except Exception as e:                             # never stops an install: the defaults stay
-        warn(f"the tuning did not finish ({e}): the default settings stay")
-        why = CAL.engine_error(cfg.get("log"), since)  # #447: the engine's own reason, not only "see the log"
-        if why:
-            say(f"       the engine said: {why}")
-        return False
-    cfg["args"] = CAL.apply(cfg["args"], res["settings"])
-    if "env" in res:                                   # HIP: the engine variables it measured (STRATA_SH_STREAM)
-        cfg["env"] = CAL.apply_env(cfg.get("env"), res["env"])
-    write_config(cfg_path, cfg)
-    st = load_settings()
-    st.setdefault("calibration", {})[hardware_key(cfg)] = {"settings": res["settings"], "env": res.get("env") or {},
-                                                           "tok_s": res["report"].get("tok_s"),
-                                                           "date": time.strftime("%Y-%m-%d")}
-    save_settings(st)
-    chosen = {**res["settings"], **(res.get("env") or {})}
-    if chosen:
-        ok("tuned for this PC: " + ", ".join(f"{k} {v}" if k.startswith("--") else f"{k}={v}" for k, v in chosen.items())
-           + (f" ({res['report']['tok_s']} tok/s)" if res["report"].get("tok_s") else ""))
-    else:
-        ok("tuned for this PC: the default settings are already the fastest here"
-           + (f" ({res['report']['tok_s']} tok/s)" if res["report"].get("tok_s") else ""))
-    return True
-
-
-def saved_calibration(cfg: dict) -> dict | None:
-    """The settings an earlier calibration found for this PC and model, if any."""
-    return (load_settings().get("calibration") or {}).get(hardware_key(cfg))
-
-
-def setup_calibration(cfg: dict, hip: bool) -> dict | None:
-    """The calibration a (re-)install applies to its new config: the one saved for this PC and model.  #566: on Linux
-    HIP too - hardware_key now names the AMD cards, so a `./setup.sh --calibrate` run is matched to its card and
-    model.  Windows HIP keeps the defaults for now (not tried there).  Setup still offers the tuning itself on NVIDIA
-    only: each control is verified on HIP first."""
-    if hip and WIN:
-        return None
-    return saved_calibration(cfg)
 
 
 def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
@@ -6021,8 +5904,6 @@ def settings_summary(cfg: dict, port=None) -> str:
     srv = [f"{cfg.get('host', '127.0.0.1')}:{port or cfg.get('port', 8080)}"]
     if cfg.get("api_key"):
         srv.append("api key set")
-    if cfg.get("open_browser") is False:               # #609
-        srv.append("no browser")
     for k in ("gpu", "layer_split", "draft_vocab", "fit_max_tokens", "reasoning_budget_tokens", "anthropic_thinking"):
         if cfg.get(k) is not None:
             v = cfg[k]
@@ -6036,7 +5917,7 @@ def ggml_engine(cfg: dict) -> bool:
     return Path(cfg.get("exe", "")).name in ("momoe-metal", "momoe-cuda")
 
 
-def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_browser=True, yes=False,
+def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, yes=False,
           layer_split=None, keep=None, save=False) -> int:
     """keep: settings given on this start (--host, --api-key, --draft-vocab, --vram-reserve-mib).  Momoe: they apply
     to this start only (the server gets them as --config-override; the config file is left as it is), unless `save`
@@ -6047,14 +5928,17 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
         fail(f"{cfg_path.name} refers to missing files: {missing[0]}", "run it again with --setup to repair")
     keep = {k: v for k, v in (keep or {}).items() if v is not None}
     reserve = keep.pop("vram_reserve_mib", None)       # #493: an engine argument, kept in the config's args
+    if reserve is not None and ggml_engine(cfg):       # (momoe-cuda / momoe-metal end at an option they do not know)
+        fail(f"--vram-reserve-mib: {Path(cfg['exe']).name} does not take it",
+             "its expert pool leaves MOMOE_VRAM_MARGIN_MIB free (512 MiB; on a Mac MOMOE_METAL_MARGIN_MIB): set it in "
+             "the config's \"env\", for example \"env\": {\"MOMOE_VRAM_MARGIN_MIB\": \"2048\"}")
     if not save:                                       # Momoe: this start only, laid over the config at the launch
         once = {k: v for k, v in keep.items() if cfg.get(k) != v}
         if reserve is not None:
             once["vram_reserve_mib"] = reserve
         if once:
             ok("this start only (--save keeps it): " + ", ".join(
-                "api key" if k == "api_key" else ("the browser opens" if v else "no browser") if k == "open_browser"
-                else f"{k.replace('_', ' ')} {v}" for k, v in once.items()))
+                "api key" if k == "api_key" else f"{k.replace('_', ' ')} {v}" for k, v in once.items()))
         keep, reserve = {}, None
     else:
         once = {}
@@ -6079,10 +5963,9 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
         cfg.update(keep)
         write_config(cfg_path, cfg)
         ok("saved for this model: " + ", ".join(
-            "api key" if k == "api_key" else ("the browser opens" if v else "no browser") if k == "open_browser"
-            else f"{k.replace('_', ' ')} {v}" for k, v in keep.items()))
+            "api key" if k == "api_key" else f"{k.replace('_', ' ')} {v}" for k, v in keep.items()))
     cfg_path.touch()                                     # the most recently used model
-    if "--mtp" in cfg["args"][:-1]:
+    if "--mtp" in cfg["args"][:-1] and not ggml_engine(cfg):   # (the ggml engine's --mtp is a count, no folder)
         refresh_draft_vocab(Path(cfg["args"][cfg["args"].index("--mtp") + 1]),
                             once.get("draft_vocab") or cfg.get("draft_vocab", "cjk"))
     if point_draft_vocab(cfg):
@@ -6157,7 +6040,6 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open_
             if not ggml_engine(cfg):
                 cfg = ensure_engine_for([g], cfg_path, cfg, yes)
             ok("GPU: " + gpu_name(g))
-    browser = False                                    # Momoe has no web page
     gb = 0.0
     if "--native" in cfg["args"]:
         try:
@@ -6585,11 +6467,13 @@ def point_draft_vocab(cfg: dict) -> bool:
     """Qwen3.6-35B-A3B: its draft layer is the model file's own, so the token subset is named by --mtp-draft-vocab
     (there is no MTP folder to copy it into, as refresh_draft_vocab does): pointed at the chosen subset ("draft_vocab",
     cjk by default) in this Strata folder's data/.  A file of the user's own (not a shipped subset's name) is kept.
-    True when the config changed."""
+    Momoe's ggml engine names it with --draft-vocab, changed only when the config has a "draft_vocab" (its setup
+    writes the file it chose, en by default).  True when the config changed."""
     a = cfg.get("args", [])
-    if "--mtp-draft-vocab" not in a[:-1]:
+    flag = "--draft-vocab" if ggml_engine(cfg) else "--mtp-draft-vocab"
+    if flag not in a[:-1] or (flag == "--draft-vocab" and not cfg.get("draft_vocab")):
         return False
-    i = a.index("--mtp-draft-vocab") + 1
+    i = a.index(flag) + 1
     new = str(ROOT / "data" / DRAFT_VOCABS.get(cfg.get("draft_vocab") or "cjk", "draft_vocab.bin"))
     if Path(a[i]).name not in DRAFT_VOCABS.values() or a[i] == new or not Path(new).exists():
         return False
@@ -6672,10 +6556,10 @@ def use_cuda12(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
     return cfg
 
 
-def write_run_script(model, cfg_path, port, open_browser=True):
-    """run-<model>.bat / .sh: the server with this config; `open_browser` False (#609: --no-browser) leaves --open out."""
+def write_run_script(model, cfg_path, port):
+    """run-<model>.bat / .sh: the server with this config (Momoe has no web page to open: no --open)."""
     serve = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
-             "--port", str(port)] + (["--open"] if open_browser else [])
+             "--port", str(port)]
     if WIN:
         script = ROOT / f"run-{model.lower()}.bat"
         script.write_text("@echo off\r\ntitle Momoe " + model + "\r\ncd /d \"" + str(ROOT) + "\"\r\n" +
@@ -7077,15 +6961,30 @@ def momoe_vision(a, family: str, fam: dict, folder: Path, model: Path, cuda: tup
         say("  The image encoder of Momoe's ggml engine runs on the CPU (--vision gpu is read as yes)")
     url, name, size, sha = mm
     f = folder / name
-    if not (f.exists() and done(f)):
+    own = getattr(a, "gguf_dir", None)
+    if own and not f.exists():
+        fail(f"{f} is missing (the image encoder)", f"put {name} in {folder}, or drop --gguf-dir to download it")
+    if not own and not (f.exists() and done(f)):
         download(url, f, pin=(size, sha) if size and sha else None)
     if sha:
-        verify_sha256(f, size, sha)
+        verify_sha256(f, size, sha, own=bool(own))
     enc = build_momoe_vision(cuda)
     ok("images: on (the encoder on the " + ("GPU)" if on_gpu else "CPU)"))
-    v = {"exe": str(enc), "mmproj": str(f), "model": str(model), "gpu": on_gpu, "max_tokens": 300}
-    if family in QWEN35_VISION:
-        v["max_tokens"] = v["min_tokens"] = QWEN35_VISION_TOKENS
+    n = getattr(a, "vision_tokens", None)              # --vision-tokens N: the most image tokens a picture becomes
+    if n is not None and n < 1:
+        fail(f"--vision-tokens {n}: give a number of tokens, 1 or more")
+    v = {"exe": str(enc), "mmproj": str(f), "model": str(model), "gpu": on_gpu, "max_tokens": n or 300}
+    if family in QWEN35_VISION:                        # (at 300 they misread text in a picture; mtmd asks for 1,024)
+        if n is not None and n < QWEN35_VISION_TOKENS:
+            warn(f"--vision-tokens {n}: {fam['title']} needs at least {QWEN35_VISION_TOKENS} to read text in a picture: "
+                 f"{QWEN35_VISION_TOKENS}")
+        v["max_tokens"] = max(n or 0, QWEN35_VISION_TOKENS)
+        v["min_tokens"] = QWEN35_VISION_TOKENS
+    elif family == "gemma4" and v["max_tokens"] > 512:  # a Gemma 4 picture is read in one batch: none larger
+        warn(f"--vision-tokens {n}: Gemma 4 reads a picture in one batch of at most 512 tokens: 512")
+        v["max_tokens"] = 512
+    if n is not None:
+        ok(f"images: up to {v['max_tokens']} image tokens per picture (--vision-tokens)")
     if not on_gpu:
         v["threads"] = max(1, (os.cpu_count() or 8) // 2)
     return v
@@ -7130,6 +7029,14 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         ram = ram_gb()
         unified = gpu.get("unified", False)
         say(f"  {gpu_name(gpu)}; {ram:.0f} GB of RAM" + (" shared with the GPU" if unified else ""))
+    if a.check:                                        # only this machine and what fits it: nothing is installed
+        say()
+        for f in (family,) if family else MOMOE_MENU:
+            q = momoe_size(f, a.model if family else None, ram)
+            need = momoe_sizes(f)[q][1]
+            say(f"  {momoe_title(f):28s} {size_of(q):11s} needs ~{need} GB: "
+                + ("fits" if need <= ram else f"this machine has {ram:.0f} GB: experts read from the SSD (slower)"))
+        return 0
     family = family or momoe_menu(a, ram)
     if family in FAMILIES and FAMILIES[family].get("ready"):
         fail(f"{FAMILIES[family]['title']}'s packs are Strata's own format: its engine runs them, on a PC with its own "
@@ -7201,13 +7108,20 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         ok(f"{exe} (CUDA {ver[0]}.{ver[1]}, sm {archs.replace(';', ', ')})")
 
     tag = fam["tag"] + size_of(q)
-    folder = Path(a.models_dir) / tag
+    own = getattr(a, "gguf_dir", None)                 # --gguf-dir: GGUF files you already have, never downloaded
+    folder = Path(own) if own else Path(a.models_dir) / tag
     paths = [folder / f[1] for f in files]
     known = sum(f[2] or 0 for f in files)
-    step(3, f"downloading {fam['title']} {size_of(q)}"
+    step(3, f"{'checking' if own else 'downloading'} {fam['title']} {size_of(q)}"
             + (f" ({known / 1e9:.1f} GB" + (f", {len(files)} files)" if len(files) > 1 else ")") if known else ""))
-    say(f"  The model goes in {folder}")
+    say(f"  The model {'files are' if own else 'goes'} in {folder}")
     for (url, name, size, sha), f in zip(files, paths):
+        if own:                                        # (setup never deletes or rewrites a file of yours)
+            if not f.exists():
+                fail(f"{f} is missing", f"put {name} in {folder}, or drop --gguf-dir to download it")
+            if sha:
+                verify_sha256(f, size, sha, own=True)
+            continue
         if not (f.exists() and done(f)):
             # the original Flash-Next's shard 2 is the same file for all its sizes and the Coder's: one already here
             other = [p for p in Path(a.models_dir).glob("*/Qwen3.8-Flash-Next-GSQ-RCO-*-00002-of-00002.gguf") if done(p)]
@@ -7233,6 +7147,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
             quiet=True)
     ok(str(pack / "tokenizer"))
     vision = momoe_vision(a, family, fam, folder, paths[0], cuda=(nvcc, archs) if unified and not mac else None)
+    if vision is None and getattr(a, "vision_tokens", None) is not None:
+        warn("--vision-tokens: images are off for this model, so it is not used")
 
     draft = None
     if mac and family in FAMILIES and not own_mtp:
@@ -7324,6 +7240,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
             cfg["args"].append("--helper-tier")
         elif cards and a.layer_split:
             cfg["layer_split"] = a.layer_split
+    if own_mtp and a.draft_vocab:                      # the subset chosen, for a later momoe start --draft-vocab
+        cfg["draft_vocab"] = a.draft_vocab
     if a.host:
         cfg["host"] = a.host
     if a.api_key:
@@ -7628,8 +7546,6 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         cfg["host"] = a.host
     if a.api_key:
         cfg["api_key"] = a.api_key
-    if a.browser is not None:
-        cfg["open_browser"] = a.browser
     cfg["args"] = recommend_pool_workers(cfg["args"])   # --pool-workers: this engine path's CPU expert threads too
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     if vision != "none":
@@ -7652,7 +7568,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
             cfg["parallel"] = 1
             ok("parallel requests: one at a time (--parallel 1)")
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
-    script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
+    script = write_run_script(tag, cfg_path, port)
     ok(f"start script: {script.name}")
     say()
     say("All set.")
@@ -7740,7 +7656,8 @@ def main() -> int:
                     help="the most image tokens a picture becomes (default 1024 with the encoder on the GPU, 300 on "
                          "the CPU): more reads small text and charts better, and takes longer to encode; remembered "
                          "for this model")
-    # image generation (Qwen-Image): in preview, not offered in setup or --help; the options still work (docs/IMAGES.md)
+    # image generation (Qwen-Image): Strata's preview, not in --help; Momoe's setup does not install it and says so
+    # (an "images" section written into a config by hand still works: docs/IMAGES.md)
     ap.add_argument("--images", choices=["qwen-image", "no"],
                     help=argparse.SUPPRESS)
     ap.add_argument("--image-quant", choices=["Q4_K_M", "Q6_K", "Q8_0"],
@@ -7775,11 +7692,6 @@ def main() -> int:
     ap.add_argument("--save", action="store_true",
                     help="momoe start: also write --host, --api-key, --draft-vocab and --vram-reserve-mib into the "
                          "config (without it they apply to this start only)")
-    ap.add_argument("--no-browser", dest="browser", action="store_false", default=None,
-                    help="do not open the chat page in the browser when the model is ready (for a harness or an app "
-                         "that uses the API; remembered for this model, also in run-<model>.bat/.sh)")
-    ap.add_argument("--browser", dest="browser", action="store_true",
-                    help="open the chat page again when the model is ready (the default; undoes --no-browser)")
     ap.add_argument("--data-dir", help="where the model files go (~20-120 GB): default this folder (models/, packs/, "
                                        "mtp/); a folder given here is remembered for every Momoe folder on this PC")
     ap.add_argument("--models-dir", help="where the GGUF files go (default: <data folder>/models)")
@@ -7808,8 +7720,6 @@ def main() -> int:
                     help="NVIDIA: the CUDA toolkit of this model's engine. auto (default): CUDA 13; CUDA 12 (experimental) when a chosen card is older than CUDA 13 supports (Pascal, "
                          "Volta). 12 also runs with an older driver (Windows 528+, Linux 525+). docs/OLDER_GPUS.md")
     ap.add_argument("--check", action="store_true", help="only check this PC and exit")
-    ap.add_argument("--calibrate", action="store_true",
-                    help="tune the engine's settings for this PC (about 15-30 minutes, longer on a slow card), then start the model")
     ap.add_argument("--draft-vocab", choices=list(DRAFT_VOCABS),
                     help="the draft layer's tokens: cjk = with Chinese, Japanese and Korean (default), en = English "
                          "and code only (~110 MiB less VRAM, English answers 1-2%% faster), cyrillic = English, code "
@@ -7844,6 +7754,9 @@ def main() -> int:
                          "sycl = Intel Arc, EXPERIMENTAL: Linux, built from source (docs/INTEL_ARC.md)")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
+    if a.images == "qwen-image" or any((a.image_quant, a.image_backend, a.image_native, a.image_gpu_policy)):
+        fail("--images: Momoe's setup does not install image generation (Qwen-Image)",
+             "an \"images\" section written into the config by hand still works: docs/IMAGES.md")
     # Momoe: --model also takes a size name (IQ4_XS) that model_key resolves with --family; no preview families
     if PREVIEW_FAMILIES and a.model and a.model not in model_choices() and a.family not in PREVIEW_FAMILIES:
         ap.error(f"--model {a.model} is a size of " + ", ".join(f"--family {f}" for f, d in PREVIEW_FAMILIES.items()
@@ -7928,27 +7841,12 @@ def main() -> int:
         return start(cfg_file.resolve(), a.port, run_gpu, yes=a.yes, layer_split=a.layer_split, save=a.save,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib})
-    if have and a.calibrate and not (a.setup or a.model or a.family or a.check):
-        update_installed_engine()
-        pick_cfg = have[0]
-        if len(have) > 1:
-            say()
-            for i, c in enumerate(have, 1):
-                say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
-            pick_cfg = have[int(ask("Tune which one?", [str(i) for i in range(1, len(have) + 1)], "1", a.yes)) - 1]
-        if not calibrate_config(pick_cfg):             # #447: said again where it is not lost above the start
-            say()
-            warn("this PC is NOT tuned: the tuning failed (the reason is above); the model "
-                 + ("keeps" if a.no_start else "starts with") + " the default settings")
-        return 0 if a.no_start else start(pick_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split, save=a.save,
-                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
-                           "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
     if have and not (a.setup or a.model or a.family or a.check or a.no_start):
         update_installed_engine()
         if len(have) == 1:
             return start(have[0], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split, save=a.save,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
-                           "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
+                           "vram_reserve_mib": a.vram_reserve_mib})
         say()
         for i, c in enumerate(have, 1):
             say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
@@ -7957,7 +7855,7 @@ def main() -> int:
         if pick <= len(have):
             return start(have[pick - 1], a.port, run_gpu, yes=a.yes, layer_split=a.layer_split, save=a.save,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
-                           "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
+                           "vram_reserve_mib": a.vram_reserve_mib})
 
     if a.family in GGML_FAMILIES:                    # Momoe's ggml engine (Bolt, GLM-5.3-Flash, LFM2.5)
         return momoe_setup(a, data, port, a.family)
@@ -8991,8 +8889,6 @@ def main() -> int:
         cfg["api_key"] = a.api_key
     if draft_vocab:
         cfg["draft_vocab"] = draft_vocab
-    if a.browser is not None:                          # #609: only when given (else an earlier choice is carried over)
-        cfg["open_browser"] = a.browser
     # #465: requests at once - written only when given (else an earlier "parallel" is carried over); a recommendation
     streaming = "--kv-resident" in args
     if a.parallel is not None:
@@ -9021,29 +8917,13 @@ def main() -> int:
     if cfg_path.name != f"strata-{tag.lower()}.json":
         cfg["setup_tag"] = tag                         # setup reads the model from it (not from the name)
         cfg["log"] = str(ROOT / "logs" / (cfg_path.stem + ".log"))
-    cal = setup_calibration(cfg, hip)                  # #566: Linux HIP too; the tuning is offered on NVIDIA only
-    if cal is not None:
-        sys.path.insert(0, str(ROOT / "tools"))
-        import calibrate as CAL
-        cfg["args"] = CAL.apply(cfg["args"], cal.get("settings") or {})
-        if "env" in cal:                               # a calibration from before the env step leaves "env" as it is
-            cfg["env"] = CAL.apply_env(cfg.get("env"), cal["env"])
-        ok("the settings tuned for this PC earlier are used" + (f" ({cal['date']})" if cal.get("date") else ""))
-    else:                                              # #642: measured counts (a calibration) win over the rule
-        cfg["args"] = recommend_pool_workers(cfg["args"])
-        for line in two_socket_note(cpu_sockets()):    # bench tips: text only, the config is not touched
-            say("  " + line)
+    cfg["args"] = recommend_pool_workers(cfg["args"])
+    for line in two_socket_note(cpu_sockets()):        # bench tips: text only, the config is not touched
+        say("  " + line)
     for line in bench_tips(cfg["args"], cfg.get("env"), ram, MODELS[model]["ram_gb"], gpu.get("vram_gb", 0.0), vision, WIN,
                            small_family(family)):
         say("  " + line)
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
-    # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
-    if cal is None and not hip and not a.no_start and not a.yes and ask(
-            "Tune Momoe for this PC now? It measures a few engine settings (about 15-30 minutes, longer on a slow card; the PC is busy "
-            "meanwhile; later: START-HERE --calibrate)", ["y", "n"], "y", a.yes) == "y":
-        tuned = calibrate_config(cfg_path)
-    else:
-        tuned = None                                   # not asked for: nothing to repeat below
     ok(f"config: {cfg_path.name}")
 
     say()
@@ -9060,9 +8940,6 @@ def main() -> int:
         for line in parallel_note(None, [g.get("vram_gb", 0.0) for g in chosen], MODELS[model]["arena_gb"], ctx, kv,
                                   "--kv-resident" in cfg["args"]):
             say("  " + line)
-    if tuned is False:                                 # #447: a failed tuning is repeated here, not only above
-        say("  Tuning:           FAILED (the reason is above): the default settings stay - "
-            f"{'START-HERE.bat' if WIN else './setup.sh'} --calibrate tries again")
     if a.no_start:
         return 0
     # offered only when someone answers (--yes asks nothing), default no; the benchmark starts its own server and stops it

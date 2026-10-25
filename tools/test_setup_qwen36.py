@@ -239,7 +239,6 @@ class Base(unittest.TestCase):
             mock.patch.object(setup, "refresh_draft_vocab", lambda *a, **k: None),
             mock.patch.object(setup, "mtp_corrupt", lambda *a, **k: False),
             mock.patch.object(setup, "write_run_script", lambda tag, cfg, port, *_: self.t / f"run-{tag}.sh"),
-            mock.patch.object(setup, "saved_calibration", lambda cfg: None),
             mock.patch.object(setup, "start", mock.Mock(side_effect=AssertionError("started"))),
             mock.patch.dict(sys.modules, {"gguf_reader": types.SimpleNamespace(GGUFFile=FakeGGUF)}),
             mock.patch.object(sys, "argv", ["setup.py", *(["--yes"] if answers is None else []), "--no-start",
@@ -668,7 +667,7 @@ class TwoGpusOptIn(Base):
                 mock.patch.object(setup, "ensure_engine_for", lambda cards, path, cfg, yes: cfg), \
                 mock.patch.object(setup, "is_wsl", lambda: False), \
                 mock.patch.object(setup.subprocess, "call", call):
-            code, out = quiet(setup.start, p, None, [0, 1], False, True)
+            code, out = quiet(setup.start, p, None, [0, 1], True)
         self.assertEqual(code, 0, out)
         cmd = call.call_args[0][0]
         self.assertNotIn("--gpu", cmd)                                    # both cards, from the config
@@ -685,6 +684,18 @@ class DraftVocabAtStart(unittest.TestCase):
         own = {"args": ["--mtp-draft-vocab", "/home/me/mine.bin"], "draft_vocab": "en"}
         self.assertFalse(setup.point_draft_vocab(own))                    # a file of the user's own is kept
         self.assertFalse(setup.point_draft_vocab({"args": ["--mtp", "rt"]}))   # Flash-Next: refresh_draft_vocab
+
+    def test_the_ggml_engine_s_draft_vocab(self):
+        """momoe-cuda / momoe-metal name the subset with --draft-vocab: changed when the config (or this start's
+        --draft-vocab) names one; without, the file its setup chose stays (en by default)."""
+        data = setup.ROOT / "data"
+        en = str(data / "draft_vocab_en.bin")
+        cfg = {"exe": "/m/build-cuda/momoe-cuda", "args": ["-m", "x.gguf", "--mtp", "4", "--draft-vocab", en]}
+        self.assertFalse(setup.point_draft_vocab(dict(cfg, args=list(cfg["args"]))))
+        cfg["draft_vocab"] = "cyrillic"
+        self.assertTrue(setup.point_draft_vocab(cfg))
+        self.assertEqual(cfg["args"][-1], str(data / "draft_vocab_cyrillic.bin"))
+        self.assertEqual(cfg["args"][:4], ["-m", "x.gguf", "--mtp", "4"])
 
 
 if __name__ == "__main__":

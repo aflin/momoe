@@ -64,6 +64,8 @@ class Apply(unittest.TestCase):
             runconfig.apply(CFG, {"fit_max_tokens": True, "sampling.top_k": 0})
         with self.assertRaises(ValueError):
             runconfig.apply({**CFG, "vision": {"gpu": True}}, {"lazy_load": True})
+        with self.assertRaises(ValueError):                              # momoe-cuda / momoe-metal: no such option
+            runconfig.apply({**CFG, "exe": "/m/build-cuda/momoe-cuda"}, {"vram_reserve_mib": 2048})
 
     def test_view(self):
         v = runconfig.view({**CFG, "args": CFG["args"] + ["--vram-reserve-mib", "1500"]}, "x/strata-q2_0.json")
@@ -113,17 +115,17 @@ class Http(unittest.TestCase):
         self.assertEqual(status, 200, v)
         self.assertEqual({k["key"]: k["value"] for k in v["keys"]}["sampling.temperature"], 0.7)
         with contextlib.redirect_stdout(io.StringIO()):
-            status, v = self.call("POST", {"set": {"sampling.temperature": 1.0, "open_browser": False}},
+            status, v = self.call("POST", {"set": {"sampling.temperature": 1.0, "api_monitor": True}},
                                   {"Origin": f"http://{self.host}"})
         self.assertEqual(status, 200, v)
-        self.assertEqual(v["changed"], ["sampling.temperature", "open_browser"])
+        self.assertEqual(v["changed"], ["sampling.temperature", "api_monitor"])
         cfg = self.saved()
         self.assertEqual(cfg["sampling"]["temperature"], 1.0)
-        self.assertIs(cfg["open_browser"], False)
+        self.assertIs(cfg["api_monitor"], True)
         for k in ("mcp_servers", "cors_origins", "host", "args", "exe"):
             self.assertEqual(cfg[k], CFG[k], k)
         self.assertEqual(json.loads((self.path.parent / "strata-q2_0.json.bak").read_text(encoding="utf-8")), CFG)
-        status, v = self.call("POST", {"set": {"open_browser": False}})   # no Origin (a script on this PC): allowed
+        status, v = self.call("POST", {"set": {"api_monitor": True}})   # no Origin (a script on this PC): allowed
         self.assertEqual((status, v["changed"]), (200, []))
 
     def test_only_from_strata_s_own_page(self):

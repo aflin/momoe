@@ -290,11 +290,6 @@ static int buf_dev(ggml_backend_buffer_t b) {
     return 0;
 }
 static const int MAX_CARDS = 8;
-static bool g_rmb_copy = false;                              // resident mailboxes: the readers copy by a kernel, all on
-#if defined(MOMOE_CUDA)                                      // one stream of their own (g_copy_st): with a stream per
-static cudaStream_t g_copy_st = nullptr;                     // reader, some shared a hardware queue with the compute
-static std::mutex g_copy_mu;                                 // stream and waited behind the mailbox's wait (measured)
-#endif
 
 // read `need` bytes at `off` (a multiple of 4096) with O_DIRECT into `dst` (4096-aligned): `size` (a multiple of 4096,
 // >= need) is asked for, the end of the file may cut it short
@@ -330,20 +325,7 @@ struct Readers {
 #if defined(MOMOE_CUDA)
     // momoe-cuda: each reader copies an expert from the mapped file into its own pinned buffer, then to the device on
     // its own stream (a copy from pageable memory: ~0.8 GB/s for these 1-2 MB pieces; from pinned: ~20 GB/s)
-    struct Pinned { char * buf = nullptr; size_t cap = 0; cudaStream_t sts[MAX_CARDS] = {}; cudaEvent_t ev[2] = {nullptr, nullptr}; };
-    static void wait_event(cudaEvent_t ev) {                 // (polled with short sleeps, as sync below)
-        cudaError_t r;
-        const auto t0 = std::chrono::steady_clock::now();
-        bool told = false;
-        while ((r = cudaEventQuery(ev)) == cudaErrorNotReady) {
-            std::this_thread::sleep_for(std::chrono::microseconds(20));
-            if (!told && std::chrono::steady_clock::now() - t0 > std::chrono::seconds(2)) {
-                told = true;
-                fprintf(stderr, "momoe-cuda: a reader's copy (shared stream) has not finished after 2 s\n");
-            }
-        }
-        if (r != cudaSuccess) fprintf(stderr, "momoe-cuda: a reader's copy failed: %s\n", cudaGetErrorString(r));
-    }
+    struct Pinned { char * buf = nullptr; size_t cap = 0; cudaStream_t sts[MAX_CARDS] = {}; };
     // the copies are waited for by polling with short sleeps: cudaStreamSynchronize spins on a core, and 16 readers
     // spinning took those cores from the CPU's experts (measured: 24 instead of 11 ms of a token)
     static void sync(cudaStream_t st) {
@@ -371,41 +353,20 @@ struct Readers {
         cudaStream_t & st = p.sts[std::max(d, 0)];
         if (!st && cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking) != cudaSuccess) die("cannot create a stream");
         char * dst = (char *) t->data + t_off;
-        const bool shared = g_rmb_copy && g_copy_st;          // resident mailboxes: the one copy stream, by a kernel
-        if (shared && !p.ev[0]) {
-            for (auto & ev : p.ev)
-                if (cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) die("cannot create an event");
-        }
         size_t k = 0;
         for (size_t done = 0; done < n; done += piece, ++k) {   // two halves: the next is filled while one copies
             const size_t len = std::min(piece, n - done);
             char * b = p.buf + (k & 1) * half;
-            if (k >= 2) { if (shared) wait_event(p.ev[k & 1]); else sync(st); }   // (wait before reusing a half)
+            if (k >= 2) sync(st);                            // (wait before reusing a half)
             const char * from = b;
             if (g_direct) {
                 const size_t at = off + done, a0 = at & ~(A - 1), lead = at - a0;
                 read_direct(g_direct_fd[fd], b, (lead + len + A - 1) & ~(A - 1), a0, lead + len);
                 from = b + lead;
             } else memcpy(b, (const char *) src + done, len);
-            // (resident mailboxes: by a kernel, which runs beside the mailbox's wait; MOMOE_COPY_KERNEL=0: cudaMemcpyAsync)
-            static const bool kernel_off = getenv("MOMOE_COPY_KERNEL") && !strcmp(getenv("MOMOE_COPY_KERNEL"), "0");
-            if (shared) {
-                const auto l0 = std::chrono::steady_clock::now();
-                std::lock_guard<std::mutex> lk(g_copy_mu);
-                const auto l1 = std::chrono::steady_clock::now();
-                const bool ok = kernel_off ? cudaMemcpyAsync(dst + done, from, len, cudaMemcpyHostToDevice, g_copy_st) == cudaSuccess
-                                           : momoe_copy_to_device(dst + done, from, len, (void *) g_copy_st) == 0;
-                if (!ok || cudaEventRecord(p.ev[k & 1], g_copy_st) != cudaSuccess) die("a copy to the GPU failed");
-                const auto l2 = std::chrono::steady_clock::now();
-                if (l2 - l0 > std::chrono::milliseconds(200))
-                    fprintf(stderr, "momoe-cuda: a copy's launch took %.0f ms (%.0f ms for the lock)\n",
-                            std::chrono::duration<double, std::milli>(l2 - l0).count(), std::chrono::duration<double, std::milli>(l1 - l0).count());
-            } else if (cudaMemcpyAsync(dst + done, from, len, cudaMemcpyHostToDevice, st) != cudaSuccess) die("a copy to the GPU failed");
+            if (cudaMemcpyAsync(dst + done, from, len, cudaMemcpyHostToDevice, st) != cudaSuccess) die("a copy to the GPU failed");
         }
-        if (shared) {
-            wait_event(p.ev[(k - 1) & 1]);
-            if (k >= 2) wait_event(p.ev[k & 1]);
-        } else sync(st);
+        sync(st);
     }
 #endif
     // --direct-io into host memory (a host-mapped pool): 4 KiB-aligned windows into this thread's aligned buffer, copied
@@ -2712,8 +2673,6 @@ static void rmb_init(Engine & e) {
         M.moe.push_back(il);
     }
     e.rmb = true;
-    g_rmb_copy = !e.pool.host;                               // (a device pool: filled by kernels, see to_device)
-    if (g_rmb_copy && cudaStreamCreateWithFlags(&g_copy_st, cudaStreamNonBlocking) != cudaSuccess) die("cannot create the copy stream");
     M.th = std::thread([&e] { mb_worker(e); });
     fprintf(stderr, "momoe-cuda: resident mailboxes for %zu MoE layers (no stops while writing)\n", M.moe.size());
 }

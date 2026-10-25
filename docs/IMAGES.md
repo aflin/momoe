@@ -6,6 +6,9 @@ Strata's server can also make images: `POST /v1/images/generations`, OpenAI's im
 [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) (`sd-cli`), which setup compiles for your GPU.
 It is optional and off unless you ask for it.
 
+> **MoMoE:** its setup does not install image generation: `--images` says so and stops. The server still runs an
+> `"images"` section written into the config by hand.
+
 The model is under the **Qwen Research License**, not Apache 2.0: read
 [its license](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE) before you use the images
 commercially.

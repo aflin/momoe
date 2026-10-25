@@ -117,7 +117,7 @@ class EngineNames(unittest.TestCase):
 
 class DataFolder(unittest.TestCase):
     """Momoe keeps its model files in its own folder (models/, packs/, mtp/) and its settings apart from Strata's, so
-    neither moves the other's files; Strata's calibrations carry over once."""
+    neither moves the other's files."""
 
     def test_own_settings_and_folder(self):
         with tempfile.TemporaryDirectory() as d:
@@ -135,7 +135,7 @@ class DataFolder(unittest.TestCase):
                     mock.patch.object(setup, "WIN", False), mock.patch.object(setup, "ROOT", root), \
                     mock.patch.object(setup, "say", lambda *a, **k: None), mock.patch.object(setup, "ok", lambda *a: None):
                 self.assertEqual(setup.settings_path(), d / "momoe" / "settings.json")
-                self.assertEqual(setup.load_settings(), {"calibration": {"k": {"x": 1}}})
+                self.assertEqual(setup.load_settings(), {})
                 self.assertEqual(setup.data_folder(None), (root, []))
                 saved = json.loads((d / "momoe" / "settings.json").read_text())
             self.assertNotIn("data_dir", saved)                          # the default is not remembered

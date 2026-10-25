@@ -431,11 +431,11 @@ class VramReserve(unittest.TestCase):
                     mock.patch.object(setup, "ensure_engine_for", lambda cards, path, cfg, yes: cfg), \
                     mock.patch.object(setup.subprocess, "call", call):
                 for n in ("2048", "1024"):                   # Momoe: --save writes it into the config
-                    _, out = quiet(setup.start, p, None, None, False, True, None, {"vram_reserve_mib": int(n)},
+                    _, out = quiet(setup.start, p, None, None, True, None, {"vram_reserve_mib": int(n)},
                                    save=True)
                     self.assertEqual(json.loads(p.read_text())["args"], ["--kv", "int8", "--vram-reserve-mib", n])
                 self.assertNotIn("--config-override", call.call_args[0][0])
-                _, out2 = quiet(setup.start, p, None, None, False, True, None, {"vram_reserve_mib": 512})
+                _, out2 = quiet(setup.start, p, None, None, True, None, {"vram_reserve_mib": 512})
                 self.assertEqual(json.loads(p.read_text())["args"], ["--kv", "int8", "--vram-reserve-mib", "1024"])
                 cmd = call.call_args[0][0]                   # without --save: this start only, the file unchanged
                 over = json.loads(cmd[cmd.index("--config-override") + 1])
@@ -443,6 +443,20 @@ class VramReserve(unittest.TestCase):
         self.assertIn("1024 MiB of VRAM kept free", out)
         self.assertIn("this start only (--save keeps it): vram reserve mib 512", out2)
         self.assertTrue(call.called)
+
+    def test_refused_for_the_ggml_engines(self):
+        """momoe-cuda / momoe-metal end at an option they do not know: the start says what to set instead."""
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "momoe-cuda"
+            exe.write_bytes(b"")
+            p = Path(d) / "lfm25.json"
+            p.write_text(json.dumps({"exe": str(exe), "args": ["-m", "x"], "gpu": 0}))
+            before = p.read_text()
+            for save in (False, True):
+                with mock.patch.object(setup.subprocess, "call", side_effect=AssertionError("started")):
+                    with self.assertRaises(SystemExit):
+                        quiet(setup.start, p, None, None, True, None, {"vram_reserve_mib": 2048}, save=save)
+            self.assertEqual(p.read_text(), before)
 
     def test_host_and_key_on_a_start(self):
         """Momoe: momoe start --host/--api-key apply to that start only; --save keeps them in the config."""
@@ -457,16 +471,16 @@ class VramReserve(unittest.TestCase):
                     mock.patch.object(setup, "ensure_engine_for", lambda cards, path, cfg, yes: cfg), \
                     mock.patch.object(setup.subprocess, "call", call):
                 keep = {"host": "0.0.0.0", "api_key": "k1"}
-                quiet(setup.start, p, None, None, False, True, None, keep)
+                quiet(setup.start, p, None, None, True, None, keep)
                 self.assertNotIn("host", json.loads(p.read_text()))
                 cmd = call.call_args[0][0]
                 self.assertEqual(json.loads(cmd[cmd.index("--config-override") + 1]), keep)
-                quiet(setup.start, p, None, None, False, True, None, keep, save=True)
+                quiet(setup.start, p, None, None, True, None, keep, save=True)
                 self.assertEqual({k: json.loads(p.read_text())[k] for k in keep}, keep)
                 self.assertNotIn("--config-override", call.call_args[0][0])
-                quiet(setup.start, p, None, None, False, True, None, keep)   # already so: nothing to lay over
+                quiet(setup.start, p, None, None, True, None, keep)   # already so: nothing to lay over
                 self.assertNotIn("--config-override", call.call_args[0][0])
-                _, out = quiet(setup.start, p, None, None, False, True, None, {"api_key": "", "host": ""}, save=True)
+                _, out = quiet(setup.start, p, None, None, True, None, {"api_key": "", "host": ""}, save=True)
                 self.assertFalse({"api_key", "host"} & set(json.loads(p.read_text())))   # "" with --save: removed
                 self.assertIn("removed for this model: api key (no key now), host (127.0.0.1, this PC only)", out)
 
@@ -620,50 +634,3 @@ class HostCompilers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class CalibrateWithModel(unittest.TestCase):
-    """#2036: --calibrate --model X tunes model X (it used to fall through to a plain re-setup); a model that is not
-    installed is an error that says so; --calibrate with --setup or --check says it does nothing."""
-
-    def run_main(self, *argv, installed=("iq3_xxs", "q2_0")):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        cfgs = []
-        for tag in installed:
-            p = Path(tmp.name) / f"strata-{tag}.json"
-            p.write_text(json.dumps({"exe": "x", "args": ["--max-context", "8192"], "model_name": tag}))
-            cfgs.append(p)
-        tuned = []
-        with mock.patch.object(sys, "argv", ["setup.py", *argv]), \
-                mock.patch.object(setup, "installed_configs", lambda: cfgs), \
-                mock.patch.object(setup, "update_installed_engine", lambda *a, **k: None), \
-                mock.patch.object(setup, "calibrate_config", lambda c: tuned.append(c.name) or True), \
-                mock.patch.object(setup, "start", lambda *a, **k: 0), \
-                mock.patch.object(setup, "data_folder", lambda d: (Path(tmp.name), [])), \
-                mock.patch.object(setup, "step", side_effect=SystemExit("reached the plain setup")):
-            try:
-                code, out = quiet(setup.main)
-            except SystemExit as e:
-                code, out = e.code, ""
-        return code, tuned
-
-    def test_model_is_the_target(self):
-        code, tuned = self.run_main("--calibrate", "--model", "IQ3_XXS", "--yes", "--no-start")
-        self.assertEqual((code, tuned), (0, ["strata-iq3_xxs.json"]))
-
-    def test_a_model_not_installed_is_an_error(self):
-        code, tuned = self.run_main("--calibrate", "--model", "IQ3_S", "--yes", "--no-start")
-        self.assertEqual((code, tuned), (1, []))
-
-    def test_targets(self):
-        with tempfile.TemporaryDirectory() as d:
-            ps = []
-            for tag in ("iq3_xxs", "q2_0"):
-                p = Path(d) / f"strata-{tag}.json"
-                p.write_text(json.dumps({"args": []}))
-                ps.append(p)
-            self.assertEqual(setup.calibration_targets(ps, None, None), ps)
-            self.assertEqual(setup.calibration_targets(ps, "Q2_0", None), [ps[1]])
-            self.assertEqual(setup.calibration_targets(ps, "Q2_0", "qwen"), [ps[1]])
-            self.assertEqual(setup.calibration_targets(ps, "Q4_K_M", None), [])

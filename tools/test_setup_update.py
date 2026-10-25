@@ -148,7 +148,7 @@ class SettingsLine(unittest.TestCase):
                     mock.patch.object(setup, "is_wsl", lambda: False), \
                     mock.patch.object(setup.subprocess, "call", return_value=0), \
                     contextlib.redirect_stdout(out):
-                setup.start(p, None, open_browser=False, yes=True)
+                setup.start(p, None, yes=True)
         text = " ".join(out.getvalue().split())
         self.assertIn("Settings (strata-iq3_s.json): --kv int8 --kv-resident 32768", text)
         self.assertIn("--vram-reserve-mib 2048", text)

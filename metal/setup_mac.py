@@ -546,7 +546,7 @@ def main(argv=None) -> int:
         cfg["open_browser"] = a.browser
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     S.write_config(cfg_path, cfg)
-    script = S.write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
+    script = S.write_run_script(tag, cfg_path, port)
     S.ok(f"start script: {script.name}")
     S.say()
     S.say("All set.")

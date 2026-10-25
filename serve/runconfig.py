@@ -33,11 +33,16 @@ EDITABLE = [
     ("lazy_load", "bool", "Start without loading the model; the first request loads it (text only)"),
     ("engine_silence_s", "num>=0", "End a request when the engine says nothing for this long (default 300 s, 0 = wait)"),
     ("api_monitor", "bool", "Keep the last 100 requests' prompts and answers in memory for /api-monitor"),
-    ("open_browser", "bool", "Open the chat page in the browser when the model is ready"),
     ("vram_reserve_mib", ("arg", "--vram-reserve-mib"),
      "VRAM in MiB the engine leaves free for other programs (engine default 700)"),
 ]
 SPEC = {k: kind for k, kind, _ in EDITABLE}
+
+
+def ggml_engine(cfg: dict) -> bool:
+    """Momoe's ggml engine (momoe-cuda, momoe-metal; setup.py's ggml_engine): it takes none of the options the server
+    adds for Strata's engine, and ends at an option it does not know."""
+    return Path(str(cfg.get("exe", ""))).name in ("momoe-metal", "momoe-cuda")
 
 
 def _arg(cfg: dict, flag: str):
@@ -107,6 +112,9 @@ def check(key: str, v, cfg: dict):
     if k == "num>=0":
         return _number(key, v)
     if k == "arg":
+        if key == "vram_reserve_mib" and ggml_engine(cfg):
+            raise ValueError("vram_reserve_mib: momoe-cuda / momoe-metal do not take --vram-reserve-mib (their pool "
+                             "leaves MOMOE_VRAM_MARGIN_MIB / MOMOE_METAL_MARGIN_MIB free: the config's \"env\")")
         return _number(key, v, whole=True)
     rule = kind[1]                                     # a sampling key: the server's own rules
     if rule == "num>=0":

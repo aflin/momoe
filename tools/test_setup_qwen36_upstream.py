@@ -195,7 +195,6 @@ class InstallOwnPath(unittest.TestCase):
         ch = setup.choices_from_config(p)
         self.assertEqual((ch["family"], ch["model"], ch["context"]), ("qwen36", "UD-Q6_K_XL", 65536))
         self.assertTrue(setup.own_path_config(self.cfg))
-        self.assertEqual(setup.calibration_targets([p], None, None), [])   # the tuning is Flash-Next's
 
 
 if __name__ == "__main__":

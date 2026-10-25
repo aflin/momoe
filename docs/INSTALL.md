@@ -76,7 +76,7 @@ sudo), and compiles the engine on your PC for the card (10-20 minutes, once; it 
 `sudo apt install build-essential git`). Several AMD cards share the model with `--gpus`, as on NVIDIA.
 
 What differs from NVIDIA for now: pictures are read by the image encoder on the CPU (`--vision cpu`, about 3 s per
-picture at the default 300 image tokens on 8 cores), `--calibrate` is NVIDIA-only, and Unsloth's 4-bit model needs an NVIDIA card. Measurements per card, the
+picture at the default 300 image tokens on 8 cores), and Unsloth's 4-bit model needs an NVIDIA card. Measurements per card, the
 build by hand and the tuning tables: [AMD_HIP.md](AMD_HIP.md).
 
 ## Two or three cards
@@ -227,13 +227,8 @@ With `--yes` setup takes the recommended answer to every question.
 
 ## Tuning for your PC
 
-Every PC is different: `START-HERE.bat --calibrate` (Linux: `./setup.sh --calibrate`) measures a few engine settings
-on yours and keeps the fastest (about 15-30 minutes, longer on a slow card; on an RTX 5070 with a Ryzen 5 7600 it made the Coder 7% faster).
-It keeps a setting only when it is more than 3% faster, and the result is remembered per PC and model, so updates
-keep it. Measuring the CPU worker count needs a fresh engine, so the model is loaded more than once: the PC is
-busy, and can stop responding for a minute or two, once per restart. When it finishes it **starts the model**,
-so the server is already running when it returns - do not start it a second time.
-NVIDIA cards for now. [What it measures](DETAILS.md#double-click-start-herebat).
+MoMoE has no `--calibrate` (Strata's tuning run). The engine settings it measured can be set in the config's `args`
+by hand: [which ones](DETAILS.md#double-click-start-herebat).
 
 ## Options without questions
 
@@ -248,11 +243,8 @@ START-HERE.bat --port 8081                      another port
 START-HERE.bat --gpu 1                          another GPU (setup picks the one with the most VRAM)
 START-HERE.bat --gpus 0,2                       several GPUs sharing the model
 START-HERE.bat --vram-reserve-mib 2048          leave 2 GB of VRAM free for other programs (remembered)
-START-HERE.bat --no-browser                     do not open the chat page when the model is ready (remembered;
-                                                --browser undoes it)
 START-HERE.bat --setup --backend hip            the AMD engine on a PC that also has an NVIDIA card
 START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>     reachable from other devices, with a key
-START-HERE.bat --calibrate                      tune the engine for this PC (about 15-30 minutes, longer on a slow card), then start
 START-HERE.bat --check                          only check this PC
 ```
 

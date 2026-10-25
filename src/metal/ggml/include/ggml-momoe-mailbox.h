@@ -42,10 +42,6 @@ struct momoe_mailbox_op {
 
 GGML_API void momoe_mailbox_cpu_stub(struct ggml_tensor * dst, int ith, int nth, void * userdata);
 
-// momoe-cuda: n bytes from `src` (host memory the GPU maps: cudaMallocHost) to device memory `dst` by a kernel on
-// `stream` (a cudaStream_t); 0 when launched
-GGML_API int momoe_copy_to_device(void * dst, const void * src, size_t n, void * stream);
-
 #ifdef __cplusplus
 }
 #endif

@@ -356,7 +356,7 @@ class StartOnSeveralGpus(unittest.TestCase):
                     mock.patch.object(setup, "ensure_engine_for", lambda cards, path, cfg, yes: cfg), \
                     mock.patch.object(setup, "is_wsl", lambda: False), \
                     mock.patch.object(setup.subprocess, "call", call):
-                code, out, _ = run(setup.start, p, None, [0, 1], False, True)
+                code, out, _ = run(setup.start, p, None, [0, 1], True)
             cfg = json.loads(p.read_text())
         self.assertIsNone(code, out)
         self.assertEqual(cfg["gpu"], [0, 1])
