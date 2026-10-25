@@ -7008,6 +7008,14 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         ram = ram_gb()
         unified = gpu.get("unified", False)
         say(f"  {gpu_name(gpu)}; {ram:.0f} GB of RAM" + (" shared with the GPU" if unified else ""))
+    if a.check:                                        # only this machine and what fits it: nothing is installed
+        say()
+        for f in (family,) if family else MOMOE_MENU:
+            q = momoe_size(f, a.model if family else None, ram)
+            need = momoe_sizes(f)[q][1]
+            say(f"  {momoe_title(f):28s} {size_of(q):11s} needs ~{need} GB: "
+                + ("fits" if need <= ram else f"this machine has {ram:.0f} GB: experts read from the SSD (slower)"))
+        return 0
     family = family or momoe_menu(a, ram)
     if family in FAMILIES and FAMILIES[family].get("ready"):
         fail(f"{FAMILIES[family]['title']}'s packs are Strata's own format: its engine runs them, on a PC with its own "

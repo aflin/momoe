@@ -173,13 +173,29 @@ class Routing(unittest.TestCase):
                 mock.patch.object(setup, "say", side_effect=lambda *x: seen.append(" ".join(map(str, x)))), \
                 mock.patch.object(setup, "momoe_menu", side_effect=SystemExit("stop")):
             with self.assertRaises(SystemExit):
-                setup.momoe_setup(mock.Mock(gpu=None, gpus=None, family=None), Path("."), 8080)
+                setup.momoe_setup(mock.Mock(gpu=None, gpus=None, family=None, check=False), Path("."), 8080)
         self.assertTrue(any("4070 Ti" in line for line in seen), seen)
+
+    def test_check_only_lists_what_fits(self):
+        """--check on this path: the machine and every family's size with what it needs, then out (no build, no
+        download, no config)."""
+        seen = []
+        with mock.patch.object(setup, "gpus", return_value=self.SPARK), mock.patch.object(setup, "gpu_problem", return_value=None), \
+                mock.patch.object(setup, "WIN", False), mock.patch.object(setup.sys, "platform", "linux"), \
+                mock.patch.object(setup, "ram_gb", return_value=119.0), \
+                mock.patch.object(setup, "say", side_effect=lambda *x: seen.append(" ".join(map(str, x)))), \
+                mock.patch.object(setup, "momoe_menu", side_effect=AssertionError("asked")), \
+                mock.patch.object(setup, "run", side_effect=AssertionError("built")), \
+                mock.patch.object(setup, "download", side_effect=AssertionError("downloaded")):
+            code = setup.momoe_setup(mock.Mock(gpu=None, gpus=None, family=None, model=None, check=True), Path("."), 8080)
+        self.assertEqual(code, 0)
+        self.assertTrue(any("Ornith-1.5" in line and "fits" in line for line in seen), seen)
+        self.assertTrue(any("GLM-5.3" in line for line in seen), seen)
 
     def run_setup(self, gpus, argv_extra, family):
         """momoe_setup up to the config (no build, no download): the config it would write."""
         written = {}
-        a = mock.Mock(gpu=None, gpus=None, family=family, model=None, context=None, host=None, api_key=None,
+        a = mock.Mock(gpu=None, gpus=None, family=family, model=None, context=None, host=None, api_key=None, check=False,
                       config_name=None, no_start=True, yes=True, draft_vocab=None, models_dir="/m", helper_tier=False,
                       layer_split=None, backend=None, vision=None, kv=None)
         for k, v in argv_extra.items():
@@ -247,7 +263,7 @@ class MacDraft(unittest.TestCase):
         if draft_ready:
             fake_run(["mtp_pack.py"])
         written, ran = {}, []
-        a = mock.Mock(gpu=None, gpus=None, family=family, model=None, context=None, host=None, api_key=None,
+        a = mock.Mock(gpu=None, gpus=None, family=family, model=None, context=None, host=None, api_key=None, check=False,
                       config_name=None, no_start=True, yes=True, draft_vocab=None, models_dir=str(data / "models"),
                       helper_tier=False, layer_split=None, backend=None, vision=None, kv=None)
         patches = [mock.patch.object(setup.sys, "platform", "darwin"), mock.patch.object(setup, "WIN", False),
