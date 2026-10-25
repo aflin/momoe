@@ -6967,9 +6967,21 @@ def momoe_vision(a, family: str, fam: dict, folder: Path, model: Path, cuda: tup
         verify_sha256(f, size, sha)
     enc = build_momoe_vision(cuda)
     ok("images: on (the encoder on the " + ("GPU)" if on_gpu else "CPU)"))
-    v = {"exe": str(enc), "mmproj": str(f), "model": str(model), "gpu": on_gpu, "max_tokens": 300}
-    if family in QWEN35_VISION:
-        v["max_tokens"] = v["min_tokens"] = QWEN35_VISION_TOKENS
+    n = getattr(a, "vision_tokens", None)              # --vision-tokens N: the most image tokens a picture becomes
+    if n is not None and n < 1:
+        fail(f"--vision-tokens {n}: give a number of tokens, 1 or more")
+    v = {"exe": str(enc), "mmproj": str(f), "model": str(model), "gpu": on_gpu, "max_tokens": n or 300}
+    if family in QWEN35_VISION:                        # (at 300 they misread text in a picture; mtmd asks for 1,024)
+        if n is not None and n < QWEN35_VISION_TOKENS:
+            warn(f"--vision-tokens {n}: {fam['title']} needs at least {QWEN35_VISION_TOKENS} to read text in a picture: "
+                 f"{QWEN35_VISION_TOKENS}")
+        v["max_tokens"] = max(n or 0, QWEN35_VISION_TOKENS)
+        v["min_tokens"] = QWEN35_VISION_TOKENS
+    elif family == "gemma4" and v["max_tokens"] > 512:  # a Gemma 4 picture is read in one batch: none larger
+        warn(f"--vision-tokens {n}: Gemma 4 reads a picture in one batch of at most 512 tokens: 512")
+        v["max_tokens"] = 512
+    if n is not None:
+        ok(f"images: up to {v['max_tokens']} image tokens per picture (--vision-tokens)")
     if not on_gpu:
         v["threads"] = max(1, (os.cpu_count() or 8) // 2)
     return v
@@ -7125,6 +7137,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
             quiet=True)
     ok(str(pack / "tokenizer"))
     vision = momoe_vision(a, family, fam, folder, paths[0], cuda=(nvcc, archs) if unified and not mac else None)
+    if vision is None and getattr(a, "vision_tokens", None) is not None:
+        warn("--vision-tokens: images are off for this model, so it is not used")
 
     draft = None
     if mac and family in FAMILIES and not own_mtp:

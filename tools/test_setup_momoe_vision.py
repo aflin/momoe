@@ -95,6 +95,26 @@ class OptIn(unittest.TestCase):
                 v = quiet(setup.momoe_vision, a, "ornith122", setup.GGML_FAMILIES["ornith122"], folder, folder / "m.gguf")
         self.assertEqual((v["min_tokens"], v["max_tokens"]), (1024, 1024))
 
+    def vision_section(self, family, tokens):
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            name = setup.GGML_FAMILIES[family]["mmproj"][0]
+            (folder / name).write_bytes(b"")
+            a = types.SimpleNamespace(vision="yes", yes=True, vision_tokens=tokens)
+            with mock.patch.object(setup, "done", return_value=True), mock.patch.object(setup, "verify_sha256"), \
+                    mock.patch.object(setup, "build_momoe_vision", return_value=Path("/x/momoe-vision")):
+                return quiet(setup.momoe_vision, a, family, setup.GGML_FAMILIES[family], folder, folder / "m.gguf")
+
+    def test_vision_tokens(self):
+        self.assertEqual(self.vision_section("bolt", 600)["max_tokens"], 600)
+        self.assertEqual(self.vision_section("bolt", None)["max_tokens"], 300)
+        v = self.vision_section("ornith122", 2048)                     # the Qwen3.6 architecture: at least 1,024
+        self.assertEqual((v["min_tokens"], v["max_tokens"]), (1024, 2048))
+        v = self.vision_section("ornith122", 300)
+        self.assertEqual((v["min_tokens"], v["max_tokens"]), (1024, 1024))
+        self.assertEqual(self.vision_section("gemma4", 1024)["max_tokens"], 512)   # one batch of 512
+        with self.assertRaises(SystemExit):
+            self.vision_section("bolt", 0)
 
 if __name__ == "__main__":
     unittest.main()

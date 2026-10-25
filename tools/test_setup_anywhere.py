@@ -196,6 +196,7 @@ class Routing(unittest.TestCase):
         """momoe_setup up to the config (no build, no download): the config it would write."""
         written = {}
         a = mock.Mock(gpu=None, gpus=None, family=family, model=None, context=None, host=None, api_key=None, check=False,
+                      vision_tokens=None, gguf_dir=None,
                       config_name=None, no_start=True, yes=True, draft_vocab=None, models_dir="/m", helper_tier=False,
                       layer_split=None, backend=None, vision=None, kv=None)
         for k, v in argv_extra.items():
@@ -264,6 +265,7 @@ class MacDraft(unittest.TestCase):
             fake_run(["mtp_pack.py"])
         written, ran = {}, []
         a = mock.Mock(gpu=None, gpus=None, family=family, model=None, context=None, host=None, api_key=None, check=False,
+                      vision_tokens=None, gguf_dir=None,
                       config_name=None, no_start=True, yes=True, draft_vocab=None, models_dir=str(data / "models"),
                       helper_tier=False, layer_split=None, backend=None, vision=None, kv=None)
         patches = [mock.patch.object(setup.sys, "platform", "darwin"), mock.patch.object(setup, "WIN", False),
