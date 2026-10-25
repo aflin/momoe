@@ -2295,6 +2295,22 @@ class PeerDevice(unittest.TestCase):
         self.assertEqual(engine_args({"args": list(done), "vision": {"gpu": True}}), done)
         self.assertEqual(engine_args({"args": list(args)}), args)                # no section: no images
 
+    def test_the_ggml_engines_get_none_of_strata_s_options(self):
+        """momoe-cuda / momoe-metal end at an option they do not know, and their --batch is the prompt's chunk size: the
+        keys for Strata's engine add nothing to their arguments (the layer split and --vision they do take)."""
+        args = ["-m", "x.gguf", "--ctx", "32768"]
+        cfg = {"exe": "/m/build-cuda/momoe-cuda", "args": list(args), "gpu": [0, 1], "split_skip_if_fits": True,
+               "vram_elastic": True, "vram_segment_mib": 256, "parallel": 4, "expert_profile_save": "p.bin",
+               "vision": {"exe": "v", "gpu": True}}
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            got = engine_args(cfg)
+        self.assertEqual(got, args + ["--vision", "--layer-split", "auto"])
+        for k in ("split_skip_if_fits", "vram_elastic", "parallel", "expert_profile_save"):
+            self.assertIn(f'"{k}"', out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(engine_args({"exe": "momoe-metal", "args": list(args), "parallel": 1}), args)
+        self.assertNotIn("left out", out.getvalue())
+
     def test_split_added_for_several_gpus(self):
         self.assertEqual(engine_args({"args": ["--native", "x"], "gpu": [0, 1]}),
                          ["--native", "x", "--layer-split", "auto"])

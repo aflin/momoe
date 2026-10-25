@@ -2756,8 +2756,19 @@ def helper_cards(cfg: dict) -> bool:
 def engine_args(cfg: dict) -> list[str]:
     """The engine's arguments: the config's, and with several GPUs the layer split across them ("layer_split" in the
     config: "auto" by default, or the first layer of each later GPU's share, e.g. "18" or "16,32"; see
-    layer_split_value)."""
+    layer_split_value).  Momoe's ggml engine (momoe-cuda, momoe-metal) gets none of the options for Strata's engine:
+    it ends at an option it does not know, and its --batch is the prompt's chunk size."""
     args = list(cfg["args"])
+    ggml = runconfig.ggml_engine(cfg)
+    if ggml:
+        par = cfg.get("parallel")
+        unused = [k for k, on in (("split_skip_if_fits", bool(cfg.get("split_skip_if_fits"))),
+                                  ("vram_elastic", cfg.get("vram_elastic") is True),
+                                  ("parallel", isinstance(par, int) and not isinstance(par, bool) and par > 1),
+                                  ("expert_profile_save", bool(cfg.get("expert_profile_save")))) if on]
+        if unused:
+            print(f"[momoe] {Path(str(cfg['exe'])).name} does not use the config's " + ", ".join(f'"{k}"' for k in unused)
+                  + " (Strata's engine only): left out", flush=True)
     # #1322: a config with a "vision" section but without --vision in its args (written by an older setup run, or edited by
     # hand) advertised images and then refused every picture ("this engine was started without --vision").  The section
     # says images are wanted: start the engine with them, and keep the encoder's VRAM free as setup does for a GPU encoder
@@ -2765,13 +2776,15 @@ def engine_args(cfg: dict) -> list[str]:
     if isinstance(cfg.get("vision"), dict) and "--vision" not in args:
         args.append("--vision")
         note = "added --vision"
-        if cfg["vision"].get("gpu") and "--vram-reserve-mib" not in args:
+        if cfg["vision"].get("gpu") and "--vram-reserve-mib" not in args and not ggml:
             args += ["--vram-reserve-mib", "700"]
             note += " and --vram-reserve-mib 700"
         print(f'[momoe] the config has a "vision" section but no --vision in its args: {note} (run setup again with '
               "--vision to write them)", flush=True)
     if layer_split_of(cfg) and "--layer-split" not in args:
         args += ["--layer-split", layer_split_value(cfg)]
+    if ggml:
+        return args
     # opt-in: an auto split runs on the first card alone when it holds every profiled expert and the KV
     if layer_split_of(cfg) and cfg.get("split_skip_if_fits") and "--split-skip-if-fits" not in args:
         args.append("--split-skip-if-fits")
