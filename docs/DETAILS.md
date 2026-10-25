@@ -559,12 +559,12 @@ START-HERE.bat --gguf-dir D:\models\IQ2_XS       use GGUF files you already have
 START-HERE.bat --data-dir E:\Strata-data         keep the model files somewhere else
 START-HERE.bat --port 8081                      another port
 START-HERE.bat --gpu 1                          another GPU (numbered as nvidia-smi; setup picks the one with the most VRAM)
-START-HERE.bat --calibrate                      tune the engine for this PC (about 15-30 minutes, longer on a slow card), then start
 ```
 
 With more than one model installed, it asks which one to start. `run-<model>.bat` starts a model directly.
 
-**Tuning for your PC (`--calibrate`, engine 0.1.19).** These engine settings depend on the PC more than on the model:
+**Tuning for your PC.** MoMoE has no `--calibrate` (Strata's 15-30-minute tuning run). These engine settings depend on
+the PC more than on the model, and can be set in the config's `args` by hand:
 - the share of the experts missing from VRAM that are copied to the GPU instead of computed by the CPU
   (`--pcie-frac`: a fast PCIe link and a slower CPU want more, a laptop's narrower link less);
 - how sure the draft layer must be to add another guess to a check (`--spec-min-p`);
@@ -576,13 +576,7 @@ With more than one model installed, it asks which one to start. `run-<model>.bat
 - on two or more cards (a layer split), the prompt chunks that keep the cards reading at once (`--prefill-pipe`, the
   prompt read speed of fresh prompts rather than the output speed; see docs/MULTI_GPU.md).
 
-The defaults were measured on a Ryzen 5 7600 with an RTX 5070. Setup offers to measure them on your PC after an
-install; `START-HERE.bat --calibrate` (Linux: `./setup.sh --calibrate`) does it any time. It measures the output
-speed with each setting and keeps one only when it is more than 3% faster. The result is remembered per PC and model
-(in the settings file next to the data folder's record), so updates keep it.
-
-Measuring the worker count needs a fresh engine, so the model is loaded more than once: the PC is busy, and can
-stop responding for a minute or two, once per restart. It then starts the model, like a plain `START-HERE.bat`.
+The defaults were measured on a Ryzen 5 7600 with an RTX 5070.
 
 **Manual CPU task granularity.** `--pool-tasks N` sets the target total number of row tasks in each batched
 CPU expert Gate/Up and Down phase, not the number of threads or tasks per expert. The default `0` keeps
@@ -591,7 +585,7 @@ each phase's row count; native batches larger than the pool's capacity apply the
 For example, `--pool-workers 13 --pool-tasks 192` uses 14 participating threads with the default host worker.
 More tasks can reduce imbalance between cores, but also add scheduling overhead: compare against `0` with
 the same worker count and workload. This does not change kernels, phase barriers, or PCIe placement, and
-does not affect the legacy single-token/oracle fallback. Setup's `--calibrate` does not tune it yet.
+does not affect the legacy single-token/oracle fallback.
 For the server, add `"--pool-tasks", "192"` to the existing `args` list in its configuration, then restart it.
 
 ### Running it at startup (Task Scheduler)

@@ -1213,7 +1213,7 @@ class StrataEngine:
         seed = sampling.get("seed")
         if isinstance(seed, int) and seed > 0:
             keys += f" seed={seed}"
-        # setup's calibration (tools/calibrate.py): engine settings for this request only, measured without a restart
+        # engine settings for this request only (a request's "strata_tune"), measured without a restart
         tune = sampling.get("strata_tune")
         if isinstance(tune, dict):
             for k in ("pcie_frac", "spec_min_p"):

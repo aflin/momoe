@@ -1257,14 +1257,13 @@ def hybrid_pool_workers(cores) -> int | None:
 
 
 def recommend_pool_workers(args: list) -> list:
-    """`args` with setup's recommended `--pool-workers` for a hybrid CPU, unless they set one already (a calibration's
-    measured count, or the user's own).  A recommendation: the config line can be edited or removed."""
+    """`args` with setup's recommended `--pool-workers` for a hybrid CPU, unless they set one already (the user's own).  A recommendation: the config line can be edited or removed."""
     n = hybrid_pool_workers(cpu_cores())
     if n is None or "--pool-workers" in args:
         return args
     p, e = cpu_cores()
     ok(f"hybrid CPU ({p} performance + {e} efficiency cores): {n} CPU expert workers - the performance cores and half "
-       "of the efficiency cores (--pool-workers in the config; START-HERE --calibrate measures it on this PC)")
+       "of the efficiency cores (--pool-workers in the config)")
     return [*args, "--pool-workers", str(n)]
 
 
@@ -1317,7 +1316,7 @@ def two_socket_note(sockets) -> list[str]:
     n = sockets[1] - 1
     return [f"tip: this PC has {sockets[0]} CPU sockets of {sockets[1]} cores. Expert workers on the other socket have "
             f"been measured slower than fewer, local ones (35 vs 17-18 on 2-socket Xeons): try --pool-workers {n} in "
-            "the config's args (START-HERE --calibrate measures it on this PC)"]
+            "the config's args"]
 
 
 def cpu_info():
@@ -5283,11 +5282,6 @@ def load_settings() -> dict:
     try:
         return json.loads(settings_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        pass
-    try:                                               # first run: Strata's calibrations carry over, nothing else
-        old = json.loads(settings_path("strata").read_text(encoding="utf-8"))
-        return {"calibration": old["calibration"]} if isinstance(old.get("calibration"), dict) else {}
-    except (OSError, ValueError, AttributeError):
         return {}
 
 
@@ -5709,20 +5703,6 @@ def choices_from_config(cfg_path: Path) -> dict:
                 vis is None or int(val("--vram-reserve-mib")) != VISION["gpu"]["reserve_mib"]) else None}
 
 
-def calibration_targets(have: list, model: str | None, family: str | None) -> list:
-    """#2036: the installed configs `--calibrate --model X` (and/or --family) means; every config with neither."""
-    if not (model or family):
-        return [c for c in have if choices_from_config(c)["family"] not in OWN_PATH_FAMILIES]
-    out = []
-    for c in have:
-        ch = choices_from_config(c)
-        if ch["family"] in OWN_PATH_FAMILIES:          # the tuning measures Flash-Next's engine settings
-            continue
-        if (not model or ch["model"] == model) and (not family or ch["family"] == family):
-            out.append(c)
-    return out
-
-
 def find_in(roots: list, rel: str):
     """The first of roots/rel that exists."""
     for r in roots:
@@ -5828,32 +5808,9 @@ def rotational_disk(path) -> str | None:
     return None
 
 
-def hip_config_cards(sel) -> list[dict]:
-    """#566: the AMD cards a HIP config runs on - its "gpu" (one index or a list) in HIP's numbering, as amd_gpus
-    lists them; no "gpu": the supported card with the most VRAM, as setup picks it.  Each card's name carries its
-    architecture (an RX 7900 XTX and an RX 7900 XT are both gfx1100; a card without a product name in sysfs is known
-    by its arch only).  A card that is not found is {} (the key then says "?")."""
-    amd = amd_gpus()
-    if sel is None:
-        usable = [g for g in amd if amd_problem(g) is None]
-        sel = min(usable, key=amd_rank)["index"] if usable else None
-    byid = {g["index"]: g for g in amd}
-    cards = []
-    for i in (sel if isinstance(sel, list) else [sel]):
-        g = byid.get(i)
-        if g is None:
-            cards.append({})
-            continue
-        arch = g.get("arch") or ""
-        name = g.get("name") or "?"
-        cards.append({**g, "name": name if not arch or arch in name else f"{name} ({arch})"})
-    return cards
-
-
 def gpu_sel(value) -> list:
     """A config's "gpu" as a list of card numbers: 0, [0, 2] or the string form "0,2" (which serve splits
-    the same way).  [] when it names none.  Without this, a string "0,1" reached gpu_info() whole and
-    calibrate died with "there is no GPU 0,1" on a dual-GPU config."""
+    the same way).  [] when it names none."""
     if value is None or value == "":
         return []
     items = value if isinstance(value, (list, tuple)) else str(value).split(",")
@@ -5864,80 +5821,6 @@ def gpu_sel(value) -> list:
             continue
         sel.append(int(x) if x.isdigit() else x)
     return sel
-
-
-def hardware_key(cfg: dict) -> str:
-    """What a calibration is valid for: this GPU, CPU and RAM, and the model with its context and images setting
-    (the context's KV cache and the image encoder take VRAM from the expert cache).  #566: a HIP config's cards are
-    AMD's (hip_config_cards) - nvidia-smi's list named them "?" (or another card with that number) before."""
-    sel = cfg.get("gpu")
-    if isinstance(sel, str):
-        sel = gpu_sel(sel)
-    if cfg.get("backend") == "hip":
-        gl = hip_config_cards(sel)
-    else:
-        gl = [gpu_info(i) or {} for i in sel] if isinstance(sel, list) else [gpu_info(sel) or {}]
-    g = {"name": " + ".join(x.get("name", "?") for x in gl), "vram_gb": sum(x.get("vram_gb", 0) for x in gl)}
-    a = cfg.get("args", [])
-    ctx = a[a.index("--max-context") + 1] if "--max-context" in a else "?"
-    return "|".join([g.get("name", "?"), f"{g.get('vram_gb', 0):.0f}GB", cpu_info()[0], f"{ram_gb():.0f}GB",
-                     cfg.get("model_name", "?"), ctx, "images" if "--vision" in a else "text"])
-
-
-def calibrate_config(cfg_path: Path) -> bool:
-    """Measure the engine's hardware-dependent settings on this PC (tools/calibrate.py), write them into the run
-    config and remember them per PC and model in the settings file, so an update or a reinstall keeps them."""
-    sys.path.insert(0, str(ROOT / "tools"))
-    import calibrate as CAL
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
-    say()
-    say("  Tuning Momoe for this PC: the output speed is measured with a few engine settings (the PCIe share, the")
-    say("  draft depth, the CPU threads, the expert cache; on two or more cards also the prompt chunks). It takes")
-    say("  roughly 15-30 minutes (3 rounds of each value); the PC is busy meanwhile.")
-    try:
-        since = os.path.getsize(cfg["log"]) if cfg.get("log") and os.path.isfile(cfg["log"]) else 0
-    except OSError:
-        since = 0
-    try:
-        res = CAL.run(cfg, say=say)
-    except Exception as e:                             # never stops an install: the defaults stay
-        warn(f"the tuning did not finish ({e}): the default settings stay")
-        why = CAL.engine_error(cfg.get("log"), since)  # #447: the engine's own reason, not only "see the log"
-        if why:
-            say(f"       the engine said: {why}")
-        return False
-    cfg["args"] = CAL.apply(cfg["args"], res["settings"])
-    if "env" in res:                                   # HIP: the engine variables it measured (STRATA_SH_STREAM)
-        cfg["env"] = CAL.apply_env(cfg.get("env"), res["env"])
-    write_config(cfg_path, cfg)
-    st = load_settings()
-    st.setdefault("calibration", {})[hardware_key(cfg)] = {"settings": res["settings"], "env": res.get("env") or {},
-                                                           "tok_s": res["report"].get("tok_s"),
-                                                           "date": time.strftime("%Y-%m-%d")}
-    save_settings(st)
-    chosen = {**res["settings"], **(res.get("env") or {})}
-    if chosen:
-        ok("tuned for this PC: " + ", ".join(f"{k} {v}" if k.startswith("--") else f"{k}={v}" for k, v in chosen.items())
-           + (f" ({res['report']['tok_s']} tok/s)" if res["report"].get("tok_s") else ""))
-    else:
-        ok("tuned for this PC: the default settings are already the fastest here"
-           + (f" ({res['report']['tok_s']} tok/s)" if res["report"].get("tok_s") else ""))
-    return True
-
-
-def saved_calibration(cfg: dict) -> dict | None:
-    """The settings an earlier calibration found for this PC and model, if any."""
-    return (load_settings().get("calibration") or {}).get(hardware_key(cfg))
-
-
-def setup_calibration(cfg: dict, hip: bool) -> dict | None:
-    """The calibration a (re-)install applies to its new config: the one saved for this PC and model.  #566: on Linux
-    HIP too - hardware_key now names the AMD cards, so a `./setup.sh --calibrate` run is matched to its card and
-    model.  Windows HIP keeps the defaults for now (not tried there).  Setup still offers the tuning itself on NVIDIA
-    only: each control is verified on HIP first."""
-    if hip and WIN:
-        return None
-    return saved_calibration(cfg)
 
 
 def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
@@ -7808,8 +7691,6 @@ def main() -> int:
                     help="NVIDIA: the CUDA toolkit of this model's engine. auto (default): CUDA 13; CUDA 12 (experimental) when a chosen card is older than CUDA 13 supports (Pascal, "
                          "Volta). 12 also runs with an older driver (Windows 528+, Linux 525+). docs/OLDER_GPUS.md")
     ap.add_argument("--check", action="store_true", help="only check this PC and exit")
-    ap.add_argument("--calibrate", action="store_true",
-                    help="tune the engine's settings for this PC (about 15-30 minutes, longer on a slow card), then start the model")
     ap.add_argument("--draft-vocab", choices=list(DRAFT_VOCABS),
                     help="the draft layer's tokens: cjk = with Chinese, Japanese and Korean (default), en = English "
                          "and code only (~110 MiB less VRAM, English answers 1-2%% faster), cyrillic = English, code "
@@ -7928,21 +7809,6 @@ def main() -> int:
         return start(cfg_file.resolve(), a.port, run_gpu, yes=a.yes, layer_split=a.layer_split, save=a.save,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib})
-    if have and a.calibrate and not (a.setup or a.model or a.family or a.check):
-        update_installed_engine()
-        pick_cfg = have[0]
-        if len(have) > 1:
-            say()
-            for i, c in enumerate(have, 1):
-                say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
-            pick_cfg = have[int(ask("Tune which one?", [str(i) for i in range(1, len(have) + 1)], "1", a.yes)) - 1]
-        if not calibrate_config(pick_cfg):             # #447: said again where it is not lost above the start
-            say()
-            warn("this PC is NOT tuned: the tuning failed (the reason is above); the model "
-                 + ("keeps" if a.no_start else "starts with") + " the default settings")
-        return 0 if a.no_start else start(pick_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split, save=a.save,
-                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
-                           "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
     if have and not (a.setup or a.model or a.family or a.check or a.no_start):
         update_installed_engine()
         if len(have) == 1:
@@ -9021,29 +8887,13 @@ def main() -> int:
     if cfg_path.name != f"strata-{tag.lower()}.json":
         cfg["setup_tag"] = tag                         # setup reads the model from it (not from the name)
         cfg["log"] = str(ROOT / "logs" / (cfg_path.stem + ".log"))
-    cal = setup_calibration(cfg, hip)                  # #566: Linux HIP too; the tuning is offered on NVIDIA only
-    if cal is not None:
-        sys.path.insert(0, str(ROOT / "tools"))
-        import calibrate as CAL
-        cfg["args"] = CAL.apply(cfg["args"], cal.get("settings") or {})
-        if "env" in cal:                               # a calibration from before the env step leaves "env" as it is
-            cfg["env"] = CAL.apply_env(cfg.get("env"), cal["env"])
-        ok("the settings tuned for this PC earlier are used" + (f" ({cal['date']})" if cal.get("date") else ""))
-    else:                                              # #642: measured counts (a calibration) win over the rule
-        cfg["args"] = recommend_pool_workers(cfg["args"])
-        for line in two_socket_note(cpu_sockets()):    # bench tips: text only, the config is not touched
-            say("  " + line)
+    cfg["args"] = recommend_pool_workers(cfg["args"])
+    for line in two_socket_note(cpu_sockets()):        # bench tips: text only, the config is not touched
+        say("  " + line)
     for line in bench_tips(cfg["args"], cfg.get("env"), ram, MODELS[model]["ram_gb"], gpu.get("vram_gb", 0.0), vision, WIN,
                            small_family(family)):
         say("  " + line)
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
-    # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
-    if cal is None and not hip and not a.no_start and not a.yes and ask(
-            "Tune Momoe for this PC now? It measures a few engine settings (about 15-30 minutes, longer on a slow card; the PC is busy "
-            "meanwhile; later: START-HERE --calibrate)", ["y", "n"], "y", a.yes) == "y":
-        tuned = calibrate_config(cfg_path)
-    else:
-        tuned = None                                   # not asked for: nothing to repeat below
     ok(f"config: {cfg_path.name}")
 
     say()
@@ -9060,9 +8910,6 @@ def main() -> int:
         for line in parallel_note(None, [g.get("vram_gb", 0.0) for g in chosen], MODELS[model]["arena_gb"], ctx, kv,
                                   "--kv-resident" in cfg["args"]):
             say("  " + line)
-    if tuned is False:                                 # #447: a failed tuning is repeated here, not only above
-        say("  Tuning:           FAILED (the reason is above): the default settings stay - "
-            f"{'START-HERE.bat' if WIN else './setup.sh'} --calibrate tries again")
     if a.no_start:
         return 0
     # offered only when someone answers (--yes asks nothing), default no; the benchmark starts its own server and stops it

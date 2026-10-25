@@ -1,5 +1,5 @@
 """#642: setup recommends the expert pool's worker count on a hybrid CPU (the P-cores but the host loop's one, plus
-half of the E-cores) and writes nothing new anywhere else; a calibration's measured count wins over the rule.
+half of the E-cores) and writes nothing new anywhere else.
 
     python -m unittest tools.test_setup_hybrid
 """
@@ -101,16 +101,6 @@ class HybridWorkers(unittest.TestCase):
         i = a.index("--pool-workers")
         self.assertEqual(a[:i] + a[i + 2:], plain["args"])
 
-    def test_calibration_wins(self):
-        ram, found = PROFILES["96GB-1x16GB"]
-        cal = {"settings": {"--pool-workers": "11"}, "date": "2026-10-03"}
-        extra = [mock.patch.object(setup, "cpu_cores", lambda: (8, 16)),
-                 mock.patch.object(setup, "saved_calibration", lambda cfg: cal)]
-        code, text, cfg, _ = install(ram, found, ["--family", "qwen", "--no-start", "--model", "Q2_0"], extra=extra)
-        self.assertEqual(code, 0, text)
-        a = cfg["args"]
-        self.assertEqual(a[a.index("--pool-workers") + 1], "11")
-        self.assertEqual(a.count("--pool-workers"), 1)
 
 
 if __name__ == "__main__":

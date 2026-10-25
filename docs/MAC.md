@@ -176,7 +176,7 @@ The arena was 11.5-14.7 GB. Tokens per second, one token per step (no MTP), medi
 - **Images (vision):** `--vision yes` in setup. Checked on one test picture with Q2_0 and UD-Q4_K_XL: the answers equal the HIP engine's, and text output is unchanged with vision on. No other tests yet.
 - **Context:** measured up to 32K (needles, KL). Setup recommends 32K below 96 GB and 64K from 96 GB. Up to the model's 262K can be set, but it is not measured.
 - **One request at a time.** `--parallel` (batch slots) is not ported. Several clients queue.
-- **Not ported:** the control vector (`--control-vector-scaled`) and the PC tuning (`--calibrate`).
+- **Not ported:** the control vector (`--control-vector-scaled`).
 - **Streaming:** measured at 32 GB only. The model's file must be on the internal SSD; an external disk is untested and likely much slower.
 - **Families:** the original Qwen3.8-Flash-Next and Unsloth's UD-Q4/Q5/Q6_K_XL are measured (above). Setup repacks Unsloth's shards into one file for the GPU. The Swift and Coder releases are not set up on Mac yet, and Qwen3.6 does not run on the Mac engine.
 - **Engine only from source.** There is no ready-made Mac engine in the release zips.

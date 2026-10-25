@@ -246,7 +246,7 @@ host fails that window with an error naming the setting (the server then restart
 stale hand-off. Normally the host's own per-layer wait (20 s, #267) ends a stalled window first and releases every
 GPU wait, the hand-off's included. Test hook: `STRATA_TEST_HANDOFF_DROP=N` withholds the flag in the first stage's
 N-th window, as if the publish were lost.
-## Prompt chunks sized for the pipeline (`--prefill-pipe`, opt-in; setup's `--calibrate` sets it)
+## Prompt chunks sized for the pipeline (`--prefill-pipe`, opt-in)
 
 `--prefill auto` takes the largest chunk the buffers allow (up to 8192), which is what one card wants: a chunk costs a
 fixed pass over its layers' experts (b: dequantized, or streamed over PCIe where they are not in VRAM) plus a part per
@@ -263,7 +263,8 @@ arithmetic), about 5000 on two RTX 3090 Ti (part of the experts streamed per chu
 costs: a fixed 1024 read 19-24% slower on the two RTX 3090 Ti and 22-36% slower on two RTX 4090 (reported in the PR by
 MistyMoonR). So it is neither guessed nor learned from the prompts the engine serves (that made a prompt's chunks, and
 so its output bits, depend on how busy the PC happened to be): like the PCIe share and the draft floor, it is a
-setting of the PC that setup's `--calibrate` measures once (`tools/calibrate.py`: on a layer split, the prompt read
+setting of the PC that Strata's `--calibrate` measured once (MoMoE has none: set it in the config's `args`; Strata's
+`tools/calibrate.py`: on a layer split, the prompt read
 speed of a 2K- and an 8K-token prompt - the same text every time, after a header of its own so nothing is reused -
 with the chunks off, evened out and b/a 768, 1536, 3072 and 6144; the best is kept only when it reads faster than off
 in each of three paired rounds and by more than 3% in the median) and writes into the config. Measured so: four GP100

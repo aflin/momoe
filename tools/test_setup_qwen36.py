@@ -239,7 +239,6 @@ class Base(unittest.TestCase):
             mock.patch.object(setup, "refresh_draft_vocab", lambda *a, **k: None),
             mock.patch.object(setup, "mtp_corrupt", lambda *a, **k: False),
             mock.patch.object(setup, "write_run_script", lambda tag, cfg, port, *_: self.t / f"run-{tag}.sh"),
-            mock.patch.object(setup, "saved_calibration", lambda cfg: None),
             mock.patch.object(setup, "start", mock.Mock(side_effect=AssertionError("started"))),
             mock.patch.dict(sys.modules, {"gguf_reader": types.SimpleNamespace(GGUFFile=FakeGGUF)}),
             mock.patch.object(sys, "argv", ["setup.py", *(["--yes"] if answers is None else []), "--no-start",

@@ -117,8 +117,6 @@ def install(ram, found, argv, answers=None, extra=(), avx512=False, configs=()):
             mock.patch.object(setup, "mtp_corrupt", lambda *a, **k: False),
             mock.patch.object(setup, "refresh_draft_vocab", lambda *a, **k: None),
             mock.patch.object(setup, "write_run_script", lambda tag, cfg, port, *_: t / f"run-{tag}.bat"),
-            mock.patch.object(setup, "saved_calibration", lambda cfg: None),
-            mock.patch.object(setup, "calibrate_config", mock.Mock(side_effect=AssertionError("calibrated"))),
             mock.patch.dict(sys.modules, {"gguf_reader": types.SimpleNamespace(GGUFFile=FakeGGUF)}),
             mock.patch.object(sys, "argv", ["setup.py", "--models-dir", str(t / "models"), *argv]
                               + (["--yes"] if answers is None else [])),

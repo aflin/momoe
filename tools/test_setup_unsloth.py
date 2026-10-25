@@ -197,7 +197,6 @@ class Base(unittest.TestCase):
             mock.patch.object(setup, "run", fake_run),
             mock.patch.object(setup, "refresh_draft_vocab", lambda *a, **k: None),
             mock.patch.object(setup, "write_run_script", lambda tag, cfg, port, *_: self.t / f"start-{tag}.bat"),
-            mock.patch.object(setup, "saved_calibration", lambda cfg: None),
             mock.patch.object(setup, "start", mock.Mock(side_effect=AssertionError("started"))),
             mock.patch.dict(sys.modules, {"gguf_reader": types.SimpleNamespace(GGUFFile=FakeGGUF)}),
             mock.patch.object(sys, "argv", ["setup.py", *(["--family", "unsloth"] if family else []),
