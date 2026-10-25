@@ -7656,7 +7656,8 @@ def main() -> int:
                     help="the most image tokens a picture becomes (default 1024 with the encoder on the GPU, 300 on "
                          "the CPU): more reads small text and charts better, and takes longer to encode; remembered "
                          "for this model")
-    # image generation (Qwen-Image): in preview, not offered in setup or --help; the options still work (docs/IMAGES.md)
+    # image generation (Qwen-Image): Strata's preview, not in --help; Momoe's setup does not install it and says so
+    # (an "images" section written into a config by hand still works: docs/IMAGES.md)
     ap.add_argument("--images", choices=["qwen-image", "no"],
                     help=argparse.SUPPRESS)
     ap.add_argument("--image-quant", choices=["Q4_K_M", "Q6_K", "Q8_0"],
@@ -7753,6 +7754,9 @@ def main() -> int:
                          "sycl = Intel Arc, EXPERIMENTAL: Linux, built from source (docs/INTEL_ARC.md)")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
+    if a.images == "qwen-image" or any((a.image_quant, a.image_backend, a.image_native, a.image_gpu_policy)):
+        fail("--images: Momoe's setup does not install image generation (Qwen-Image)",
+             "an \"images\" section written into the config by hand still works: docs/IMAGES.md")
     # Momoe: --model also takes a size name (IQ4_XS) that model_key resolves with --family; no preview families
     if PREVIEW_FAMILIES and a.model and a.model not in model_choices() and a.family not in PREVIEW_FAMILIES:
         ap.error(f"--model {a.model} is a size of " + ", ".join(f"--family {f}" for f, d in PREVIEW_FAMILIES.items()

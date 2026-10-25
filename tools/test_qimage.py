@@ -162,6 +162,14 @@ class Config(unittest.TestCase):
         for flag in ("--images", "--image-quant", "--image-backend", "--image-gpu-policy"):
             self.assertRegex(src, re.escape(f'ap.add_argument("{flag}"'))
 
+    def test_momoe_s_setup_says_it_does_not_install_it(self):
+        for argv in (["--images", "qwen-image"], ["--image-quant", "Q8_0"]):
+            with mock.patch.object(setup.sys, "argv", ["setup.py", "--yes", *argv]), \
+                    mock.patch.object(setup, "step", side_effect=AssertionError("set up")):
+                with self.assertRaises(SystemExit) as e:
+                    quiet(setup.main)
+            self.assertEqual(e.exception.code, 1, argv)
+
 
 class Native(unittest.TestCase):
     """I2: the native DiT runner's patch for the pinned stable-diffusion.cpp, and its config switch."""
