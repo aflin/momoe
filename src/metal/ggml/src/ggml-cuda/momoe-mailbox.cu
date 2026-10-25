@@ -96,29 +96,3 @@ bool ggml_cuda_momoe_mailbox(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
     return true;
 }
 
-// Momoe: a copy by a kernel (host memory the GPU maps -> device memory) on `stream`: the readers' fills while a resident
-// mailbox's wait holds the GPU (a cudaMemcpyAsync then stalled behind the compute stream's own copies)
-static __global__ void momoe_copy_kernel(const uint4 * __restrict__ src, uint4 * __restrict__ dst, size_t n16) {
-    for (size_t i = blockIdx.x * (size_t) blockDim.x + threadIdx.x; i < n16; i += (size_t) gridDim.x * blockDim.x) {
-        dst[i] = src[i];
-    }
-}
-
-static __global__ void momoe_copy_tail(const unsigned char * __restrict__ src, unsigned char * __restrict__ dst, size_t n) {
-    for (size_t i = threadIdx.x; i < n; i += blockDim.x) {
-        dst[i] = src[i];
-    }
-}
-
-extern "C" int momoe_copy_to_device(void * dst, const void * src, size_t n, void * stream) {
-    cudaStream_t st = (cudaStream_t) stream;
-    const size_t n16 = ((uintptr_t) dst % 16 == 0 && (uintptr_t) src % 16 == 0) ? n / 16 : 0;
-    if (n16) {
-        const int blocks = (int) std::min<size_t>(64, (n16 + 255) / 256);
-        momoe_copy_kernel<<<blocks, 256, 0, st>>>((const uint4 *) src, (uint4 *) dst, n16);
-    }
-    if (n - n16 * 16) {
-        momoe_copy_tail<<<1, 256, 0, st>>>((const unsigned char *) src + n16 * 16, (unsigned char *) dst + n16 * 16, n - n16 * 16);
-    }
-    return cudaGetLastError() == cudaSuccess ? 0 : -1;
-}
