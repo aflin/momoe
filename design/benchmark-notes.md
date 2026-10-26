@@ -73,6 +73,11 @@ call (whole and streamed) and answered after the tool's result; Lightning and Ge
   3.10 / 3.52 / 3.19 / 2.64 tok/s, the lowest available memory 107 / 59 / 43 / 27 / 21 / 12 GB: the best in the middle
   (more experts on the GPU leaves less page cache for the CPU's). MoMoE reads the experts it lacks from the SSD past the
   page cache (`--direct-io`): 9.3 tok/s, 11.7 drafting. The table's earlier 2.3 / 2.5 was the older cold check.
+- **Ling-3.0-flash Sante IQ3_XXS** (2026-10-26; llama.cpp 7182ef7, its server at 32K context, greedy, the same 300-token
+  code prompt as MoMoE's engine, three runs, the first one warming its cache): `--cpu-moe --moe-cache-mib 6144`
+  27.1-27.4 tok/s (8192 does not fit), `--n-cpu-moe` 38 / 40 26.0-26.7 / 24.9-25.7 (36 does not fit at 32K;
+  `llama-bench` tg128 at 36: 23.6). MoMoE with setup's config: 33.5 (the second half), the plain model 35.6.
+  [bench/results/2026-10-26-ling3](../bench/results/2026-10-26-ling3/README.md).
 - **Flint** (2026-10-22; llama.cpp a37cc46, the commit that added it; 32K context; greedy 300 tokens, two runs): MoMoE
   runs it as LFM2.5 with every block attention, attention sinks, a 513-token sliding window on 35 of its 49 blocks
   (their keys and values in a ring of 1,792 positions: 0.14 GiB, not 2.3 at 32K), a shared expert, and llama.cpp's

@@ -109,10 +109,14 @@ FLINT_PATTERNS = (
 # merges run on the characters as they are (no byte mapping); a run of line breaks that is one token is that token, and
 # a piece outside the vocabulary is its UTF-8 bytes as <0xXX> tokens (SPM).
 GEMMA4_PATTERN = r"[^\n]+|[\n]+"
+# `bailingmoe2` (Ling 3.0, bailingmoe3 models; also `bailingmoe`): llama-vocab.cpp's LLAMA_VOCAB_PRE_TYPE_BAILINGMOE - the
+# tokenizer.json pattern with its possessive quantifiers made greedy as llama.cpp does; one digit a piece; no ignore_merges
+BAILINGMOE_PATTERN = (r"'(?:[sSdDmMtT]|[lL][lL]|[vV][eE]|[rR][eE])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}"
+                      r"| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+")
 PRE_PATTERNS = {"qwen35": QWEN35_PATTERN, "tekken": TEKKEN_PATTERN, "glm4": CHATGLM4_PATTERN, "glm5": CHATGLM4_PATTERN,
                 "lfm2": CHATGLM4_PATTERN, "flint": FLINT_PATTERNS[-1],
                 "pixtral": CHATGLM4_PATTERN,   # (Nemotron 3.5 Lightning: llama-vocab.cpp's LLAMA3 group, as lfm2)
-                "gemma4": GEMMA4_PATTERN}
+                "gemma4": GEMMA4_PATTERN, "bailingmoe2": BAILINGMOE_PATTERN, "bailingmoe": BAILINGMOE_PATTERN}
 SPM = {"gemma4"}                              # SentencePiece-style BPE (above): no byte mapping
 SPACE = "\u2581"
 PRE_SEQUENCES = {"flint": FLINT_PATTERNS}     # pre-tokenizers of several patterns in a row (the last one is PRE_PATTERNS')
