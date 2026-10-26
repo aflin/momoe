@@ -724,6 +724,9 @@ GGML_FAMILIES = {
                    "models": {"IQ3_XXS": {"about": "3-bit (imatrix), measured; close other programs", "ram_gb": 60}},
                    "default": "IQ3_XXS",
                    "context": 65536, "min_vram_gb": 11,               # measured on a 12 GB card (7 MLA blocks: a small KV)
+                   # its prompt chunks (measured on the RTX 4070 Ti, the server's benchmark: 16K prompts 882 / 1,192 /
+                   # 1,494 tok/s at 1024 / 2048 / 4096, writing the same within the runs' spread)
+                   "chunk": 4096,
                    "license": "MIT: https://huggingface.co/inclusionAI/Ling-3.0-flash-Sante"},
     "flint": {"title": "Flint 40B-A2.5B", "by": "Recursive's coding-agent model; Unsloth's GGUFs",
               "about": "a coding-agent MoE, 2.5B active; 14.5-25 GB",
@@ -7231,7 +7234,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         ok(("every expert fits in memory" if pool is None else
             f"a {pool} GiB expert pool (the rest of the experts are read from the SSD as needed)") + f", {ctx // 1024}K context")
     else:
-        args += ["--chunk", "1024"]
+        args += ["--chunk", str(fam.get("chunk", 1024))]
         ok(f"{ctx // 1024}K context")
     if own_mtp:                                          # the 35B-A3B families draft with the file's own MTP layer
         args += ["--mtp", "4", "--draft-vocab", str(ROOT / "data" / DRAFT_VOCABS[a.draft_vocab or "en"])]

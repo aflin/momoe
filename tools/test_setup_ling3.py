@@ -67,6 +67,7 @@ class Ling3Family(unittest.TestCase):
         a = cfg["args"]
         self.assertEqual(a[a.index("-m") + 1], "/m/ling3sante-IQ3_XXS/Ling-3.0-flash-Sante-IQ3_XXS-00001-of-00002.gguf")
         self.assertEqual(a[a.index("--ctx") + 1], "65536")
+        self.assertEqual(a[a.index("--chunk") + 1], "4096")
         self.assertNotIn("--draft-vocab", a)
         self.assertNotIn("--mtp", a)                    # (on a 12 GB card drafting measured slower: 20.8-21.5 vs 22.5)
         self.assertEqual(cfg["model_name"], "ling-3.0-flash-sante-iq3_xxs")

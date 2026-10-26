@@ -457,6 +457,8 @@ struct CpuExperts {
     size_t gate_bytes = 0, gate_row = 0;                     // (null: Nemotron's h = relu(up . x)^2)
     ggml_type gate_type = GGML_TYPE_COUNT;
     bool gelu = false;                                       // gemma4: h = gelu(gate . x) * (up . x), gate and up one
+    float limit = 0;                                         // ling: SwiGLU clamped (ggml_swiglu_clamp: the gate at most
+                                                             // limit, up within +-limit) where the block's limit is set
     int up_row0 = 0;                                         // tensor: its up rows from up_row0 (n_ff), its gate rows first
     int n_in = 0, n_ff = 0, k = 0, T = 0;                    // latent width, expert width, top-k, tokens
     std::vector<Miss> miss;
@@ -530,6 +532,10 @@ struct CpuExperts {
                     if (wg) {
                         float g;
                         tg->vec_dot(n_in, &g, 0, wg + (size_t) r * gate_row, 0, a, 0, 1);
+                        if (limit > 0) {
+                            g = std::min(g, limit);
+                            v = std::clamp(v, -limit, limit);
+                        }
                         // (gelu: ggml's tanh form, as ggml_geglu_split)
                         const float a2 = gelu ? 0.5f * g * (1.0f + tanhf(0.7978845608028654f * g * (1.0f + 0.044715f * g * g))) : 0;
                         h[(size_t) (base + j) * n_ff + r] = gelu ? a2 * v : g / (1.0f + expf(-g)) * v;
@@ -606,6 +612,7 @@ static void cpu_parts(const Model & m, const Layer & L, CpuExperts & C) {
     C.gate_bytes = L.exp_bytes[0];
     C.gate_row = C.gate ? ggml_row_size(C.gate_type, L.exp_ne[0][0]) : 0;
     C.gelu = m.gemma4;
+    C.limit = m.ling ? m.clamp_exp[&L - m.layers.data()] : 0.0f;
     C.up_row0 = 0;
     if (m.gemma4) {                                          // gate | up in one tensor: GEGLU
         C.n_ff /= 2;
@@ -623,7 +630,7 @@ static void cpu_parts(const Model & m, const Layer & L, CpuExperts & C) {
 // Ornith-1.5-35B IQ4_XS (52%: 14.1 ms per token, the copies 15.6)
 static bool hybrid_model(const Model & m) {
     static const char * q = getenv("MOMOE_QWEN_HYBRID");
-    return m.nemo || (!(q && q[0] == '0') && !m.qwen4 && !m.glm5 && !m.ling && (!m.lfm || m.flint));   // (flint: SwiGLU experts as qwen35moe's)
+    return m.nemo || (!(q && q[0] == '0') && !m.qwen4 && !m.glm5 && (!m.lfm || m.flint));   // (flint: SwiGLU experts as qwen35moe's)
 }
 
 
@@ -4244,6 +4251,18 @@ static ggml_tensor * glm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
     Model & m = e.m;
     Layer & L = m.layers[il];
     const int k = m.n_used;
+    const bool hyb = hybrid_on(e, L, T);                     // ling --hybrid: the CPU computes the experts the pool
+    if (hyb) {                                               // lacks, from the experts' input (as lfm_moe_layer)
+        if (!ggml_is_contiguous(x)) x = ggml_cont(c, x);
+        ggml_build_forward_expand(gf, x);
+        e.xl[il] = x;
+    }
+#if defined(MOMOE_CUDA)
+    const bool mbx = mb_on(e) && hyb && ns_paused(e, il);   // the mailboxes: no stops in this layer
+    ggml_tensor * send = nullptr;
+#else
+    const bool mbx = false;
+#endif
     ggml_tensor * lg = ggml_mul_mat(c, L.gate_inp, x);
     ggml_format_name(lg, "ffn_moe_logits-%d", il);
     ggml_tensor * probs = ggml_sigmoid(c, lg);                                            // [n_expert, T]
@@ -4268,14 +4287,28 @@ static ggml_tensor * glm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
     Group & G = e.pool.g[L.grp];
     const bool big = staged(k, G.n_slots, T);
 #if defined(MOMOE_CUDA)
-    const bool rmb = e.rmb && !big && T <= HYB_MAX_T;       // the resident mailbox (rmb_layer): no stop here
+    const bool rmb = e.rmb && !big && T <= HYB_MAX_T && !mbx;   // the resident mailbox (rmb_layer): no stop here
 #else
     const bool rmb = false;
 #endif
-    ggml_format_name(both, rmb ? "rmbtopk-%d" : "topk-%d", il);   // topk-: made resident here (the stop)
+    ggml_format_name(both, rmb ? "rmbtopk-%d" : mbx ? "mbtopk-%d" : "topk-%d", il);   // topk-: made resident here (the stop)
     e.topk[il] = both;
     ggml_build_forward_expand(gf, both);
     if (pred_in) top = ggml_view_2d(c, both, k, T, both->nb[1], 0);
+#if defined(MOMOE_CUDA)
+    if (mbx) {                                               // the layer's input and choice to the CPU, at once
+        MbLayer & B = e.mb.layer[il];
+        B.send.n_f32 = m.n_embd * T;
+        B.send.n_i32 = k * T;
+        ggml_tensor * args[2] = {x, pred_in ? ggml_cont(c, top) : top};
+        send = ggml_custom_4d(c, GGML_TYPE_I32, 1, 1, 1, 1, args, 2, momoe_mailbox_cpu_stub, 1, &B.send);
+        ggml_format_name(send, "mbsend-%d", il);
+        ggml_build_forward_expand(gf, send);
+        e.force_gpu.push_back(send);
+        e.mb_graph = true;
+        e.mb.graph.push_back(il);
+    }
+#endif
     ggml_tensor * slots = nullptr;
 #if defined(MOMOE_CUDA)
     if (rmb) {                                               // the choice to the worker; the slots back from it
@@ -4311,6 +4344,25 @@ static ggml_tensor * glm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
     if (helper_on(e, L, big))
         dn = ggml_add(c, dn, helper_down(e, c, L, x3, top, T,
                                          [&](ggml_tensor * g, ggml_tensor * u) { return glm_swiglu(c, g, u, m.clamp_exp[il]); }));
+    // the shared expert before the CPU's experts are waited for: the GPU computes it while the CPU works
+    ggml_tensor * sh = glm_swiglu(c, ggml_mul_mat(c, L.gate_sh, x), ggml_mul_mat(c, L.up_sh, x), m.clamp_sh[il]);
+    sh = ggml_mul_mat(c, L.down_sh, sh);
+    if (hyb) ggml_build_forward_expand(gf, sh);
+#if defined(MOMOE_CUDA)
+    if (send) {                                              // the CPU's experts, waited for after the GPU's own
+        MbLayer & B = e.mb.layer[il];
+        B.wait.n_f32 = m.n_embd * k * T;
+        ggml_tensor * args[1] = {send};
+        ggml_tensor * cpu = ggml_custom_4d(c, GGML_TYPE_F32, m.n_embd, k, T, 1, args, 1, momoe_mailbox_cpu_stub, 1, &B.wait);
+        ggml_format_name(cpu, "mbwait-%d", il);
+        e.force_gpu.push_back(cpu);
+        dn = ggml_add(c, dn, cpu);
+    } else
+#endif
+    if (hyb) {                                               // the missing experts' outputs (zero slots here), from the CPU
+        ggml_format_name(dn, "moedn-%d", il);                // (joined at this stop: eval_cb)
+        dn = ggml_add(c, dn, ggml_view_3d(c, L.cpu_dn, m.n_embd, k, T, L.cpu_dn->nb[1], L.cpu_dn->nb[2], 0));
+    }
     dn = ggml_mul(c, dn, w);
     ggml_build_forward_expand(gf, dn);
     ggml_tensor * v[64];                                     // the views before the adds (llama.cpp's order)
@@ -4324,8 +4376,6 @@ static ggml_tensor * glm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
         moe = ggml_add(c, moe, v[i]);
         ggml_build_forward_expand(gf, moe);
     }
-    ggml_tensor * sh = glm_swiglu(c, ggml_mul_mat(c, L.gate_sh, x), ggml_mul_mat(c, L.up_sh, x), m.clamp_sh[il]);
-    sh = ggml_mul_mat(c, L.down_sh, sh);
     ggml_format_name(moe, "ffn_moe_out-%d", il);
     return ggml_add(c, moe, sh);
 }
@@ -4398,7 +4448,8 @@ static DecodeCache g_dec;
 static bool decode_cache_ok(const Engine & e, int T, const Out * out) {
     static const bool off = getenv("MOMOE_NO_GRAPH_REUSE") != nullptr;
     // Bolt; flint while its CPU path runs (the copies stop at every layer: no graph to keep)
-    if (off || !e.mailbox || !(e.m.nemo || ((e.m.flint || e.m.gemma4) && e.hyb_active)) || T != 1 || (out && (out->all || out->snap)))
+    if (off || !e.mailbox || !(e.m.nemo || ((e.m.flint || e.m.gemma4 || e.m.ling) && e.hyb_active)) || T != 1 ||
+        (out && (out->all || out->snap)))
         return false;
     for (const auto & G : e.pool.g)
         if (staged(e.m.n_used, G.n_slots, 1)) return false;  // every MoE layer through its mailbox
@@ -4441,6 +4492,10 @@ static int forward_decode(Engine & e, const int32_t * toks, int p0, Out * out) {
             ggml_set_input(in.mask_swa);
             in.kv_idx_swa = D.kv_idx_swa = ggml_new_tensor_1d(c, GGML_TYPE_I64, T);
             ggml_set_input(in.kv_idx_swa);
+        } else if (m.ling) {                                 // its MLA blocks: RoPE, the cache row as an input
+            in.pos = D.pos = ggml_new_tensor_1d(c, GGML_TYPE_I32, (int64_t) T * 4);
+            ggml_set_input(in.pos);
+            in.kv_idx = D.kv_idx;
         }
         ggml_tensor * x = ggml_get_rows(c, m.tok_embd, in.tokens);
         D.on_cpu = D.on_gpu = nullptr;
@@ -4450,7 +4505,21 @@ static int forward_decode(Engine & e, const int32_t * toks, int p0, Out * out) {
         }
         if (m.gemma4) x = ggml_scale(c, x, sqrtf((float) m.n_embd));
         for (int il = 0; il < m.n_layer && m.gemma4; ++il) x = gemma_block(e, c, D.gf, il, x, in, p0, T, n_kv, D.kv_idx);
-        for (int il = 0; il < m.n_layer && !m.flint && !m.gemma4; ++il) {
+        for (int il = 0; il < m.n_layer && m.ling; ++il) {   // ling: as forward's blocks, without the predictions
+            Layer & L = m.layers[il];
+            ggml_tensor * h = norm(c, x, L.attn_norm, m.rms_eps);
+            e.cur_layer = il;
+            h = L.kind == 'k' ? glm_kda_layer(e, c, D.gf, L, h, T) : ling_mla_layer(e, c, D.gf, L, h, in, p0, T, n_kv);
+            x = ggml_add(c, h, x);
+            ggml_tensor * f = norm(c, x, L.ffn_norm, m.rms_eps);
+            if (il < m.n_dense)
+                f = ggml_mul_mat(c, L.ffn_down, glm_swiglu(c, ggml_mul_mat(c, L.ffn_gate, f), ggml_mul_mat(c, L.ffn_up, f),
+                                                           m.clamp_sh[il]));
+            else
+                f = glm_moe_layer(e, c, D.gf, il, f, T, nullptr);
+            x = ggml_add(c, f, x);
+        }
+        for (int il = 0; il < m.n_layer && !m.flint && !m.gemma4 && !m.ling; ++il) {
             Layer & L = m.layers[il];
             ggml_tensor * h = norm(c, x, L.attn_norm, m.rms_eps);
             h = L.kind == 'm' ? mamba2_layer(e, c, D.gf, L, h, D.seq0, T)
@@ -4496,6 +4565,9 @@ static int forward_decode(Engine & e, const int32_t * toks, int p0, Out * out) {
     ggml_backend_tensor_set(D.mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
     if (D.mask_swa) {                                        // flint: the window over its ring, the RoPE position
         flint_swa_inputs(e, D.mask_swa, D.kv_idx_swa, p0, 1);
+        const int32_t pp[4] = {p0, p0, p0, 0};
+        ggml_backend_tensor_set(D.pos, pp, 0, sizeof pp);
+    } else if (m.ling) {                                     // (ling: its MLA blocks' RoPE position)
         const int32_t pp[4] = {p0, p0, p0, 0};
         ggml_backend_tensor_set(D.pos, pp, 0, sizeof pp);
     }
@@ -6502,7 +6574,7 @@ int main(int argc, char ** argv) {
                && e.pool.n_slots < e.m.n_exp_all) {         // (a device pool: the readers' copies would wait behind
         rmb_init(e);                                         // the mailbox's wait, measured: never with one)
         if (!getenv("MOMOE_CUDA_GRAPHS")) setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0);
-    } else if ((e.m.flint || e.m.gemma4) && e.mailbox) {
+    } else if ((e.m.flint || e.m.gemma4 || e.m.ling) && e.mailbox) {
         // flint through its mailboxes: the kept decode graph (forward_decode) replayed as a CUDA graph (RTX 4070 Ti,
         // UD-IQ3_XXS: 79-82 -> 87 tok/s, the same tokens); the trial's few graphs with stops fit beside it
     } else if (!getenv("MOMOE_CUDA_GRAPHS") && !getenv("GGML_CUDA_DISABLE_GRAPHS")) {   // CUDA graphs for the
