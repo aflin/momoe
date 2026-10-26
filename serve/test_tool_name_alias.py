@@ -193,5 +193,69 @@ class DriftedMcpNames(unittest.TestCase):
         self.assertNotIn("namespace", calls[0])
 
 
+def plain_tool(name):
+    return {"name": name, "parameters": {"type": "object", "properties": {"url": {"type": "string"}}}}
+
+
+def call_text(name, param="url", value="https://example.com"):
+    return f"<tool_call>\n<function={name}>\n<parameter={param}>\n{value}\n</parameter>\n</function>\n</tool_call>"
+
+
+def run_parser(text, tools, width=0):
+    parser = OutputParser(thinking=False, tools=tools, stream_tools=True, declared_only=True)
+    evs = []
+    step = width or len(text) or 1
+    for k in range(0, len(text), step):
+        evs += parser.feed(text[k:k + step])
+    evs += parser.finish("stop")
+    return evs, parser
+
+
+class CollapsedUnderscoreNames(unittest.TestCase):
+    """#3796: `mcp__server__tool` written as `mcp_server_tool` is a spelling of the declared tool (the same class of
+    difference as namespace__member). A name that is only similar stays text, and is named for the client."""
+    MCP = [plain_tool("mcp__playwright__browser_navigate"), plain_tool("mcp__playwright__browser_snapshot"),
+           plain_tool("mcp__playwright__browser_tabs"), plain_tool("todo_write")]
+
+    def test_the_collapsed_spelling_is_the_declared_tool(self):
+        for name in ("browser_navigate", "browser_snapshot", "browser_tabs"):
+            for width in (0, 1, 5):
+                with self.subTest(name=name, width=width):
+                    evs, parser = run_parser("Opening it.\n" + call_text("mcp_playwright_" + name), self.MCP, width)
+                    found = [e.call for e in evs if e.kind == "tool_call"]
+                    self.assertEqual([c.name for c in found], ["mcp__playwright__" + name])   # the client gets the name it declared
+                    self.assertEqual(found[0].arguments, {"url": "https://example.com"})
+                    self.assertEqual(text_of(evs).strip(), "Opening it.")
+                    self.assertEqual((parser.unread, parser.unread_names), (0, []))
+
+    def test_the_declared_spelling_and_a_plain_tool_are_unchanged(self):
+        evs, _ = run_parser(call_text("mcp__playwright__browser_tabs") + "\n" + call_text("todo_write"), self.MCP)
+        self.assertEqual([e.call.name for e in evs if e.kind == "tool_call"], ["mcp__playwright__browser_tabs", "todo_write"])
+
+    def test_a_tool_declared_in_the_collapsed_spelling_wins(self):
+        tools = self.MCP + [plain_tool("mcp_playwright_browser_tabs")]
+        evs, _ = run_parser(call_text("mcp_playwright_browser_tabs"), tools)
+        self.assertEqual([e.call.name for e in evs if e.kind == "tool_call"], ["mcp_playwright_browser_tabs"])
+
+    def test_two_tools_with_the_same_collapsed_spelling_are_not_guessed(self):
+        tools = [plain_tool("a__b_c"), plain_tool("a_b__c")]
+        evs, parser = run_parser(call_text("a_b_c"), tools)
+        self.assertEqual([e for e in evs if e.kind == "tool_call"], [])
+        self.assertIn("a_b_c", text_of(evs))
+        self.assertEqual(parser.unread_names, ["a_b_c"])
+
+    def test_a_reordered_or_renamed_tool_stays_text_and_is_named(self):
+        """The LibreChat case (`server1_label_values` for `label_values_mcp_server1`) and the bash/shell case: no guessing."""
+        for declared, written in (("label_values_mcp_server1", "server1_label_values"), ("shell", "bash"),
+                                  ("godot_execute_gdscript", "execute_gdscript")):
+            for width in (0, 3):
+                with self.subTest(written=written, width=width):
+                    raw = "Done.\n" + call_text(written)
+                    evs, parser = run_parser(raw, [plain_tool(declared)], width)
+                    self.assertEqual([e for e in evs if e.kind == "tool_call"], [])
+                    self.assertEqual(text_of(evs), raw)                                    # the text is exactly what the model wrote
+                    self.assertEqual((parser.unread, parser.unread_names), (1, [written]))
+
+
 if __name__ == "__main__":
     unittest.main()

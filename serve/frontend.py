@@ -1383,6 +1383,12 @@ class OutputParser:
                 for alias in (f"{namespace}__{member}", f"{namespace}={member}",
                               f"{namespace}_{member}", member):
                     aliases.setdefault(alias, set()).add(name)
+        # #3796: the same tool written with every `__` collapsed to `_` (`mcp__playwright__browser_navigate` as
+        # `mcp_playwright_browser_navigate`, the way Qwen often flattens a name) is that tool.  Only a spelling of a declared
+        # name: a reordered or renamed tool (`server1_label_values` for `label_values_mcp_server1`) is not guessed.
+        for name in self.schemas:
+            if isinstance(name, str) and "__" in name:
+                aliases.setdefault(name.replace("__", "_"), set()).add(name)
         self.aliases = {alias: next(iter(names)) for alias, names in aliases.items()
                         if len(names) == 1 and alias not in self.schemas}
         # a call's tool name in another case than declared (Flint: `bash` for Claude Code's `Bash`): the declared one
