@@ -727,6 +727,9 @@ GGML_FAMILIES = {
                    # its prompt chunks (measured on the RTX 4070 Ti, the server's benchmark: 16K prompts 882 / 1,192 /
                    # 1,494 tok/s at 1024 / 2048 / 4096, writing the same within the runs' spread)
                    "chunk": 4096,
+                   # drafting on a Mac (measured on the M1 Ultra, a 34 GiB pool of 46.5: 16.7 -> 25.7 tok/s, the pauses
+                   # spread over 2.8 tokens a window); on a 12 GB card it is slower (36.7 -> 28.0): not there
+                   "mac_args": ["--mtp", "3"],
                    "license": "MIT: https://huggingface.co/inclusionAI/Ling-3.0-flash-Sante"},
     "flint": {"title": "Flint 40B-A2.5B", "by": "Recursive's coding-agent model; Unsloth's GGUFs",
               "about": "a coding-agent MoE, 2.5B active; 14.5-25 GB",
@@ -7245,7 +7248,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         # -> 33.2 tok/s, the M1 Ultra with a 36 of 38.8 GiB pool 16.4 -> 19.8); from the SSD (the M4 Air, 11 GiB) or
         # with the CPU computing the experts (a 12 GB card) it is slower: 4.1-4.5 -> 4.0, 19.1 -> 12.5
         args += fam["draft_args"]
-    eargs = list(fam.get("engine_args", []))
+    eargs = list(fam.get("engine_args", [])) + (list(fam.get("mac_args", [])) if mac else [])
     if mac and pool is not None and "--mtp" in eargs and pool < 0.15 * w[0]:
         # a family's own drafting from a pool this small: every failed draft reads more from the SSD (GLM-5.3-Flash on
         # the M4 Air, a 9% pool: 1.4 tok/s without, 1.0-1.1 with --mtp 3 (and with the 9 GiB pool, Metal out of memory)
