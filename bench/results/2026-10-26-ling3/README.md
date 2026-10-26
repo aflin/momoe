@@ -46,7 +46,17 @@ placement, which was not searched.
 Drafting with the MTP block is correct (greedy, it parts only at near-ties: a smaller expert pool parts at the same
 token without drafting) but slower on this card: 28.0 (3 drafts) and 29.9 (2) against 36.7; setup leaves it out.
 
-## M1 Ultra
+## M1 Ultra (64 GB, macOS; setup's config: a 38 GiB expert pool, the rest read from the SSD, 64K context, --mtp 3)
 
-Measured only beside another model server holding ~25 GB (an 8 GiB pool; larger pools ran out of GPU memory beside
-it): 14.7 tok/s on the code prompt. Its speed with setup's pool, drafting and the server there: not measured yet.
+| | the server's benchmark |
+| --- | ---: |
+| short chat, writing (tok/s) | 23.0 |
+| agent session, writing | 19.6 |
+| 4K prompt, reading | 620 |
+| 16K prompt, reading | 548 |
+| agent session, first token | 8.87 s |
+
+The engine alone (299 tokens of the code prompt): a 34 or 38 GiB pool (97.6% of the experts found there) 16.7 tok/s
+without drafting, 45.5 of its 58.8 ms per token waiting at the layers' pauses; drafting spreads them over a window:
+25.0 / 25.7 / 24.6 tok/s with 2 / 3 / 4 drafts (2.5-2.8 tokens a window). With the pool fitted to Metal's working set
+(41.8 GiB) the GPU ran out of memory; setup's 38 GiB runs. An 8 GiB pool beside another model server: 14.7 tok/s.
