@@ -132,6 +132,30 @@ class Trash(unittest.TestCase):
             self.assertFalse(setup.in_trash(p), p)
 
 
+class MacCheck(unittest.TestCase):
+    def check(self, machine, sysctl):
+        """momoe_setup's Mac check up to its first stop: what it said."""
+        seen = []
+        run = lambda cmd, **kw: mock.Mock(stdout=sysctl.get(cmd[-1], ""), returncode=0)
+        with mock.patch.object(setup.sys, "platform", "darwin"), mock.patch.object(setup, "WIN", False), \
+                mock.patch.object(setup.platform, "machine", return_value=machine), \
+                mock.patch.object(setup.subprocess, "run", side_effect=run), mock.patch.object(setup, "step"), \
+                mock.patch.object(setup, "say", side_effect=lambda *x: seen.append(" ".join(map(str, x)))), \
+                mock.patch.dict(os.environ, {"MOMOE_MAC_MEMORY_GIB": "64"}):
+            with self.assertRaises(SystemExit):
+                setup.momoe_setup(mock.Mock(gpu=None, gpus=None, backend=None, kv=None), Path("/d"), 8080, "zzz")
+        return "\n".join(seen)
+
+    def test_a_rosetta_python_is_named(self):              # upstream #3894: an Intel Python on an M1 says x86_64
+        out = self.check("x86_64", {"machdep.cpu.brand_string": "Apple M1 Max", "hw.optional.arm64": "1"})
+        self.assertIn("running through Rosetta", out)
+        self.assertNotIn("needs Apple Silicon", out)
+
+    def test_an_intel_mac_is_told(self):
+        out = self.check("x86_64", {"machdep.cpu.brand_string": "Intel(R) Core(TM) i9", "hw.optional.arm64": ""})
+        self.assertIn("needs Apple Silicon", out)
+
+
 class Routing(unittest.TestCase):
     def run_main(self, platform, gpus, argv):
         calls = []

@@ -7084,6 +7084,13 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         ram = mac_memory_gib()
         say(f"  {chip or 'unknown chip'}, {ram:.0f} GB of memory")
         if platform.machine() != "arm64":
+            # platform.machine() is the Python's build: an Intel Python through Rosetta says x86_64 on an M1 (upstream #3894),
+            # and the engine it compiles would be an Intel one
+            arm = subprocess.run(["sysctl", "-n", "hw.optional.arm64"], capture_output=True, text=True).stdout.strip() == "1"
+            if arm or chip.startswith("Apple"):
+                fail("the Python that runs setup is an Intel build running through Rosetta (the engine is compiled for "
+                     "this Python's chip)", "run setup with the Apple Silicon Python from python.org or Homebrew "
+                     "(/opt/homebrew/bin/python3)")
             fail("Momoe on a Mac needs Apple Silicon (M1 or later)")
         if subprocess.run(["xcode-select", "-p"], capture_output=True).returncode != 0:
             fail("Xcode's command line tools are not installed (the engine is compiled here)",
