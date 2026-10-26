@@ -152,6 +152,20 @@ IMAGE_PARTS = ("image_url", "input_image", "image")
 # enable_thinking=false for none.  Clients spell these many ways; everything maps onto those four.
 EFFORT = {"none": None, "off": None, "minimal": None, "disabled": None, "false": None,
           "low": "low", "medium": "medium", "high": "xhigh", "xhigh": "xhigh", "max": "xhigh", "maximum": "xhigh"}
+# DeepSeek-V4.1's template takes low, medium, high (its default) and max, or a whole number 1..100 (the "Reasoning
+# Effort: N" line of its prompt).  use_family("deepseek41") switches the table; the other families keep the one above.
+EFFORT_DEEPSEEK = {"none": None, "off": None, "minimal": None, "disabled": None, "false": None,
+                   "low": "low", "medium": "medium", "high": "high", "xhigh": "max", "max": "max", "maximum": "max"}
+_EFFORT_QWEN = dict(EFFORT)
+_NUMERIC_EFFORT = False
+
+
+def use_family(family: str | None) -> None:
+    """The reasoning-effort words of the model family this server runs (module state, like ENV_TO_USER)."""
+    global _NUMERIC_EFFORT
+    EFFORT.clear()
+    EFFORT.update(EFFORT_DEEPSEEK if family == "deepseek41" else _EFFORT_QWEN)
+    _NUMERIC_EFFORT = family == "deepseek41"
 
 
 def effort_kwargs(value) -> dict:
@@ -160,9 +174,14 @@ def effort_kwargs(value) -> dict:
         return {}
     if value is False:
         return {"enable_thinking": False}
+    if _NUMERIC_EFFORT and isinstance(value, int) and not isinstance(value, bool):
+        if not 1 <= value <= 100:
+            raise ValueError(f"unknown reasoning effort {value!r}: use none, low, medium, high, max or 1..100")
+        return {"reasoning_effort": value}
     key = str(value).strip().lower()
     if key not in EFFORT:
-        raise ValueError(f"unknown reasoning effort {value!r}: use none, low, medium or high")
+        raise ValueError(f"unknown reasoning effort {value!r}: use none, low, medium or high"
+                         + (", max or 1..100" if _NUMERIC_EFFORT else ""))
     level = EFFORT[key]
     return {"enable_thinking": False} if level is None else {"reasoning_effort": level}
 
@@ -1385,6 +1404,12 @@ class OutputParser:
         self.bare = False            # the call being read opened with <function= alone (no <tool_call> around it)
         self.batch = False           # the call being finished is followed by another in the same wrapper
         self._reset_scan()
+
+    @property
+    def clean(self) -> bool:
+        """Nothing is held back: a clean point to stop the thinking at (a parser that rewrites the model's text, as
+        serve/dsml.py's does, also counts what it holds)."""
+        return not self.buf
 
     def _ok_at(self, p: int) -> bool:
         """self.buf[p] would open a call: at the start of a line, outside a code fence and inline code."""

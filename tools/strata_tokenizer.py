@@ -104,6 +104,14 @@ FLINT_PATTERNS = (
     r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?"
     r"| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+",
 )
+# `deepseek3` (DeepSeek-V3 / V4.1, from upstream Strata; llama.cpp LLAMA_VOCAB_PRE_TYPE_DEEPSEEK3_LLM): a sequence as Flint's,
+# digits (runs of 1..3) and CJK runs cut out before the general word / punctuation / whitespace pattern sees the rest
+DEEPSEEK3_PATTERNS = (
+    r"\p{N}{1,3}",
+    "[一-龥぀-ゟ゠-ヿ]+",
+    r"[!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+"
+    r"| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+",
+)
 # `gemma4` (Gemma 4, `tokenizer.ggml.model` = `gemma4`): llama-vocab.cpp's LLAMA_VOCAB_PRE_TYPE_GEMMA4 - SentencePiece-style
 # BPE.  A space is written U+2581, the text is split only into runs of line breaks and runs of anything else, and the
 # merges run on the characters as they are (no byte mapping); a run of line breaks that is one token is that token, and
@@ -116,10 +124,11 @@ BAILINGMOE_PATTERN = (r"'(?:[sSdDmMtT]|[lL][lL]|[vV][eE]|[rR][eE])|[^\r\n\p{L}\p
 PRE_PATTERNS = {"qwen35": QWEN35_PATTERN, "tekken": TEKKEN_PATTERN, "glm4": CHATGLM4_PATTERN, "glm5": CHATGLM4_PATTERN,
                 "lfm2": CHATGLM4_PATTERN, "flint": FLINT_PATTERNS[-1],
                 "pixtral": CHATGLM4_PATTERN,   # (Nemotron 3.5 Lightning: llama-vocab.cpp's LLAMA3 group, as lfm2)
-                "gemma4": GEMMA4_PATTERN, "bailingmoe2": BAILINGMOE_PATTERN, "bailingmoe": BAILINGMOE_PATTERN}
+                "gemma4": GEMMA4_PATTERN, "bailingmoe2": BAILINGMOE_PATTERN, "bailingmoe": BAILINGMOE_PATTERN,
+                "deepseek3": DEEPSEEK3_PATTERNS[-1]}
 SPM = {"gemma4"}                              # SentencePiece-style BPE (above): no byte mapping
 SPACE = "\u2581"
-PRE_SEQUENCES = {"flint": FLINT_PATTERNS}     # pre-tokenizers of several patterns in a row (the last one is PRE_PATTERNS')
+PRE_SEQUENCES = {"flint": FLINT_PATTERNS, "deepseek3": DEEPSEEK3_PATTERNS}     # pre-tokenizers of several patterns in a row (the last one is PRE_PATTERNS')
 IGNORE_MERGES = {"glm4", "glm5", "lfm2", "pixtral"}
 # llama.cpp adds a bos token to these (add_bos); their chat templates write it as {{ bos_token }}: the pack names it
 # (`bos_token` in tokenizer.json) for the server's ChatTemplate
@@ -436,6 +445,11 @@ class Tokenizer:
             for ch in self.tokens[i]:
                 v = UNICODE_TO_BYTE.get(ch)
                 if v is None:
+                    if self.token_types and i < len(self.token_types) and self.token_types[i] in (3, 4):
+                        # a special token's string is its literal text (DeepSeek's `<｜User｜>`, `｜DSML｜` hold
+                        # characters outside the byte alphabet; the other families' specials decode as before)
+                        raw = bytearray(self.tokens[i].encode("utf-8"))
+                        break
                     raise KeyError("token %d contains a character outside the byte alphabet: %r" % (i, ch))
                 raw.append(v)
             b = cache[i] = bytes(raw)

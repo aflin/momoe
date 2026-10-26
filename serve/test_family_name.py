@@ -23,7 +23,7 @@ class FamilyName(unittest.TestCase):
     def test_old_configs(self):
         self.assertEqual(default_model_name({}), "qwen3.8-flash-next")
         self.assertEqual(default_model_name({"arch": "something-else"}), "qwen3.8-flash-next")
-        self.assertEqual(set(FAMILY_MODEL_NAMES), {"qwen4exp", "qwen35moe"})
+        self.assertEqual(set(FAMILY_MODEL_NAMES), {"qwen4exp", "qwen35moe", "deepseek41"})
 
 
 if __name__ == "__main__":
