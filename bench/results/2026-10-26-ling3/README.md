@@ -46,6 +46,18 @@ placement, which was not searched.
 Drafting with the MTP block is correct (greedy, it parts only at near-ties: a smaller expert pool parts at the same
 token without drafting) but slower on this card: 28.0 (3 drafts) and 29.9 (2) against 36.7; setup leaves it out.
 
+## The plain model (Ling-3.0-flash IQ3_XXS, bartowski's GGUFs at 7e1a1243)
+
+Against llama.cpp (the code prompt, 299 steps): KL mean 0.0009, p99 0.0156, the same top token 99.7%, 299 of 299 greedy
+tokens the same. Speed with setup's arguments (64K context, chunk 4096): 35.3-35.6 tok/s (the second half), Sante
+33.5 the same way. The server's chat and tool calls checked.
+
+## llama.cpp's best on the PC
+
+Its server at 32K context, the code prompt, 300 tokens greedy, three runs (the first warms its cache): MoE cache 6 GiB
+(`--cpu-moe --moe-cache-mib 6144`) 9.5 / 27.1 / 27.4 tok/s; `--n-cpu-moe 38` 13.8 / 26.0 / 26.7, 40 11.0 / 25.7 / 24.9;
+36, and a cache of 7 or 8 GiB, did not fit. `llama-bench` tg128: `--n-cpu-moe` 36 / 38 / 40 23.6 / 22.9 / 22.2.
+
 ## M1 Ultra (64 GB, macOS; setup's config: a 38 GiB expert pool, the rest read from the SSD, 64K context, --mtp 3)
 
 | | the server's benchmark |

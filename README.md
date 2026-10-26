@@ -36,7 +36,7 @@ and Strata is still its base. It has three engines:
 | Engine | Runs on | Models |
 | --- | --- | --- |
 | **Strata's engine** (`momoe`) | Linux + NVIDIA | Qwen3.8-Flash-Next and its variants, the Qwen3.6 family |
-| **`momoe-cuda`** (MoMoE's own) | Linux + NVIDIA, the DGX Spark, a Jetson | every family below; on a PC: Nemotron 3.5 Bolt and Lightning, GLM-5.3-Flash, Ornith-1.5-122B, Flint, Gemma 4, LFM2.5 |
+| **`momoe-cuda`** (MoMoE's own) | Linux + NVIDIA, the DGX Spark, a Jetson | every family below; on a PC: Nemotron 3.5 Bolt and Lightning, GLM-5.3-Flash, Ornith-1.5-122B, Ling-3.0-flash, Flint, Gemma 4, LFM2.5 |
 | **`momoe-metal`** (MoMoE's own) | Apple Silicon Macs | every family below |
 
 - **Strata's engine** is Strata's, with MoMoE's additions (the Qwen3.6 family's path began as
@@ -113,6 +113,8 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 | Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 | 28.4 | - | 37.5 (UD-Q3_K_XL) | 8.6 |
 | Ornith-1.5-122B-A10B UD-IQ3_XXS | 19.2 | 33.2* | - | 19.8* | 4.5 |
 | GLM-5.3-Flash UD-IQ3_XXS | does not fit a 12 GB card | 19.7* | - | 4.5* | 1.4 |
+| Ling-3.0-flash IQ3_XXS | 35.6 | - | - | - | - |
+| Ling-3.0-flash Sante IQ3_XXS | 33.5 | - | - | 27.0* | - |
 | Flint 40B-A2.5B | 89.9 (UD-IQ3_XXS) / 65.7 (UD-Q4_K_XL) | 73.2 (UD-Q4_K_XL) | - | 84.4 (UD-Q4_K_XL) | 42.2 (UD-IQ3_XXS) |
 | Nemotron 3.5 Lightning 30B-A3B | 71.1 (UD-IQ3_XXS) / 38.7 (UD-Q4_K_XL) | 66.9 (UD-Q4_K_XL) | - | 89.9 (UD-Q4_K_XL) | 25.9 (UD-IQ3_XXS) |
 | Gemma 4 26B-A4B | 92.4 (UD-IQ3_XXS) / 75.2 (UD-Q4_K_XL) | 59.3 (UD-Q4_K_XL) | - | 85.2 (UD-Q4_K_XL) | 28.8 (UD-IQ3_XXS) |
@@ -128,6 +130,10 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 - **Reading prompts on the PC** (Strata's engine, 4K / 16K tokens): Flash-Next IQ3_XXS 1,178 / 2,133 tok/s, the
   Coder 1,931 / 2,615, Swift 1,196 / 2,163, Unsloth's UD-IQ4_XS 213 / 265 (88 GB, more than the RAM: with ~52 GB
   free; 108 / 157, writing 14.2, with 36 GB free), the Qwen3.6 family 3,081-3,767 / 3,974-4,521.
+- **Ling-3.0-flash** (and its Sante fine-tune, the same engine): on the PC the CPU computes the experts the card
+  does not hold, and prompts read at 1,189 / 1,494 tok/s (4K / 16K tokens). Its 54-56 GB file has to be in the RAM's
+  file cache: the first answer after another large model ran is slow (9-12 tok/s) until it is again. On the M1 Ultra
+  setup drafts with its MTP layer (without drafting 16.7 tok/s); the plain model there is not measured yet.
 - **Details:** how each column was measured, drafting per model, and the engines' speed-ups:
   [design/benchmark-notes.md](design/benchmark-notes.md). The raw numbers are in [bench/results](bench/results).
 
@@ -146,6 +152,7 @@ the PC's Flash-Next wrote 65.5-76.7 here against 57.9 above).
 | Qwen3.8-Flash-Next IQ3_XXS | 65.5-76.7* | 23.1 (MoE cache 5 GiB; its default fit 22.5) |
 | Ornith-1.5-35B-A3B IQ4_XS | 131.6-153.5* | 77.8 (MoE cache 8 GiB; its default fit 57.2; drafting 63.5*) |
 | Ornith-1.5-122B-A10B UD-IQ3_XXS | 19.2 | 4.62 (48 on CPU) |
+| Ling-3.0-flash Sante IQ3_XXS | 33.5 | 27.4 (MoE cache 6 GiB; 38 on CPU 26.7) |
 | Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 (server 30.0, sampled 30.6) | 26.2 (26.1) |
 | Nemotron 3.5 Lightning UD-IQ3_XXS / UD-Q4_K_XL | 71.1 / 38.7 | 65.3 (24 on CPU) / 40.2 (36) |
 | Gemma 4 26B-A4B UD-IQ3_XXS / UD-Q4_K_XL | 92.4 / 75.2 | 90.5 at 32K context (4 on CPU) / 54.8 (11) |
@@ -181,7 +188,7 @@ the PC's Flash-Next wrote 65.5-76.7 here against 57.9 above).
 
 In short:
 - **Where the experts don't fit the GPU, MoMoE is well ahead.** On the PC that holds even against llama.cpp's MoE
-  cache: Flash-Next 3x, Ornith-35B 2x, Ornith-122B 4x. MoMoE is also ahead with GLM on the Spark (13.3 against
+  cache: Flash-Next 3x, Ornith-35B 2x, Ornith-122B 4x, Ling-3.0-flash 1.2x. MoMoE is also ahead with GLM on the Spark (13.3 against
   10.85 without drafting, 19.7 with it), LFM2.5-24B on the
   Jetson, and the three larger models on the Mac mini.
 - **Where every expert fits in memory, the two are level.** That's Flint, Gemma 4 and Lightning on the Spark and the
