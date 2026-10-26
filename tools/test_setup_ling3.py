@@ -1,5 +1,5 @@
-"""tools/test_setup_ling3.py - Momoe: Ling-3.0-flash Sante on the ggml engine (GGML_FAMILIES["ling3sante"], momoe_setup):
-its size pinned with each shard's size and SHA-256 at the pinned revision, the card's sampling, the family in the menu,
+"""tools/test_setup_ling3.py - Momoe: Ling-3.0-flash and its Sante fine-tune on the ggml engine (GGML_FAMILIES["ling3"],
+["ling3sante"], momoe_setup): each one's size pinned with each shard's size and SHA-256 at the pinned revision, the card's sampling, the family in the menu,
 no draft vocabulary (the shipped subsets are Qwen's token ids), and its `bailingmoe2` pre-tokenizer."""
 from __future__ import annotations
 
@@ -18,6 +18,15 @@ FAM = setup.GGML_FAMILIES["ling3sante"]
 
 
 class Ling3Family(unittest.TestCase):
+    def test_the_base_models_size_pinned(self):
+        base = setup.GGML_FAMILIES["ling3"]
+        self.assertTrue(base["hf"].endswith("/resolve/" + setup.HF_REVISIONS["bartowski/Ling-3.0-flash-GGUF"] + "/"))
+        parts = setup.ggml_parts(base, "IQ3_XXS")
+        self.assertEqual([p[1] for p in parts], ["Ling-3.0-flash-IQ3_XXS-0000%d-of-00002.gguf" % i for i in (1, 2)])
+        self.assertEqual(sum(p[2] for p in parts), 39875464736 + 14243040800)
+        for k in ("context", "chunk", "mac_args", "min_vram_gb"):         # one engine: Sante's settings
+            self.assertEqual(base[k], FAM[k], k)
+
     def test_the_size_pinned(self):
         repo = "bartowski/Ling-3.0-flash-Sante-GGUF"
         self.assertTrue(FAM["hf"].endswith("/resolve/" + setup.HF_REVISIONS[repo] + "/"))
@@ -32,6 +41,7 @@ class Ling3Family(unittest.TestCase):
                          {"temperature": 0.6, "top_p": 0.95, "top_k": 20})
 
     def test_in_the_menu(self):
+        self.assertIn("ling3", setup.MOMOE_MENU)
         self.assertIn("ling3sante", setup.MOMOE_MENU)
 
     def test_no_draft_vocabulary(self):

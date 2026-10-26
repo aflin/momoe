@@ -78,6 +78,7 @@ HF_REVISIONS = {
     "unsloth/flint-GGUF": "9167d02e3b32c8592d94d17e2316f0be8d7caab8",
     "unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF": "f2d3fe3694501008786e81e5f20360cbf715496a",   # 2026-10-21
     "unsloth/gemma-4-26B-A4B-it-GGUF": "c099eb48e663fd284577b04978a94ffccb261841",                     # 2026-10-21
+    "bartowski/Ling-3.0-flash-GGUF": "7e1a1243566501d52af98e9aa7a7a61986279c6d",                       # 2026-08-18
     "bartowski/Ling-3.0-flash-Sante-GGUF": "d59f495f375857452f47ee56b1b0a37f4491f93c",                 # 2026-10-25
     "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF": "5c2410d71524f4f72b023ce8daf7a80528226d5f",   # its mmproj (images)
     "Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF": "e4ae9970325413d582ba2c294122fc5567ec1dd7",
@@ -635,8 +636,15 @@ GLM53_FILES = {
 ORNITH122_FILES = {
     "Ornith-1.5-122B-UD-IQ3_XXS.gguf": (49515667712, "027a9a480e8bcc6079fcf834e368467a169953561fb4b98dc9528d6185c8a438"),
 }
-# Ling-3.0-flash Sante (inclusionAI's healthcare fine-tune of Ling-3.0-flash, 124B-A5.1B; bartowski's GGUFs): KDA + MLA
-# with RoPE + 512 experts in 8 groups, a shared one.  Momoe's ggml engine runs it as bailingmoe3 (src/metal: ling)
+# Ling-3.0-flash (inclusionAI, 124B-A5.1B; bartowski's GGUFs) and Sante, its healthcare fine-tune: KDA + MLA with RoPE
+# + 512 experts in 8 groups, a shared one.  Momoe's ggml engine runs them as bailingmoe3 (src/metal: ling)
+LING3_FILES = {
+    "IQ3_XXS": [
+        ("Ling-3.0-flash-IQ3_XXS/Ling-3.0-flash-IQ3_XXS-00001-of-00002.gguf", 39875464736,
+         "047ab76de550f1b589278c5f0d2e7904f1f5f94a9d31188ab67f1e0185362a37"),
+        ("Ling-3.0-flash-IQ3_XXS/Ling-3.0-flash-IQ3_XXS-00002-of-00002.gguf", 14243040800,
+         "a72b6c41b0e7b9606612459d7d30d790e315c9840d130c624e2733811dff673d")],
+}
 LING3SANTE_FILES = {
     "IQ3_XXS": [
         ("Ling-3.0-flash-Sante-IQ3_XXS/Ling-3.0-flash-Sante-IQ3_XXS-00001-of-00002.gguf", 39474010144,
@@ -713,6 +721,16 @@ GGML_FAMILIES = {
                   "context": 32768, "min_vram_gb": 11,                    # measured on a 12 GB card
                   "mmproj": ("mmproj-BF16.gguf", 912263488, "a5ff159216cd31b8f0c034cae37fb875b6480bd96c62433b6a4109f6ed273904"),
                   "license": "MIT: https://huggingface.co/ornith-ai/Ornith-1.5-122B"},
+    "ling3": {"title": "Ling-3.0-flash 124B-A5B", "by": "inclusionAI; bartowski's GGUFs",
+              "about": "KDA + MLA + 512 experts, 5.1B active, a general model that thinks; a 54 GB download, ~60 GB "
+                       "of RAM",
+              "hf": hf("bartowski/Ling-3.0-flash-GGUF"), "tag": "ling3-", "name": "ling-3.0-flash",
+              "parts": LING3_FILES,
+              "models": {"IQ3_XXS": {"about": "3-bit (imatrix), measured; close other programs", "ram_gb": 60}},
+              "default": "IQ3_XXS",
+              # (the engine's settings as Sante's, the same architecture and shapes: see there)
+              "context": 65536, "min_vram_gb": 11, "chunk": 4096, "mac_args": ["--mtp", "3"],
+              "license": "MIT: https://huggingface.co/inclusionAI/Ling-3.0-flash"},
     "ling3sante": {"title": "Ling-3.0-flash Sante 124B-A5B", "by": "inclusionAI's healthcare fine-tune of Ling-3.0-flash; "
                                                                  "bartowski's GGUFs",
                    "about": "KDA + MLA + 512 experts, 5.1B active, for medical reasoning and research; a 56 GB "
@@ -6837,7 +6855,7 @@ def momoe_title(family: str) -> str:
 
 # the families momoe_setup offers, in its menu's order (NVFP4's packs are Strata's own format: its engine only)
 MOMOE_MENU = ("ornith", "qwen36", "qwen36-bartowski", "kat-coder", "qwen", "swift", "coder", "unsloth", "bolt",
-              "ornith122", "glm53", "ling3sante", "flint", "lightning", "gemma4", "lfm25", "lfm25-8b")
+              "ornith122", "glm53", "ling3", "ling3sante", "flint", "lightning", "gemma4", "lfm25", "lfm25-8b")
 
 
 def momoe_menu(a, ram: float) -> str:
