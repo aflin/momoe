@@ -7872,11 +7872,12 @@ def dsv41_smoke(exe: Path, pack: Path, lib_dirs, gpus=None, timeout: int = 5400)
     """16 tokens of a fixed prompt through the engine (tools/dsv41/smoke.py), the text checked: (True, text) or (False,
     why).  A few minutes: the engine reads what it needs from the disk the first time."""
     cmd = [sys.executable, str(ROOT / "tools" / "dsv41" / "smoke.py"), "--exe", str(exe), "--pack", str(pack)]
-    if gpus:
-        cmd += ["--gpus", ",".join(str(g) for g in gpus)]
+    env = dsv41_engine_env(lib_dirs)
+    if gpus:                                   # the cards as nvidia-smi numbers them, as the server's child_env sets them: CUDA's
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"  # own order (fastest first) can number them otherwise (an RTX 4070 Ti beside a
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus)   # 3060: --gpus 1 ran on the 3060)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
-                           env=dsv41_engine_env(lib_dirs))
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         return False, f"the test run did not finish: {e}"
     return r.returncode == 0, ((r.stdout or "") + (r.stderr or "")).strip()[-1500:]

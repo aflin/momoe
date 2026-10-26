@@ -56,6 +56,19 @@ class Files(unittest.TestCase):
         self.assertNotIn("--dense-override", cmd)
 
 
+class Smoke(unittest.TestCase):
+    def test_the_cards_as_nvidia_smi_numbers_them(self):
+        """GPU 1 of nvidia-smi (an RTX 4070 Ti beside a 3060) is CUDA's 0 in its own order: the test run sees only that card."""
+        seen = {}
+        def run(cmd, **kw):
+            seen.update(cmd=cmd, env=kw["env"])
+            return mock.Mock(returncode=0, stdout="Paris", stderr="")
+        with mock.patch.object(setup.subprocess, "run", side_effect=run):
+            setup.dsv41_smoke(Path("/e/x"), Path("/p"), [], [1])
+        self.assertEqual((seen["env"]["CUDA_DEVICE_ORDER"], seen["env"]["CUDA_VISIBLE_DEVICES"]), ("PCI_BUS_ID", "1"))
+        self.assertNotIn("--gpus", seen["cmd"])
+
+
 class Plan(unittest.TestCase):
     def test_a_12_gb_card_and_63_gb(self):
         from strata_control import dsv41_fit
