@@ -78,6 +78,7 @@ HF_REVISIONS = {
     "unsloth/flint-GGUF": "9167d02e3b32c8592d94d17e2316f0be8d7caab8",
     "unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF": "f2d3fe3694501008786e81e5f20360cbf715496a",   # 2026-10-21
     "unsloth/gemma-4-26B-A4B-it-GGUF": "c099eb48e663fd284577b04978a94ffccb261841",                     # 2026-10-21
+    "bartowski/Ling-3.0-flash-Sante-GGUF": "d59f495f375857452f47ee56b1b0a37f4491f93c",                 # 2026-10-25
     "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF": "5c2410d71524f4f72b023ce8daf7a80528226d5f",   # its mmproj (images)
     "Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF": "e4ae9970325413d582ba2c294122fc5567ec1dd7",
     "unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF": "34841e360524d421c564cc3ed247aa04a865473b",   # 2026-10-16
@@ -634,6 +635,15 @@ GLM53_FILES = {
 ORNITH122_FILES = {
     "Ornith-1.5-122B-UD-IQ3_XXS.gguf": (49515667712, "027a9a480e8bcc6079fcf834e368467a169953561fb4b98dc9528d6185c8a438"),
 }
+# Ling-3.0-flash Sante (inclusionAI's healthcare fine-tune of Ling-3.0-flash, 124B-A5.1B; bartowski's GGUFs): KDA + MLA
+# with RoPE + 512 experts in 8 groups, a shared one.  Momoe's ggml engine runs it as bailingmoe3 (src/metal: ling)
+LING3SANTE_FILES = {
+    "IQ3_XXS": [
+        ("Ling-3.0-flash-Sante-IQ3_XXS/Ling-3.0-flash-Sante-IQ3_XXS-00001-of-00002.gguf", 39474010144,
+         "f5a7840771378e541981ea5250d0de0900b58413c3f5d653fcaf6a142c53a6b1"),
+        ("Ling-3.0-flash-Sante-IQ3_XXS/Ling-3.0-flash-Sante-IQ3_XXS-00002-of-00002.gguf", 16195273472,
+         "3e086f29e8c0e72f2e78653c41fbbdd4574c2cb978ec67d965711dd812e85966")],
+}
 # Flint (Recursive, 40B-A2.5B, for coding agents; Unsloth's GGUFs): GQA attention with sinks (35 sliding-window blocks,
 # 14 full), 256 experts + a shared one.  Momoe's ggml engine runs it as an lfm2moe variant (src/metal: flint)
 FLINT_FILES = {
@@ -703,6 +713,18 @@ GGML_FAMILIES = {
                   "context": 32768, "min_vram_gb": 11,                    # measured on a 12 GB card
                   "mmproj": ("mmproj-BF16.gguf", 912263488, "a5ff159216cd31b8f0c034cae37fb875b6480bd96c62433b6a4109f6ed273904"),
                   "license": "MIT: https://huggingface.co/ornith-ai/Ornith-1.5-122B"},
+    "ling3sante": {"title": "Ling-3.0-flash Sante 124B-A5B", "by": "inclusionAI's healthcare fine-tune of Ling-3.0-flash; "
+                                                                 "bartowski's GGUFs",
+                   "about": "KDA + MLA + 512 experts, 5.1B active, for medical reasoning and research; a 56 GB "
+                            "download, ~60 GB of RAM",
+                   "hf": hf("bartowski/Ling-3.0-flash-Sante-GGUF"), "tag": "ling3sante-", "name": "ling-3.0-flash-sante",
+                   "parts": LING3SANTE_FILES,
+                   # ram_gb: on a separate card the file stays in the file cache (measured: an RTX 4070 Ti, 63 GB of RAM,
+                   # 22.5 tok/s with ~45 GB available)
+                   "models": {"IQ3_XXS": {"about": "3-bit (imatrix), measured; close other programs", "ram_gb": 60}},
+                   "default": "IQ3_XXS",
+                   "context": 65536, "min_vram_gb": 11,               # measured on a 12 GB card (7 MLA blocks: a small KV)
+                   "license": "MIT: https://huggingface.co/inclusionAI/Ling-3.0-flash-Sante"},
     "flint": {"title": "Flint 40B-A2.5B", "by": "Recursive's coding-agent model; Unsloth's GGUFs",
               "about": "a coding-agent MoE, 2.5B active; 14.5-25 GB",
               "hf": hf("unsloth/flint-GGUF"), "file": "flint-{q}.gguf", "tag": "flint-", "name": "flint-40b-a2.5b",
@@ -5556,6 +5578,7 @@ SAMPLING_NEMOTRON = {"temperature": 1.0, "top_p": 0.95}                  # Nemot
 SAMPLING_GLM53 = {"temperature": 1.0, "top_p": 0.95}                     # GLM-5.3-Flash: its card's evaluation settings
 SAMPLING_FLINT = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}       # Flint: its card's (and the file's)
 SAMPLING_GEMMA4 = {"temperature": 1.0, "top_p": 0.95, "top_k": 64}      # Gemma 4: its card's (and the file's)
+SAMPLING_LING3 = {"temperature": 0.6, "top_p": 0.95, "top_k": 20}       # Ling-3.0-flash: its card's (Sante's too)
 SAMPLING_LFM25 = {"temperature": 0.1, "top_k": 50}                       # LFM2.5: the card's (and its repetition
                                                                           # penalty 1.05, which momoe-cuda does not apply)
 SAMPLING_LFM25_8B = {"temperature": 0.2, "top_k": 64}                    # LFM2.5-8B-A1B: its card's (top_k 80 there: the
@@ -5576,6 +5599,8 @@ def recommended_sampling(model_name) -> dict | None:
         return dict(SAMPLING_FLINT)
     if name.startswith("gemma-4-"):
         return dict(SAMPLING_GEMMA4)
+    if name.startswith("ling-3.0-"):
+        return dict(SAMPLING_LING3)
     if name.startswith("lfm2.5-8b-"):
         return dict(SAMPLING_LFM25_8B)
     if name.startswith("lfm2.5-"):
@@ -6806,7 +6831,7 @@ def momoe_title(family: str) -> str:
 
 # the families momoe_setup offers, in its menu's order (NVFP4's packs are Strata's own format: its engine only)
 MOMOE_MENU = ("ornith", "qwen36", "qwen36-bartowski", "kat-coder", "qwen", "swift", "coder", "unsloth", "bolt",
-              "ornith122", "glm53", "flint", "lightning", "gemma4", "lfm25", "lfm25-8b")
+              "ornith122", "glm53", "ling3sante", "flint", "lightning", "gemma4", "lfm25", "lfm25-8b")
 
 
 def momoe_menu(a, ram: float) -> str:
@@ -7109,7 +7134,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
 
     tag = fam["tag"] + size_of(q)
     own = getattr(a, "gguf_dir", None)                 # --gguf-dir: GGUF files you already have, never downloaded
-    folder = Path(own) if own else Path(a.models_dir) / tag
+    folder = Path(own).resolve() if own else Path(a.models_dir) / tag
     paths = [folder / f[1] for f in files]
     known = sum(f[2] or 0 for f in files)
     step(3, f"{'checking' if own else 'downloading'} {fam['title']} {size_of(q)}"

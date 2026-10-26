@@ -3316,11 +3316,12 @@ class Service:
         # the end-of-turn tokens; a name the vocabulary has no single token for (Nemotron 3.5 Bolt has no
         # <|endoftext|>) is skipped: encoded as text, its first piece ("<") would end every reply that wrote a "<"
         # (GLM-5: <|user|> and <|observation|> end a reply as well: its eos_token_id list; Gemma 4: <turn|>, <eos>
-        # and, after a call, <|tool_response>)
+        # and, after a call, <|tool_response>; Ling 3: <|role_end|>)
+        source = getattr(template, "source", "")
         self.stop_ids = {ids[0] for ids in (tokenizer.encode(s, parse_special=True)
                                             for s in (IM_END, "<|endoftext|>", "<|user|>", "<|observation|>")
-                                            + (("<turn|>", "<eos>", "<|tool_response>")
-                                               if "<|channel>" in getattr(template, "source", "") else ()))
+                                            + (("<turn|>", "<eos>", "<|tool_response>") if "<|channel>" in source else ())
+                                            + (("<|role_end|>",) if "<|role_end|>" in source else ()))
                          if len(ids) == 1}
         # GLM-5's tool-call format (<tool_call>NAME<arg_key>..): the parser rewrites it into its own (GlmCallRewriter)
         self.glm = "<arg_key>" in getattr(template, "source", "")
