@@ -5495,8 +5495,10 @@ static void fit_pool(Engine & e) {
 // largest graph's buffers are reserved and the pool shrinks to what is left of it less a margin (MOMOE_METAL_MARGIN_MIB,
 // default 512: the server needs more than the engine alone.  Measured on that Mac, Flint's server with two chats and two
 // 2,651-token prompts: margin 0 ran out of the GPU's memory on the first long prompt, 256 and 512 ran; the engine alone
-// ran with 5.50 GiB allocated and failed at 5.74, against a working set of 5.33).  Nothing changes where it fits (the M4
-// Air's configs: 20.8-22.2 GiB of 25.0).  MOMOE_NO_METAL_FIT=1: not done; MOMOE_METAL_FIT_DEBUG=1: the figures.
+// ran with 5.50 GiB allocated and failed at 5.74, against a working set of 5.33).  On a large working set 512 MiB is too
+// little: 3% of it when that is more (the M1 Ultra, 48.0 GiB: Ling-3.0-flash IQ3_XXS ran with 46.65 GiB allocated and
+// ran out at 47.45; Swift IQ3_XXS's 46.30 fits either way).  Nothing changes where it fits (the M4 Air's configs:
+// 20.8-22.2 GiB of 25.0).  MOMOE_NO_METAL_FIT=1: not done; MOMOE_METAL_FIT_DEBUG=1: the figures.
 static void fit_pool_metal(Engine & e) {
     if (!kHostMem || !e.metal || getenv("MOMOE_NO_METAL_FIT")) return;
     ggml_backend_dev_t dev = ggml_backend_get_device(e.metal);
@@ -5512,7 +5514,8 @@ static void fit_pool_metal(Engine & e) {
     e.reserve_only = true;
     forward(e, toks.data(), T, e.n_ctx - T);
     e.reserve_only = false;
-    const double margin = (getenv("MOMOE_METAL_MARGIN_MIB") ? atof(getenv("MOMOE_METAL_MARGIN_MIB")) : 512) * 1048576.0;
+    const double margin = getenv("MOMOE_METAL_MARGIN_MIB") ? atof(getenv("MOMOE_METAL_MARGIN_MIB")) * 1048576.0
+                                                           : std::max(512.0 * 1048576.0, 0.03 * (double) tot);
 #if !defined(MOMOE_CUDA)
     const double used = (double) ggml_backend_metal_allocated(e.metal);
 #else
