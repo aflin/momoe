@@ -26,7 +26,7 @@ Options: --family qwen|swift|coder|unsloth|qwen36|ornith|qwen36-bartowski|kat-co
 at least 1 - an explicit --rope-scaling none is refused for such a context), --vision yes|no|gpu|cpu, --port
 8080, --yes (recommended
 answers, no questions), --setup (install another model / change settings instead of starting), --no-start,
---host 0.0.0.0 --api-key KEY (reach it from other devices on your network), --experimental-speed-projection on|off
+--host 0.0.0.0 --api-key KEY (reach it over IPv4; use --host :: for IPv6), --experimental-speed-projection on|off
 (EXPERIMENTAL, off by default),
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --check (only check this PC), --resident-budget-gib N (UD-Q4_K_XL's or UD-IQ4_XS's experts in RAM),
 --kv-streaming on|off|auto.
@@ -8323,9 +8323,10 @@ def main() -> int:
                          "(docs/SECOND_GPU.md). With --gpus, the main one first; otherwise the two best cards. Saved")
     ap.add_argument("--no-remote-expert-opt", action="store_true",
                     help="with two or more GPUs: leave out --remote-expert-opt, which setup adds there (#578)")
-    ap.add_argument("--host", help="where the server listens: 127.0.0.1 = this PC only (default), 0.0.0.0 = also other "
-                                   "devices on your network (issue #26; set --api-key too)")
-    ap.add_argument("--api-key", help="require this key from clients (recommended with --host 0.0.0.0); several keys: key1,key2")
+    ap.add_argument("--host", help="where the server listens: 127.0.0.1 = this PC only (default), 0.0.0.0 = all IPv4 "
+                                   "interfaces, :: = all IPv6 interfaces (issue #26; set --api-key too)")
+    ap.add_argument("--api-key", help="require this key from clients (recommended with --host 0.0.0.0 or --host ::); "
+                                      "several keys: key1,key2")
     ap.add_argument("--save", action="store_true",
                     help="momoe start: also write --host, --api-key, --draft-vocab and --vram-reserve-mib into the "
                          "config (without it they apply to this start only)")
