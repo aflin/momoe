@@ -443,8 +443,10 @@ def check_request(req: dict) -> None:
         raise ResponsesError("stored prompt templates are not supported: send instructions and input",
                              "prompt", "unsupported_parameter")
     n = req.get("max_output_tokens")
-    if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 1):
-        raise ResponsesError("max_output_tokens must be a positive whole number", "max_output_tokens")
+    # -1 and 0 mean no cap, as max_tokens does on the chat path (docs/DETAILS.md); anything lower is a mistake
+    if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < -1):
+        raise ResponsesError("max_output_tokens must be a whole number, 1 or more, or -1 or 0 for no cap",
+                             "max_output_tokens")
     reasoning = req.get("reasoning")
     if reasoning is not None and not isinstance(reasoning, dict):
         raise ResponsesError("reasoning must be an object", "reasoning")
