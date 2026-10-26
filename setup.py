@@ -1637,8 +1637,8 @@ def named_gpus(gpu, gpus) -> list:
         return []
 
 
-def cuda_choice(archs, cuda=None):
-    """The CUDA toolkit of one model's engine: (12 or 13, why).  13 unless a card is older
+def cuda_choice(archs, cuda=None, driver=None):
+    """The CUDA toolkit of one model's engine: (12 or 13, why).  13 (the ready-made engine) unless a card is older
     than CUDA 13 supports (Pascal / Volta: CUDA 13 cannot compile for them) - one engine runs per model, so its oldest
     card decides.  `cuda` (--cuda 12|13) overrides it; setup recommends, it does not refuse (the caller warns)."""
     archs = sorted({int(x) for x in archs})
@@ -1652,6 +1652,9 @@ def cuda_choice(archs, cuda=None):
     if old:
         return 12, (f"sm_{old[0]} is older than CUDA 13 supports (it dropped Pascal and Volta): this model runs the "
                     "experimental CUDA 12 engine")
+    if driver and CUDA12_MIN_DRIVER <= int(driver) < MIN_DRIVER:      # #3843: a driver too old for CUDA 13 still runs the CUDA 12 engine
+        return 12, (f"the NVIDIA driver {driver} is older than CUDA 13 needs ({MIN_DRIVER}): this model runs the CUDA 12 engine "
+                    f"(it works with driver {CUDA12_MIN_DRIVER} or newer; a newer driver from https://www.nvidia.com/drivers gives the CUDA 13 engine)")
     return 13, None
 
 
@@ -2688,6 +2691,27 @@ def _piece_worker(src: _Source, st: _Pieces, todo: list, part: Path):
         st.stop.set()
 
 
+class StallNote:
+    """A download that gets no byte for a while says so (#3567): "stalled at 69%" instead of a silent line that never moves. `check` is called
+    often with the bytes so far; it answers a sentence at most once a minute while nothing arrives, and None otherwise."""
+
+    AFTER = 120.0
+
+    def __init__(self, now: float = 0.0):
+        self.have, self.since, self.said = -1, now, 0.0
+
+    def check(self, have: int, total: int, now: float) -> str | None:
+        if have != self.have:
+            self.have, self.since, self.said = have, now, 0.0
+            return None
+        idle = now - self.since
+        if idle < self.AFTER or now - self.said < 60:
+            return None
+        self.said = now
+        return (f"no data for {int(idle // 60)} min at {100 * have // max(1, total)}%: the connection is stuck. It keeps trying; to stop, press Ctrl+C, "
+                "and run the same command again: the download continues where it stopped")
+
+
 def parallel_download(url: str, part: Path, total: int, label: str, conns: int, name: str) -> bool:
     """Fill `part` (total bytes) over `conns` ranged connections.  True when every byte is there; False when the server
     does not do ranges (the caller reads the file in one stream)."""
@@ -2707,6 +2731,7 @@ def parallel_download(url: str, part: Path, total: int, label: str, conns: int, 
     if not part.with_name(part.name + ".chunks").is_file() and not _save_pieces(part, total, done):
         return False                                    # no piece list can be kept here: the pieces would not be told from holes
     last_print = last_save = 0.0
+    stall = StallNote(time.time())
 
     def report(force=False):
         nonlocal last_print, last_save
@@ -2715,6 +2740,10 @@ def parallel_download(url: str, part: Path, total: int, label: str, conns: int, 
             last_print = now
             have = st.have()
             print(f"\r  {label}: {have / 1e9:6.2f} / {total / 1e9:.2f} GB ({100 * have / total:.0f}%)   ", end="", flush=True)
+            note = stall.check(have, total, now)
+            if note:
+                print()
+                warn(note)
         if now - last_save > DL_SAVE_EVERY:
             last_save = now
             _save_pieces(part, total, st.snapshot())
@@ -7055,6 +7084,13 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         ram = mac_memory_gib()
         say(f"  {chip or 'unknown chip'}, {ram:.0f} GB of memory")
         if platform.machine() != "arm64":
+            # platform.machine() is the Python's build: an Intel Python through Rosetta says x86_64 on an M1 (upstream #3894),
+            # and the engine it compiles would be an Intel one
+            arm = subprocess.run(["sysctl", "-n", "hw.optional.arm64"], capture_output=True, text=True).stdout.strip() == "1"
+            if arm or chip.startswith("Apple"):
+                fail("the Python that runs setup is an Intel build running through Rosetta (the engine is compiled for "
+                     "this Python's chip)", "run setup with the Apple Silicon Python from python.org or Homebrew "
+                     "(/opt/homebrew/bin/python3)")
             fail("Momoe on a Mac needs Apple Silicon (M1 or later)")
         if subprocess.run(["xcode-select", "-p"], capture_output=True).returncode != 0:
             fail("Xcode's command line tools are not installed (the engine is compiled here)",
@@ -8015,15 +8051,13 @@ def main() -> int:
         elif helper is not None:
             ok(f"GPUs: {gpu_name(chosen[0])}, with {gpu_name(chosen[1])} as its second expert tier (--helper-tier)")
         ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, compute capability {cc(gpu)}, driver {gpu['driver']}")
-        cuda_tk, why = cuda_choice(gpu["archs"], a.cuda)   # one engine per model: its oldest card decides
+        cuda_tk, why = cuda_choice(gpu["archs"], a.cuda, driver_major(gpu))   # one engine per model: its oldest card decides
         if why:
             (warn if cuda_tk == 13 or str(a.cuda) == "12" else ok)(f"CUDA {cuda_tk}: {why}")
         min_driver = CUDA12_MIN_DRIVER if cuda_tk == 12 else MIN_DRIVER
         if driver_major(gpu) < min_driver:
             fail(f"the NVIDIA driver is too old ({gpu['driver']}; {min_driver} or newer is needed)",
-                 "update it with the NVIDIA App or from https://www.nvidia.com/drivers, restart, and run this again" +
-                 ("" if cuda_tk == 12 else f" (or --cuda 12: the experimental CUDA 12 engine runs with driver "
-                                           f"{CUDA12_MIN_DRIVER} or newer, docs/OLDER_GPUS.md)"))
+                 "update it with the NVIDIA App or from https://www.nvidia.com/drivers, restart, and run this again")
     if gpu["vram_gb"] < 11 and not small_family(a.family or ""):   # the 35B-A3B families: their note is in step 2
         warn("less than 12 GB of " + ("GPU memory (this APU's carve-out + shared memory)" if gpu.get("uma") else "VRAM")
              + ": Momoe will run, but most experts stay on the CPU and it will be slow"
