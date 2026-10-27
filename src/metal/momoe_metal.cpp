@@ -7256,12 +7256,12 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                 std::vector<int32_t> tt;
                 const size_t n_new = prompt.size() - reused;
                 int q0 = reused + 1;                         // the MTP position of a pair: its token's
-                if (reused > 0 && (int) h_before.size() == ne) {
+                if (reused > 0 && (int) h_before.size() == ne && !e.ds.on) {
                     hh = h_before;                           // (state before the new tokens, the first new token)
                     tt.push_back(ptoks[reused]);
                     q0 = reused;
                 }
-                for (size_t i = 0; i < n_new; ++i) {
+                for (size_t i = 0; i < n_new && !e.ds.on; ++i) {   // (DSpark: no MTP layer, no hidden states)
                     hh.insert(hh.end(), H.begin() + i * ne, H.begin() + (i + 1) * ne);
                     tt.push_back(i + 1 < n_new ? ptoks[reused + i + 1] : next);
                 }
