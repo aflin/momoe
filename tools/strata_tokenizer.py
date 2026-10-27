@@ -128,17 +128,20 @@ PRE_PATTERNS = {"qwen35": QWEN35_PATTERN, "tekken": TEKKEN_PATTERN, "glm4": CHAT
                 "deepseek3": DEEPSEEK3_PATTERNS[-1]}
 SPM = {"gemma4"}                              # SentencePiece-style BPE (above): no byte mapping
 SPACE = "\u2581"
-PRE_SEQUENCES = {"flint": FLINT_PATTERNS, "deepseek3": DEEPSEEK3_PATTERNS}     # pre-tokenizers of several patterns in a row (the last one is PRE_PATTERNS')
+PRE_SEQUENCES = {"flint": FLINT_PATTERNS, "deepseek3": DEEPSEEK3_PATTERNS}
+# the names a GGUF gives these (the IST-DAS DeepSeek-V4.1 files say joyai-llm: llama.cpp splits it as DeepSeek-3's)
+PRE_ALIASES = {"joyai-llm": "deepseek3", "deepseek-v3": "deepseek3", "deepseek-v3.2": "deepseek3"}     # pre-tokenizers of several patterns in a row (the last one is PRE_PATTERNS')
 IGNORE_MERGES = {"glm4", "glm5", "lfm2", "pixtral"}
 # llama.cpp adds a bos token to these (add_bos); their chat templates write it as {{ bos_token }}: the pack names it
 # (`bos_token` in tokenizer.json) for the server's ChatTemplate
-ADD_BOS = {"lfm2", "pixtral", "gemma4"}
+ADD_BOS = {"lfm2", "pixtral", "gemma4", "deepseek3"}
 
 
 class Tokenizer:
     def __init__(self, tokens: list[str], merges: list[str], token_types: list[int] | None = None,
                  pre: str = "qwen35", special_ids: dict[str, int] | None = None):
         self.tokens = tokens
+        pre = PRE_ALIASES.get(pre, pre)
         self.pre = pre
         self.token_types = token_types
         self.special_ids = special_ids or {}

@@ -160,6 +160,18 @@ struct Layer {
     int hd = 0, n_kv = 0;
     ggml_tensor *post_ffw = nullptr, *post_ffw1 = nullptr, *post_ffw2 = nullptr, *pre_ffw2 = nullptr;
     ggml_tensor *gate_inp_s = nullptr, *down_s = nullptr, *out_scale = nullptr;
+    // deepseek41 (DeepSeek-V4.1-Flash): one 512-wide KV row (the key is the value; RoPE on its last n_rot) in wkv_a /
+    // kv_a_norm, the query through wq_a -> wq_b, the output through o_groups LoRAs (wo_a, then wo); per-head sinks.  A
+    // block with a compress ratio attends to the window's ring (k_cache, swa) and to compressed rows of the KV source
+    // block at or before it: a source compresses ratio positions into one row (comp_kv weighted by the softmax of
+    // comp_gate, comp_norm), stored with its index key (idx_k, idx_k_norm) in comp_cache [hd + idx_dim, n_ctx / ratio
+    // + 1] (the last row a dummy target), the unfinished group's rows in cst_kv / cst_sc [hd, ratio]; an index source
+    // scores the rows (idx_q, idx_proj) and keeps the top idx_top_k.  Engram blocks: hashed rows (the Engram file, read
+    // on the CPU) through eg_wkv, gated by q * k (eg_q, eg_k)
+    ggml_tensor *wo_a = nullptr, *comp_kv = nullptr, *comp_gate = nullptr, *comp_norm = nullptr;
+    ggml_tensor *eg_q = nullptr, *eg_k = nullptr, *eg_wkv = nullptr;
+    ggml_tensor *comp_cache = nullptr, *cst_kv = nullptr, *cst_sc = nullptr;
+    int ratio = 0, kv_src = -1, topk_src = -1, eg = -1;
 };
 
 struct Model {
@@ -227,6 +239,23 @@ struct Model {
     float norm_eps = 1e-6f, kda_lb = -INFINITY, hc_eps = 1e-6f;
     bool kpool_tail = true;
     std::vector<float> clamp_exp, clamp_sh;                  // per block
+    // deepseek41 (see Layer): mHC (glm5-next's) whose pre-mix lags one sublayer, no head mixer; the KV width ds_hd, the
+    // output groups and their rank; RoPE: the window-only blocks at rope_base, the compressed ones at ds_comp_base with
+    // YaRN (ds_freq_scale, ds_ext, ds_attn_factor, ds_beta_*, ds_ctx_orig); the candidate blocks (cand_src picks the
+    // cand_blocks best blocks of cand_bs rows, the index sources after it score inside them); the router sqrt(softplus)
+    bool ds41 = false;
+    int ds_hd = 0, o_groups = 0, o_lora = 0, ds_ctx_orig = 0, cand_src = -1, cand_bs = 0, cand_blocks = 0;
+    float ds_comp_base = 0, ds_freq_scale = 1, ds_ext = 0, ds_attn_factor = 1, ds_beta_fast = 0, ds_beta_slow = 0;
+    // Engram (deepseek41): per module (block), the n-gram hash (eg_mult[eg_ngram], eg_primes / eg_offs[eg_heads], back
+    // to back) into its own table of eg_dim-wide rows in the Engram file; tokens mapped through eg_map (pad: eg_pad)
+    int eg_ngram = 0, eg_per = 0, eg_heads = 0, eg_dim = 0;
+    int64_t eg_pad = 0;
+    std::vector<int32_t> eg_map;
+    std::vector<uint64_t> eg_mult, eg_primes, eg_offs;
+    std::vector<int> eg_fd;
+    std::vector<size_t> eg_off, eg_row;
+    std::vector<int64_t> eg_rows;
+    ggml_type eg_type = GGML_TYPE_COUNT;
     ggml_tensor *tok_embd = nullptr, *out_norm = nullptr, *output = nullptr;
     std::vector<Layer> layers;
     Layer mtp;                                               // the draft layer (blk.n_layer), when loaded
@@ -630,7 +659,7 @@ static void cpu_parts(const Model & m, const Layer & L, CpuExperts & C) {
 // Ornith-1.5-35B IQ4_XS (52%: 14.1 ms per token, the copies 15.6)
 static bool hybrid_model(const Model & m) {
     static const char * q = getenv("MOMOE_QWEN_HYBRID");
-    return m.nemo || (!(q && q[0] == '0') && !m.qwen4 && !m.glm5 && (!m.lfm || m.flint));   // (flint: SwiGLU experts as qwen35moe's)
+    return m.nemo || (!(q && q[0] == '0') && !m.qwen4 && !m.glm5 && !m.ds41 && (!m.lfm || m.flint));   // (flint: SwiGLU experts as qwen35moe's)
 }
 
 
@@ -718,6 +747,7 @@ struct Engine {
     std::vector<ggml_backend_t> sched_backends;              // e.sched's (a reused graph's own scheduler)
     std::string draft_vocab;                                 // --draft-vocab: the draft head's token subset
     std::string mtp_gguf;                                    // --mtp-gguf: qwen4exp's MTP layer (not in its GGUFs)
+    std::string engram;                                      // --engram: deepseek41's Engram file (else found by its name)
     double t_mtp = 0;                                        // time in the MTP layer
     int max_window = 8;                                      // verify windows up to this many tokens
     ggml_backend_t metal = nullptr, cpu = nullptr;
@@ -1138,9 +1168,9 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     if (!g) die("cannot read %s as GGUF", path);
     std::string arch = gguf_get_val_str(g, gguf_find_key(g, "general.architecture"));
     if (arch != "qwen35moe" && arch != "qwen4exp" && arch != "nemotron_h_moe" && arch != "glm5-next" && arch != "lfm2moe"
-        && arch != "flint" && arch != "gemma4" && arch != "bailingmoe3")
-        die("%s: only qwen35moe, qwen4exp, nemotron_h_moe, glm5-next, lfm2moe, flint, gemma4 and bailingmoe3 models",
-            arch.c_str());
+        && arch != "flint" && arch != "gemma4" && arch != "bailingmoe3" && arch != "deepseek41")
+        die("%s: only qwen35moe, qwen4exp, nemotron_h_moe, glm5-next, lfm2moe, flint, gemma4, bailingmoe3 and deepseek41 "
+            "models", arch.c_str());
     m.qwen4 = arch == "qwen4exp";
     m.nemo = arch == "nemotron_h_moe";
     m.glm5 = arch == "glm5-next";
@@ -1148,6 +1178,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     m.lfm = arch == "lfm2moe" || m.flint;
     m.gemma4 = arch == "gemma4";
     m.ling = arch == "bailingmoe3";
+    m.ds41 = arch == "deepseek41";
     {                                                        // the control tokens the serve loop needs, by name
         const int64_t ti = gguf_find_key(g, "tokenizer.ggml.tokens");
         if (ti < 0) die("the file has no vocabulary");
@@ -1166,6 +1197,8 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
             // front of the reply's own <|assistant|> as before <|im_start|>
             else if (!strcmp(s, "<|user|>") || !strcmp(s, "<|observation|>")) glm_ends.push_back((int32_t) i);
             else if (!strcmp(s, "<|assistant|>")) glm_asst = (int32_t) i;
+            else if (!strcmp(s, "<\uff5cAssistant\uff5c>") && m.ds41) m.im_start = (int32_t) i;   // (deepseek41: the
+                                                             // checkpoint in front of the reply's own <|Assistant|>)
             else if (!strcmp(s, "<role>") && m.ling) m.im_start = (int32_t) i;   // (ling: <role>ASSISTANT</role>; a
                                                              // reply ends at <|role_end|>, the file's eos)
             else if (!strcmp(s, "<|turn>") && m.gemma4) m.im_start = (int32_t) i;   // (gemma4: a turn starts there;
@@ -1188,7 +1221,107 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     int nextn = has("nextn_predict_layers") ? gguf_int(g, k("nextn_predict_layers")) : 0;
     m.n_layer = gguf_int(g, k("block_count")) - nextn;     // the MTP layer is not run yet
     m.n_head = gguf_int(g, k("attention.head_count"));
-    if (m.glm5) {                                            // llama.cpp's glm5-next.cpp load_arch_hparams
+    if (m.ds41) {                                            // llama.cpp's deepseek4.cpp / deepseek41.cpp load_arch_hparams,
+        m.layers.resize(m.n_layer);                          // with the IST-DAS sets' key names (llama.cpp's beside them)
+        m.n_head_kv = 1;
+        m.ds_hd = gguf_int(g, k("attention.key_length"));
+        m.head_dim = m.ds_hd;
+        m.n_rot = gguf_int(g, k("rope.dimension_count"));
+        m.q_lora = gguf_int(g, k("attention.q_lora_rank"));
+        m.n_swa = gguf_int(g, k("attention.sliding_window"));
+        m.o_groups = gguf_int(g, k("attention.output_group_count"));
+        m.o_lora = gguf_int(g, k("attention.output_lora_rank"));
+        m.idx_heads = gguf_int(g, k("attention.indexer.head_count"));
+        m.idx_dim = gguf_int(g, k("attention.indexer.key_length"));
+        m.idx_top_k = gguf_int(g, k("attention.indexer.top_k"));
+        m.n_expert = gguf_int(g, k("expert_count"));
+        m.n_used = gguf_int(g, k("expert_used_count"));
+        m.n_ff_exp = gguf_int(g, k("expert_feed_forward_length"));
+        m.exp_scale = has("expert_weights_scale") ? gguf_float(g, k("expert_weights_scale")) : 1.0f;
+        if (gguf_int(g, k("expert_gating_func")) != 4) die("deepseek41: only the sqrt(softplus) router");
+        if (has("expert_weights_norm") && !gguf_get_val_bool(g, gguf_find_key(g, k("expert_weights_norm").c_str())))
+            die("deepseek41: only normalized expert weights");
+        if (has("expert_shared_count") && gguf_int(g, k("expert_shared_count")) != 1) die("deepseek41: one shared expert only");
+        if (has("hash_layer_count") && gguf_int(g, k("hash_layer_count")) != 0) die("deepseek41: hash-routed blocks are not done");
+        m.rms_eps = gguf_float(g, k("attention.layer_norm_rms_epsilon"));
+        m.rope_base = gguf_float(g, k("rope.freq_base"));
+        m.ds_comp_base = gguf_float(g, k("attention.compress_rope_freq_base"));
+        m.ds_freq_scale = has("rope.scaling.factor") ? 1.0f / gguf_float(g, k("rope.scaling.factor")) : 1.0f;
+        m.ds_ext = m.ds_freq_scale != 1.0f ? 1.0f : 0.0f;    // (YaRN: llama.cpp's ext_factor; its attention factor
+        m.ds_attn_factor = m.ds_ext != 0.0f ? 1.0f / (1.0f + 0.1f * logf(1.0f / m.ds_freq_scale)) : 1.0f;   // cancels mscale)
+        m.ds_ctx_orig = has("rope.scaling.original_context_length") ? gguf_int(g, k("rope.scaling.original_context_length")) : 0;
+        m.ds_beta_fast = has("rope.scaling.yarn_beta_fast") ? gguf_float(g, k("rope.scaling.yarn_beta_fast")) : 32.0f;
+        m.ds_beta_slow = has("rope.scaling.yarn_beta_slow") ? gguf_float(g, k("rope.scaling.yarn_beta_slow")) : 1.0f;
+        m.hc = gguf_int(g, k("hyper_connection.count"));
+        if (m.hc != 4) die("deepseek41: mHC with 4 streams only (as llama.cpp)");
+        m.hc_iters = gguf_int(g, k("hyper_connection.sinkhorn_iterations"));
+        m.hc_eps = gguf_float(g, k("hyper_connection.epsilon"));
+        m.clamp_exp = gguf_per_block_f(g, k("swiglu_clamp_exp"), m.n_layer, 0.0f);
+        m.clamp_sh = has("swiglu_clamp_shexp") ? gguf_per_block_f(g, k("swiglu_clamp_shexp"), m.n_layer, 0.0f) : m.clamp_exp;
+        // each compressed block reads the KV / top-k of the latest source block at or before it (deepseek41.cpp)
+        const std::vector<uint64_t> ratios = gguf_uarr(g, k("attention.compress_ratios"));
+        if ((int) ratios.size() < m.n_layer) die("deepseek41: compress_ratios is shorter than the model");
+        auto list = [&](const char * a, const char * b) {
+            return gguf_uarr(g, k(has(a) ? a : b));
+        };
+        const std::vector<uint64_t> kv_src = list("kv_source_layer_ids", "attention.kv_source_layers");
+        const std::vector<uint64_t> idx_src = list("index_source_layer_ids", "attention.indexer.source_layers");
+        int last_kv = -1, last_idx = -1;
+        for (int il = 0; il < m.n_layer; ++il) {
+            Layer & L = m.layers[il];
+            L.ratio = (int) ratios[il];
+            L.swa = true;                                    // (every block: the window's ring)
+            const bool is_kv = std::find(kv_src.begin(), kv_src.end(), (uint64_t) il) != kv_src.end();
+            const bool is_idx = std::find(idx_src.begin(), idx_src.end(), (uint64_t) il) != idx_src.end();
+            if ((is_kv || is_idx) && L.ratio == 0) die("deepseek41: a source block without compression");
+            if (is_kv) last_kv = il;
+            if (is_idx) last_idx = il;
+            if (L.ratio == 0) continue;
+            if (L.ratio > 2 || last_kv < 0 || last_idx < last_kv || m.layers[last_kv].ratio != L.ratio ||
+                m.layers[last_idx].ratio != L.ratio) die("deepseek41: block %s's ratio has no matching kv / index source", std::to_string(il).c_str());
+            L.kv_src = last_kv;
+            L.topk_src = last_idx;
+        }
+        auto opt = [&](const char * a, const char * b, int d) {
+            return has(a) ? gguf_int(g, k(a)) : has(b) ? gguf_int(g, k(b)) : d;
+        };
+        m.cand_src = opt("attention.candidate_source_layer_id", "attention.indexer.candidate_source_layer", -1);
+        if (m.cand_src >= 0) {
+            m.cand_bs = opt("attention.candidate_block_size", "attention.indexer.candidate_block_size", 0);
+            m.cand_blocks = opt("attention.candidate_topk_blocks", "attention.indexer.candidate_top_k_blocks", 0);
+            if (m.cand_src >= m.n_layer || m.layers[m.cand_src].topk_src != m.cand_src || m.cand_bs <= 0 || m.cand_blocks <= 0)
+                die("deepseek41: invalid candidate selection");
+        }
+        if (has("engram.layer_ids")) {                       // (the hash constants: the first file's integer tensors)
+            const std::vector<uint64_t> el = gguf_uarr(g, k("engram.layer_ids"));
+            for (size_t j = 0; j < el.size(); ++j) {
+                if ((int) el[j] >= m.n_layer || (j && el[j] <= el[j - 1])) die("deepseek41: the Engram blocks are out of order");
+                m.layers[el[j]].eg = (int) j;
+            }
+            m.eg_ngram = gguf_int(g, k("engram_max_ngram_size"));
+            m.eg_per = gguf_int(g, k("engram_n_heads"));
+            m.eg_dim = gguf_int(g, k("engram_head_dim"));
+            m.eg_pad = gguf_int(g, k("engram_pad_token_id"));
+            m.eg_heads = (m.eg_ngram - 1) * m.eg_per;
+            if (e.engram.empty() && has("engram.file")) {    // the IST-DAS sets name it: beside the model, above it or in
+                const std::string f = gguf_get_val_str(g, gguf_find_key(g, k("engram.file").c_str()));   // setup's shared
+                std::string dir = path;                      // folder (models/deepseek-v4.1-flash-shared)
+                dir = dir.find('/') == std::string::npos ? "." : dir.substr(0, dir.rfind('/'));
+                for (const std::string & d : {dir, dir + "/..", dir + "/../deepseek-v4.1-flash-shared"}) {
+                    struct stat st;
+                    if (stat((d + "/" + f).c_str(), &st) == 0) { e.engram = d + "/" + f; break; }
+                }
+                if (e.engram.empty()) die("deepseek41: the Engram file %s is not beside the model (--engram FILE)", f.c_str());
+            }
+            if (e.engram.empty()) die("deepseek41: this file names no Engram file: --engram FILE");
+            m.eg_fd.assign(el.size(), -1);
+            m.eg_off.assign(el.size(), 0);
+            m.eg_row.assign(el.size(), 0);
+            m.eg_rows.assign(el.size(), 0);
+        } else if (has("ple.layers")) die("deepseek41: llama.cpp's Engram keys (ple.*) are not read yet: use the IST-DAS files");
+        m.full_attn_interval = 0;
+        for (int j = 0; j < 4; ++j) m.sections[j] = 0;
+    } else if (m.glm5) {                                     // llama.cpp's glm5-next.cpp load_arch_hparams
         const std::vector<uint64_t> kv = gguf_uarr(g, k("attention.head_count_kv"));
         if ((int) kv.size() < m.n_layer) die("the per-block arrays are shorter than the model");
         m.layers.resize(m.n_layer);
@@ -1408,7 +1541,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     m.n_head_kv = gguf_int(g, k("attention.head_count_kv"));
     m.head_dim = gguf_int(g, k("attention.key_length"));
     }   // (the indented block below is qwen35moe / qwen4exp only)
-    if (!m.nemo && !m.glm5 && !m.lfm && !m.gemma4 && !m.ling) {
+    if (!m.nemo && !m.glm5 && !m.lfm && !m.gemma4 && !m.ling && !m.ds41) {
     m.n_rot = gguf_int(g, k("rope.dimension_count"));
     m.n_expert = gguf_int(g, k("expert_count"));
     m.n_used = gguf_int(g, k("expert_used_count"));
@@ -1592,8 +1725,25 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
                 L.exp_map[w] = fmap;
                 continue;
             }
+            if (il < 0 && m.ds41 && !strncmp(name, "engram_", 7)) {   // deepseek41: the Engram's hash constants (host)
+                const size_t nb = ggml_nbytes(src), n = (size_t) ggml_nelements(src);
+                std::vector<char> raw(nb);
+                read_at(fd, raw.data(), nb, off);
+                if (!strcmp(name, "engram_token_map.weight") && src->type == GGML_TYPE_I32) {
+                    m.eg_map.assign((const int32_t *) raw.data(), (const int32_t *) raw.data() + n);
+                } else if (src->type == GGML_TYPE_I64) {
+                    std::vector<uint64_t> v((const uint64_t *) raw.data(), (const uint64_t *) raw.data() + n);
+                    if (!strcmp(name, "engram_multipliers.weight")) m.eg_mult = v;
+                    else if (!strcmp(name, "engram_primes.weight")) m.eg_primes = v;
+                    else if (!strcmp(name, "engram_offsets.weight")) m.eg_offs = v;
+                    else fprintf(stderr, "momoe-metal: tensor %s not used\n", name);
+                } else fprintf(stderr, "momoe-metal: tensor %s not used\n", name);
+                continue;
+            }
             ggml_context * tctx = embd_cpu && !strcmp(name, "token_embd.weight") ? ccpu : cw_of(il, name);
-            const bool as_f32 = bf16_f32 && src->type == GGML_TYPE_BF16;
+            // (deepseek41's Engram gate weights as F32: their product is taken in the graph)
+            const bool as_f32 = (bf16_f32 || (m.ds41 && (r == "engram_q.weight" || r == "engram_k.weight"))) &&
+                                src->type == GGML_TYPE_BF16;
             ggml_tensor * t = as_f32 ? ggml_new_tensor(tctx, GGML_TYPE_F32, ggml_n_dims(src), src->ne) : ggml_dup_tensor(tctx, src);
             ggml_set_name(t, name);
             to_read.push_back({t, fd, off, as_f32});
@@ -1654,7 +1804,12 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
                 {"post_ffw_norm.weight", &L.post_ffw}, {"post_ffw_norm_1.weight", &L.post_ffw1},
                 {"post_ffw_norm_2.weight", &L.post_ffw2}, {"pre_ffw_norm_2.weight", &L.pre_ffw2},
                 {"ffn_gate_inp.scale", &L.gate_inp_s}, {"ffn_down_exps.scale", &L.down_s},
-                {"layer_output_scale.weight", &L.out_scale}};
+                {"layer_output_scale.weight", &L.out_scale},
+                // deepseek41 (its attention's names; the indexer's and the KV norm's as glm5-next's)
+                {"attn_kv.weight", &L.wkv_a}, {"attn_output_a.weight", &L.wo_a}, {"attn_output_b.weight", &L.wo},
+                {"attn_compressor_kv.weight", &L.comp_kv}, {"attn_compressor_gate.weight", &L.comp_gate},
+                {"attn_compressor_norm.weight", &L.comp_norm}, {"engram_q.weight", &L.eg_q}, {"engram_k.weight", &L.eg_k},
+                {"engram_wkv.weight", &L.eg_wkv}};
             auto it = slot.find(r);
             if (it == slot.end()) fprintf(stderr, "momoe-metal: tensor %s not used\n", name);
             else *it->second = t;
@@ -1668,6 +1823,50 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
             die("a layer has no routed experts");
     }
     if (m.qwen4 && !m.hc_head_norm) die("the hyper-connection head (output_hc_*) is missing");
+    if (m.ds41 && m.eg_heads) {                              // the Engram tables: one per Engram block, read on the CPU
+        const size_t ne = m.eg_fd.size();
+        if (m.eg_mult.size() != ne * m.eg_ngram || m.eg_primes.size() != ne * m.eg_heads || m.eg_offs.size() != ne * m.eg_heads ||
+            m.eg_map.empty() || m.eg_pad >= (int64_t) m.eg_map.size())
+            die("deepseek41: the Engram's hash constants (engram_* tensors) are missing or of the wrong size");
+        ggml_context * em = nullptr;
+        gguf_init_params ep = {true, &em};
+        gguf_context * eg = gguf_init_from_file(e.engram.c_str(), ep);
+        if (!eg) die("cannot read %s as GGUF", e.engram.c_str());
+        const int fd = open(e.engram.c_str(), O_RDONLY);
+        if (fd < 0) die("cannot open %s", e.engram.c_str());
+        e.fds.push_back(fd);
+        for (int il = 0; il < m.n_layer; ++il) {
+            const int j = m.layers[il].eg;
+            if (j < 0) continue;
+            const std::string name = "blk." + std::to_string(il) + ".engram_embd.weight";
+            const int64_t ti = gguf_find_tensor(eg, name.c_str());
+            if (ti < 0) die("deepseek41: the Engram file has no %s", name.c_str());
+            const ggml_tensor * t = ggml_get_tensor(em, name.c_str());
+            if (t->ne[0] != m.eg_dim || !ggml_get_type_traits(t->type)->to_float) die("deepseek41: %s: not a table of rows the CPU can read, eg_dim wide", name.c_str());
+            m.eg_fd[j] = fd;
+            m.eg_off[j] = gguf_get_data_offset(eg) + gguf_get_tensor_offset(eg, ti);
+            m.eg_row[j] = t->nb[1];
+            m.eg_rows[j] = t->ne[1];
+            m.eg_type = t->type;
+            for (int h = 0; h < m.eg_heads; ++h)
+                if (m.eg_offs[(size_t) j * m.eg_heads + h] + m.eg_primes[(size_t) j * m.eg_heads + h] > (uint64_t) t->ne[1])
+                    die("deepseek41: an Engram head reaches past its table");
+        }
+        gguf_free(eg);
+        ggml_free(em);
+        fprintf(stderr, "momoe-metal: Engram: %s (%zu tables, rows read on the CPU)\n", e.engram.c_str(), ne);
+    }
+    if (m.ds41) {
+        for (int il = 0; il < m.n_layer; ++il) {
+            const Layer & L = m.layers[il];
+            if (!L.wkv_a || !L.kv_a_norm || !L.wo_a || !L.wo || !L.sinks || !L.wq_a || !L.wq_b || !L.hc_attn_fn || !L.hc_ffn_fn)
+                die("deepseek41: block %s's attention or mHC tensors are missing", std::to_string(il).c_str());
+            if (L.kv_src == il && (!L.comp_kv || !L.comp_norm || !L.idx_k || !L.idx_k_norm || (L.ratio > 1 && !L.comp_gate)))
+                die("deepseek41: block %s's compressor is missing", std::to_string(il).c_str());
+            if (L.topk_src == il && (!L.idx_q || !L.idx_proj)) die("deepseek41: block %s's indexer is missing", std::to_string(il).c_str());
+            if (L.eg >= 0 && (!L.eg_q || !L.eg_k || !L.eg_wkv)) die("deepseek41: block %s's Engram tensors are missing", std::to_string(il).c_str());
+        }
+    }
     if (m.ple_layer >= 0) {
         if (m.ple_fd < 0) die("the PLE table (per_layer_token_embd.weight) is missing: are all the model's files there?");
         if (!ggml_get_type_traits(m.ple_type)->to_float) die("the PLE table's format cannot be read on the CPU");
@@ -1723,7 +1922,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
         dense += ggml_nbytes(r.t);
     }
     fprintf(stderr, "momoe-metal: dense weights %.2f GiB loaded\n", dense / 1073741824.0);
-    if (n_bf16) fprintf(stderr, "momoe-metal: %zu BF16 weights loaded as F32 (this GPU has no bfloat kernels: macOS before 14)\n", n_bf16);
+    if (n_bf16 && bf16_f32) fprintf(stderr, "momoe-metal: %zu BF16 weights loaded as F32 (this GPU has no bfloat kernels: macOS before 14)\n", n_bf16);
     if (m.qwen4 && e.load_mtp) load_mtp_qwen4(e);
     if (m.has_mtp && !e.draft_vocab.empty()) {               // the draft head: the output head's rows for the subset
         FILE * f = fopen(e.draft_vocab.c_str(), "rb");
@@ -1832,7 +2031,20 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     for (int il = 0; il < m.n_layer; ++il) {
         Layer & L = m.layers[il];
         ggml_context * cs = css[L.dev];
-        if ((m.glm5 || m.ling) && L.kind == 'k') {           // KDA: q, k, v's convolution histories; the state
+        if (m.ds41) {                                        // the window's ring (written at p % swa_rows, as flint's);
+            if (!m.swa_rows) {                               // a KV source's compressed rows and its unfinished group
+                const int t_max = std::max(e.max_batch, e.max_window + 1);
+                m.swa_rows = std::min(e.n_ctx, (m.n_swa + t_max - 1 + 255) / 256 * 256);
+            }
+            L.k_cache = ggml_new_tensor_2d(cs, GGML_TYPE_F16, m.ds_hd, m.swa_rows);
+            if (L.kv_src == il) {
+                L.comp_cache = ggml_new_tensor_2d(cs, GGML_TYPE_F16, m.ds_hd + m.idx_dim, e.n_ctx / L.ratio + 1);
+                if (L.ratio > 1) {
+                    L.cst_kv = ggml_new_tensor_2d(cs, GGML_TYPE_F32, m.ds_hd, L.ratio);
+                    L.cst_sc = ggml_new_tensor_2d(cs, GGML_TYPE_F32, m.ds_hd, L.ratio);
+                }
+            }
+        } else if ((m.glm5 || m.ling) && L.kind == 'k') {           // KDA: q, k, v's convolution histories; the state
             L.conv_state = ggml_new_tensor_1d(cs, GGML_TYPE_F32, (int64_t) 3 * (m.ssm_conv - 1) * m.ssm_inner);
             L.ssm_state = ggml_new_tensor_1d(cs, GGML_TYPE_F32, (int64_t) m.kda_hd * m.kda_hd * m.n_head);
         } else if (m.ling) {                                 // MLA: the latent and the key's RoPE part
@@ -1863,7 +2075,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
             L.k_cache = ggml_new_tensor_3d(cs, GGML_TYPE_F16, hd, nkv, rows);
             L.v_cache = ggml_new_tensor_3d(cs, GGML_TYPE_F16, hd, nkv, rows);
         }
-        if (L.idx_k && !m.glm5) {
+        if (L.idx_k && !m.glm5 && !m.ds41) {
             L.idx_raw = ggml_new_tensor_2d(cs, GGML_TYPE_F16, m.idx_dim, e.n_ctx);
             L.idx_pool = ggml_new_tensor_2d(cs, GGML_TYPE_F16, m.idx_dim, e.n_ctx / m.kpool + 64);
         }
@@ -2959,6 +3171,15 @@ struct Inputs {
     ggml_tensor *sel_mask = nullptr;                         // glm5-next: F32 [n_sel, T]: 0 for a token's live slots
                                                              // (its first min(visible, n_top) pools by score), -inf
     int n_sel = 0;
+    // deepseek41, per compress ratio r (1, 2): the compressed rows a token sees (F16 [ds_nc, T]: (p + 1) / r of them);
+    // the groups this batch completes (ds_nb, at least one: a dummy writes the cache's last row): the rows written (I64),
+    // their RoPE positions (I32, the group's first), the r rows read (I32 [r * ds_nb] into [the state's r rows | this
+    // batch's]); the unfinished group's rows kept (ds_np: I64 state rows, I32 batch rows).  The candidate blocks' pin
+    // (F32 [n_blk, T]: 1e30 on the block of a token's newest row; only past cand_blocks blocks); the Engram rows
+    ggml_tensor *ds_cmask[3] = {}, *ds_widx[3] = {}, *ds_wpos[3] = {}, *ds_ridx[3] = {}, *ds_pdst[3] = {}, *ds_psrc[3] = {};
+    int ds_nc[3] = {}, ds_nb[3] = {}, ds_np[3] = {};
+    ggml_tensor *ds_pin = nullptr;
+    std::vector<ggml_tensor *> ds_eg;
 };
 
 static ggml_tensor * norm(ggml_context * c, ggml_tensor * x, ggml_tensor * w, float eps) {
@@ -4265,7 +4486,13 @@ static ggml_tensor * glm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
 #endif
     ggml_tensor * lg = ggml_mul_mat(c, L.gate_inp, x);
     ggml_format_name(lg, "ffn_moe_logits-%d", il);
-    ggml_tensor * probs = ggml_sigmoid(c, lg);                                            // [n_expert, T]
+    // (deepseek41: sqrt(softplus) scores, accumulated in F32 as llama.cpp's: the choice is sensitive to near-ties)
+    auto score = [&](ggml_tensor * t) {
+        if (!m.ds41) return ggml_sigmoid(c, t);
+        ggml_prec_set_acc(t, GGML_PREC_F32);
+        return ggml_sqrt(c, ggml_softplus(c, t));
+    };
+    ggml_tensor * probs = score(lg);                                                      // [n_expert, T]
     // llama.cpp's order (the routing's nodes in a row: CUDA's topk-moe kernel): the choice and its weights first
     ggml_tensor * chosen = ggml_argsort_top_k(c, group_select(m, c, ggml_add(c, probs, L.exp_probs_b)), k);   // [k, T]
     ggml_tensor * w = ggml_reshape_2d(c, ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, m.n_expert, T), chosen), k, T);
@@ -4276,12 +4503,12 @@ static ggml_tensor * glm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
     ggml_tensor * both = top;
     if (pred_in) {                                           // [k, 2T]: this block's, then the next one's predicted
         const Layer & N = m.layers[il + 1];
-        ggml_tensor * pl = group_select(m, c, ggml_add(c, ggml_sigmoid(c, ggml_mul_mat(c, N.gate_inp, pred_in)), N.exp_probs_b));
+        ggml_tensor * pl = group_select(m, c, ggml_add(c, score(ggml_mul_mat(c, N.gate_inp, pred_in)), N.exp_probs_b));
         both = ggml_concat(c, top, ggml_cont(c, ggml_argsort_top_k(c, pl, k)), 1);
     }
     if (pred_in && pred_in2) {                               // [k, 3T]: and the one after it (MOMOE_PREDICT2)
         const Layer & N2 = m.layers[il + 2];
-        ggml_tensor * pl = group_select(m, c, ggml_add(c, ggml_sigmoid(c, ggml_mul_mat(c, N2.gate_inp, pred_in2)), N2.exp_probs_b));
+        ggml_tensor * pl = group_select(m, c, ggml_add(c, score(ggml_mul_mat(c, N2.gate_inp, pred_in2)), N2.exp_probs_b));
         both = ggml_concat(c, both, ggml_cont(c, ggml_argsort_top_k(c, pl, k)), 1);
     }
     Group & G = e.pool.g[L.grp];
@@ -4378,6 +4605,311 @@ static ggml_tensor * glm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
     }
     ggml_format_name(moe, "ffn_moe_out-%d", il);
     return ggml_add(c, moe, sh);
+}
+
+// ------------------------------------------------------------------------------------------------ deepseek41
+// DeepSeek-V4.1-Flash (llama.cpp's deepseek41.cpp, one sequence).  RoPE on the last n_rot of a row (ggml_rope_set_offset):
+// a compressed block's (and its compressed rows', indexer's) at ds_comp_base with YaRN, a window-only block's plain
+static ggml_tensor * ds_rope(const Model & m, ggml_context * c, ggml_tensor * t, ggml_tensor * pos, bool comp, bool back = false) {
+    const int64_t nope = t->ne[0] - m.n_rot;
+    t = (back ? ggml_rope_ext_back : ggml_rope_ext)(c, t, pos, nullptr, m.n_rot, 0, comp ? m.ds_ctx_orig : 0,
+            comp ? m.ds_comp_base : m.rope_base, comp ? m.ds_freq_scale : 1.0f, comp ? m.ds_ext : 0.0f,
+            comp ? m.ds_attn_factor : 1.0f, comp ? m.ds_beta_fast : 0.0f, comp ? m.ds_beta_slow : 0.0f);
+    return ggml_rope_set_offset(t, (int) nope);
+}
+
+// mHC's three mixes of the streams x [n_embd, hc, T] (glm_hc_pre's, not applied): pre [hc, T], post [hc, T], comb
+static void ds_hc_mixes(Engine & e, ggml_context * c, ggml_tensor * x, ggml_tensor * fn, ggml_tensor * scale,
+                        ggml_tensor * base, ggml_tensor ** pre, ggml_tensor ** post, ggml_tensor ** comb) {
+    Model & m = e.m;
+    const int64_t hc = m.hc, T = x->ne[2];
+    ggml_tensor * flat = ggml_rms_norm(c, ggml_reshape_2d(c, x, (int64_t) hc * m.n_embd, T), m.rms_eps);
+    ggml_tensor * mixes = ggml_mul_mat(c, fn, flat);                                      // [(2 + hc) hc, T]
+    auto v1 = [&](ggml_tensor * t, int64_t n, int64_t i0) { return ggml_view_1d(c, t, n, ggml_row_size(t->type, i0)); };
+    auto v2 = [&](ggml_tensor * t, int64_t n, int64_t i0) {
+        return ggml_view_2d(c, t, n, T, t->nb[1], ggml_row_size(t->type, i0));
+    };
+    ggml_tensor * p = ggml_add(c, ggml_mul(c, v2(mixes, hc, 0), v1(scale, 1, 0)), v1(base, hc, 0));
+    *pre = ggml_scale_bias(c, ggml_sigmoid(c, p), 1.0f, m.hc_eps);
+    ggml_tensor * po = ggml_add(c, ggml_mul(c, v2(mixes, hc, hc), v1(scale, 1, 1)), v1(base, hc, hc));
+    *post = ggml_scale(c, ggml_sigmoid(c, po), 2.0f);
+    *comb = ggml_dsv4_hc_comb(c, mixes, scale, base, m.hc_eps, m.hc_iters);
+}
+
+// Engram (build_engram): the hashed rows [eg_heads * eg_dim, T] -> a key per stream and one value; each stream gains
+// the value, gated by sigmoid(signed sqrt(rms(x) . rms(key) . (q k) / sqrt(n_embd)))
+static ggml_tensor * ds_engram(Engine & e, ggml_context * c, Layer & L, ggml_tensor * x, ggml_tensor * rows, int T) {
+    Model & m = e.m;
+    const int64_t hc = m.hc, d = m.n_embd;
+    ggml_tensor * kv = ggml_mul_mat(c, L.eg_wkv, rows);                                  // [d (hc + 1), T]
+    ggml_tensor * key = ggml_cont(c, ggml_view_3d(c, kv, d, hc, T, ggml_row_size(kv->type, d), kv->nb[1], 0));
+    ggml_tensor * val = ggml_cont(c, ggml_view_3d(c, kv, d, 1, T, ggml_row_size(kv->type, d), kv->nb[1],
+                                                  ggml_row_size(kv->type, hc * d)));
+    ggml_tensor * dot = ggml_mul(c, ggml_mul(c, ggml_rms_norm(c, x, m.rms_eps), ggml_rms_norm(c, key, m.rms_eps)),
+                                 ggml_mul(c, L.eg_q, L.eg_k));
+    dot = ggml_scale(c, ggml_sum_rows(c, dot), 1.0f / sqrtf((float) d));                  // [1, hc, T]
+    ggml_tensor * mag = ggml_sqrt(c, ggml_clamp(c, ggml_abs(c, dot), 1e-6f, INFINITY));
+    ggml_tensor * sign = ggml_scale_bias(c, ggml_step(c, ggml_neg(c, dot)), -2.0f, 1.0f);
+    ggml_tensor * gate = ggml_sigmoid(c, ggml_mul(c, mag, sign));
+    return ggml_add(c, x, ggml_mul(c, ggml_repeat_4d(c, val, d, hc, T, 1), gate));
+}
+
+// a KV source's compressor: the groups this batch completes (in.ds_nb[r], a dummy one when none) from the state's and
+// this batch's rows, normed, their index key, both rotated to the group's first position, into comp_cache; the
+// unfinished group's rows kept
+static void ds_compress(Engine & e, ggml_context * c, ggml_cgraph * gf, Layer & L, ggml_tensor * x, const Inputs & in, int T) {
+    Model & m = e.m;
+    const int r = L.ratio;
+    const int64_t hd = m.ds_hd, nb = in.ds_nb[r];
+    ggml_tensor * skv = ggml_mul_mat(c, L.comp_kv, x);                                    // [hd, T]
+    ggml_tensor * comp;
+    if (r > 1) {
+        ggml_tensor * ssc = ggml_mul_mat(c, L.comp_gate, x);
+        ggml_tensor * v = ggml_get_rows(c, ggml_concat(c, L.cst_kv, skv, 1), in.ds_ridx[r]);   // [hd, r nb]
+        ggml_tensor * sc = ggml_get_rows(c, ggml_concat(c, L.cst_sc, ssc, 1), in.ds_ridx[r]);
+        v = ggml_cont(c, ggml_permute(c, ggml_reshape_3d(c, v, hd, r, nb), 1, 0, 2, 3));   // [r, hd, nb]
+        sc = ggml_cont(c, ggml_permute(c, ggml_reshape_3d(c, sc, hd, r, nb), 1, 0, 2, 3));
+        comp = ggml_sum_rows(c, ggml_mul(c, v, ggml_soft_max(c, sc)));                     // [1, hd, nb]
+        comp = ggml_reshape_2d(c, ggml_cont(c, ggml_permute(c, comp, 1, 0, 2, 3)), hd, nb);
+        ggml_build_forward_expand(gf, comp);                 // (read before the state is written)
+        ggml_build_forward_expand(gf, ggml_set_rows(c, L.cst_kv, ggml_get_rows(c, skv, in.ds_psrc[r]), in.ds_pdst[r]));
+        ggml_build_forward_expand(gf, ggml_set_rows(c, L.cst_sc, ggml_get_rows(c, ssc, in.ds_psrc[r]), in.ds_pdst[r]));
+    } else {
+        comp = ggml_get_rows(c, skv, in.ds_ridx[r]);         // ratio 1: a row per position (a softmax over one)
+    }
+    comp = norm(c, comp, L.comp_norm, m.rms_eps);
+    ggml_tensor * ik = norm(c, ggml_mul_mat(c, L.idx_k, comp), L.idx_k_norm, m.rms_eps);  // [idx_dim, nb]
+    ik = ds_rope(m, c, ggml_reshape_3d(c, ik, m.idx_dim, 1, nb), in.ds_wpos[r], true);
+    comp = ds_rope(m, c, ggml_reshape_3d(c, comp, hd, 1, nb), in.ds_wpos[r], true);
+    ggml_tensor * row = ggml_concat(c, ggml_reshape_2d(c, comp, hd, nb), ggml_reshape_2d(c, ik, m.idx_dim, nb), 0);
+    ggml_format_name(row, "comp_row-%d", e.cur_layer);
+    ggml_build_forward_expand(gf, ggml_set_rows(c, L.comp_cache, row, in.ds_widx[r]));
+}
+
+// the products of earlier blocks a graph's later ones read: each index source's top-k, the candidate blocks
+struct DsGraph {
+    std::vector<ggml_tensor *> topk;
+    ggml_tensor * cand = nullptr;
+};
+
+// an index source's selection: every visible compressed row scored (the lightning indexer), the top idx_top_k kept;
+// past cand_blocks blocks, cand_src picks its best blocks (the newest pinned) and the sources after it score inside them
+static ggml_tensor * ds_indexer(Engine & e, ggml_context * c, Layer & L, const Layer & S, ggml_tensor * x, ggml_tensor * qr,
+                                ggml_tensor * pos, const Inputs & in, DsGraph & dg, int il, int T) {
+    Model & m = e.m;
+    const int r = L.ratio;
+    const int64_t id = m.idx_dim, ih = m.idx_heads, nc = in.ds_nc[r];
+    ggml_tensor * ik = ggml_view_4d(c, S.comp_cache, id, 1, nc, 1, S.comp_cache->nb[1], S.comp_cache->nb[1],
+                                    S.comp_cache->nb[1] * nc, ggml_row_size(S.comp_cache->type, m.ds_hd));
+    ggml_tensor * iq = ds_rope(m, c, ggml_reshape_3d(c, ggml_mul_mat(c, L.idx_q, qr), id, ih, T), pos, true);
+    iq = ggml_reshape_4d(c, iq, id, ih, T, 1);
+    ggml_tensor * iw = ggml_scale(c, ggml_mul_mat(c, L.idx_proj, x), 1.0f / sqrtf((float) (id * ih)));
+    iw = ggml_reshape_4d(c, iw, ih, T, 1, 1);
+    ggml_tensor * score = ggml_lightning_indexer(c, iq, ik, iw, ggml_reshape_4d(c, in.ds_cmask[r], nc, T, 1, 1));
+    score = ggml_reshape_2d(c, score, nc, T);
+    const int64_t bs = m.cand_bs, n_blk = bs ? (nc + bs - 1) / bs : 0;
+    if (m.cand_src == il && in.ds_pin) {                     // the best row of each block, the newest block pinned
+        ggml_tensor * s2 = score;
+        if (n_blk * bs != nc)
+            s2 = ggml_concat(c, s2, ggml_fill(c, ggml_new_tensor_2d(c, GGML_TYPE_F32, n_blk * bs - nc, T), -INFINITY), 0);
+        ggml_tensor * bmax = ggml_add(c, ggml_pool_1d(c, s2, GGML_OP_POOL_MAX, (int) bs, (int) bs, 0), in.ds_pin);
+        dg.cand = ggml_top_k(c, bmax, (int) std::min<int64_t>(m.cand_blocks, n_blk));    // [cand_blocks, T]
+    } else if (m.cand_src >= 0 && m.cand_src < il && dg.cand) {   // 0 inside the source's blocks, -inf elsewhere
+        const int64_t kb = dg.cand->ne[0];
+        ggml_tensor * bm = ggml_fill(c, ggml_new_tensor_3d(c, GGML_TYPE_F32, 1, n_blk, T), -INFINITY);
+        ggml_tensor * zero = ggml_fill(c, ggml_new_tensor_3d(c, GGML_TYPE_F32, 1, kb, T), 0.0f);
+        bm = ggml_set_rows(c, bm, zero, ggml_reshape_2d(c, dg.cand, kb, T));
+        bm = ggml_reshape_2d(c, ggml_repeat_4d(c, bm, bs, n_blk, T, 1), bs * n_blk, T);
+        score = ggml_add(c, score, ggml_view_2d(c, bm, nc, T, bm->nb[1], 0));
+    }
+    return ggml_top_k(c, score, (int) std::min<int64_t>(nc, m.idx_top_k));               // [k, T]
+}
+
+// the attention of a block (build_attention41): the query (wq_a -> norm -> wq_b) and the KV row, rotated; the row into
+// the window's ring; a compressed block also attends to its source's compressed rows (the top-k of its index source,
+// as a mask), the source compressing first; per-head sinks; the output rotated back, through the grouped LoRAs
+static ggml_tensor * ds_attn_layer(Engine & e, ggml_context * c, ggml_cgraph * gf, int il, ggml_tensor * x,
+                                   const Inputs & in, DsGraph & dg, int T) {
+    Model & m = e.m;
+    Layer & L = m.layers[il];
+    const int r = L.ratio;
+    const int64_t hd = m.ds_hd;
+    const bool comp = r != 0;
+    ggml_tensor * pos = ggml_view_1d(c, in.pos, T, 0);                                    // (section 0: p0 + i)
+    ggml_tensor * qr = norm(c, ggml_mul_mat(c, L.wq_a, x), L.q_a_norm, m.rms_eps);        // [q_lora, T]
+    ggml_tensor * q = ds_rope(m, c, ggml_reshape_3d(c, ggml_mul_mat(c, L.wq_b, qr), hd, m.n_head, T), pos, comp);
+    ggml_tensor * kv = norm(c, ggml_mul_mat(c, L.wkv_a, x), L.kv_a_norm, m.rms_eps);      // [hd, T]
+    kv = ds_rope(m, c, ggml_reshape_3d(c, kv, hd, 1, T), pos, comp);
+    ggml_build_forward_expand(gf, ggml_set_rows(c, L.k_cache, ggml_reshape_2d(c, kv, hd, T), in.kv_idx_swa));
+    const int64_t R = in.mask_swa->ne[0];
+    ggml_tensor * k_all = ggml_view_3d(c, L.k_cache, hd, 1, R, L.k_cache->nb[1], L.k_cache->nb[1], 0);
+    ggml_tensor * mask = in.mask_swa;
+    if (comp) {
+        const Layer & S = m.layers[L.kv_src];
+        if (L.kv_src == il) ds_compress(e, c, gf, L, x, in, T);
+        if (L.topk_src == il) dg.topk[il] = ds_indexer(e, c, L, S, x, qr, pos, in, dg, il, T);
+        ggml_tensor * top = dg.topk[L.topk_src];
+        if (!top) die("deepseek41: block %s's index source made no selection", std::to_string(il).c_str());
+        const int64_t nc = in.ds_nc[r], k = top->ne[0];
+        ggml_tensor * ck = ggml_cont(c, ggml_view_3d(c, S.comp_cache, hd, 1, nc, S.comp_cache->nb[1], S.comp_cache->nb[1], 0));
+        k_all = ggml_concat(c, ggml_cont(c, k_all), ck, 2);                               // [hd, 1, R + nc]
+        // the selection as a mask: -inf, 0 at the top-k rows, plus the rows' visibility (build_top_k_mask)
+        ggml_tensor * sel = ggml_fill(c, ggml_new_tensor_3d(c, GGML_TYPE_F16, 1, nc, T), -INFINITY);
+        ggml_tensor * zero = ggml_fill(c, ggml_new_tensor_3d(c, GGML_TYPE_F16, 1, k, T), 0.0f);
+        sel = ggml_reshape_2d(c, ggml_set_rows(c, sel, zero, top), nc, T);
+        sel = ggml_add(c, sel, in.ds_cmask[r]);
+        mask = ggml_concat(c, in.mask_swa, sel, 0);                                       // [R + nc, T]
+    }
+    ggml_tensor * kp = ggml_permute(c, k_all, 0, 2, 1, 3);
+    ggml_tensor * o = ggml_flash_attn_ext(c, ggml_permute(c, q, 0, 2, 1, 3), kp, kp, mask, 1.0f / sqrtf((float) hd), 0.0f, 0.0f);
+    ggml_flash_attn_ext_add_sinks(o, L.sinks);
+    ggml_prec_set_acc(o, GGML_PREC_F32);
+    ggml_format_name(o, "fattn-%d", il);
+    o = ds_rope(m, c, ggml_reshape_3d(c, o, hd, m.n_head, T), pos, comp, true);
+    o = ggml_permute(c, ggml_reshape_3d(c, o, m.n_head / m.o_groups * hd, m.o_groups, T), 0, 2, 1, 3);
+    ggml_tensor * oa = ggml_mul_mat(c, L.wo_a, o);                                        // [o_lora, T, o_groups]
+    oa = ggml_cont_2d(c, ggml_permute(c, oa, 0, 2, 1, 3), (int64_t) m.o_lora * m.o_groups, T);
+    return ggml_mul_mat(c, L.wo, oa);
+}
+
+// the Engram rows of a batch for module j: each token's n-gram hash (engram_hash: its last eg_ngram - 1 tokens mapped
+// through eg_map, a dead one or the sequence's start padding every longer n-gram) -> eg_heads rows of its table
+static void ds_engram_rows(Engine & e, int j, const int32_t * toks, int T, int p0, std::vector<float> & out) {
+    Model & m = e.m;
+    const int n = m.eg_ngram, H = m.eg_heads, per = m.eg_per;
+    out.resize((size_t) T * H * m.eg_dim);
+    std::vector<char> raw(m.eg_row[j]);
+    const auto * tr = ggml_get_type_traits(m.eg_type);
+    const uint64_t * mult = m.eg_mult.data() + (size_t) j * n;
+    const uint64_t * primes = m.eg_primes.data() + (size_t) j * H, * offs = m.eg_offs.data() + (size_t) j * H;
+    const int64_t pad = m.eg_map[m.eg_pad];
+    auto cid = [&](int64_t t) -> int64_t { return t < 0 || t >= (int64_t) m.eg_map.size() ? -1 : m.eg_map[t]; };
+    std::vector<uint64_t> g(n);
+    for (int i = 0; i < T; ++i) {
+        int64_t c0 = cid(toks[i]);
+        bool blocked = c0 < 0;
+        g[0] = (uint64_t) (blocked ? pad : c0);
+        for (int s = 1; s < n; ++s) {
+            const int p = p0 + i - s;
+            const int64_t cs = p < 0 ? -1 : cid(p >= p0 ? toks[p - p0] : e.tok_at[p]);
+            blocked = blocked || cs < 0;
+            g[s] = (uint64_t) (blocked ? pad : cs);
+        }
+        uint64_t rolling = g[0] * mult[0];
+        for (int o = 1; o < n; ++o) {
+            rolling ^= g[o] * mult[o];
+            for (int h = 0; h < per; ++h) {
+                const int col = (o - 1) * per + h;
+                const uint64_t row = rolling % primes[col] + offs[col];
+                read_at(m.eg_fd[j], raw.data(), m.eg_row[j], m.eg_off[j] + row * m.eg_row[j]);
+                tr->to_float(raw.data(), out.data() + ((size_t) i * H + col) * m.eg_dim, m.eg_dim);
+            }
+        }
+    }
+}
+
+// a batch's compressed-row inputs for ratio r: how many groups it completes (at least one), how many state rows it keeps
+static void ds_shape(const Engine & e, Inputs & in, int p0, int T) {
+    const Model & m = e.m;
+    for (int r = 1; r <= 2; ++r) {
+        int done = 0;
+        for (int i = 0; i < T; ++i) done += (p0 + i + 1) % r == 0;
+        in.ds_nb[r] = std::max(1, done);
+        in.ds_np[r] = std::min(T, r);
+        const int rows = e.n_ctx / r + 1;                    // (the last: the dummy group's)
+        in.ds_nc[r] = std::min(rows, std::max(256, ((p0 + T) / r + 255) / 256 * 256));
+    }
+    (void) m;
+}
+
+static void ds_new(Engine & e, ggml_context * c, Inputs & in, int p0, int T) {
+    Model & m = e.m;
+    ds_shape(e, in, p0, T);
+    bool has[3] = {false, false, false};
+    for (const Layer & L : m.layers) has[L.ratio] = has[L.ratio] || L.ratio > 0;
+    for (int r = 1; r <= 2; ++r) {
+        if (!has[r]) continue;
+        auto mk = [&](ggml_type t, int64_t n) { ggml_tensor * x = ggml_new_tensor_1d(c, t, n); ggml_set_input(x); return x; };
+        in.ds_cmask[r] = ggml_new_tensor_2d(c, GGML_TYPE_F16, in.ds_nc[r], T);
+        ggml_set_input(in.ds_cmask[r]);
+        in.ds_widx[r] = mk(GGML_TYPE_I64, in.ds_nb[r]);
+        in.ds_wpos[r] = mk(GGML_TYPE_I32, in.ds_nb[r]);
+        in.ds_ridx[r] = mk(GGML_TYPE_I32, (int64_t) r * in.ds_nb[r]);
+        if (r > 1) {
+            in.ds_pdst[r] = mk(GGML_TYPE_I64, in.ds_np[r]);
+            in.ds_psrc[r] = mk(GGML_TYPE_I32, in.ds_np[r]);
+        }
+    }
+    if (m.cand_src >= 0) {
+        const int r = m.layers[m.cand_src].ratio, n_blk = (in.ds_nc[r] + m.cand_bs - 1) / m.cand_bs;
+        if (n_blk > m.cand_blocks) {                         // (fewer blocks: all of them are kept anyway)
+            in.ds_pin = ggml_new_tensor_2d(c, GGML_TYPE_F32, n_blk, T);
+            ggml_set_input(in.ds_pin);
+        }
+    }
+    in.ds_eg.clear();
+    for (size_t j = 0; j < m.eg_fd.size(); ++j) {
+        ggml_tensor * t = ggml_new_tensor_2d(c, GGML_TYPE_F32, (int64_t) m.eg_heads * m.eg_dim, T);
+        ggml_set_input(t);
+        in.ds_eg.push_back(t);
+    }
+}
+
+static void ds_set(Engine & e, const Inputs & in, const int32_t * toks, int p0, int T) {
+    Model & m = e.m;
+    const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(-INFINITY);
+    for (int r = 1; r <= 2; ++r) {
+        if (!in.ds_cmask[r]) continue;
+        const int nc = in.ds_nc[r], nb = in.ds_nb[r];
+        std::vector<ggml_fp16_t> mask((size_t) nc * T);
+        for (int i = 0; i < T; ++i) {
+            const int vis = (p0 + i + 1) / r;
+            for (int j = 0; j < nc; ++j) mask[(size_t) i * nc + j] = j < vis ? zero : ninf;
+        }
+        ggml_backend_tensor_set(in.ds_cmask[r], mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+        std::vector<int64_t> widx;
+        std::vector<int32_t> wpos, ridx;
+        for (int i = 0; i < T; ++i) {
+            const int p = p0 + i;
+            if ((p + 1) % r) continue;
+            widx.push_back(p / r);
+            wpos.push_back(p + 1 - r);
+            for (int s = p + 1 - r; s <= p; ++s) ridx.push_back(r > 1 ? (s >= p0 ? r + (s - p0) : s % r) : s - p0);
+        }
+        while ((int) widx.size() < nb) {                     // the dummy group: the cache's last row, never visible
+            widx.push_back(e.n_ctx / r);
+            wpos.push_back(0);
+            for (int s = 0; s < r; ++s) ridx.push_back(r > 1 ? r : 0);
+        }
+        ggml_backend_tensor_set(in.ds_widx[r], widx.data(), 0, widx.size() * sizeof(int64_t));
+        ggml_backend_tensor_set(in.ds_wpos[r], wpos.data(), 0, wpos.size() * sizeof(int32_t));
+        ggml_backend_tensor_set(in.ds_ridx[r], ridx.data(), 0, ridx.size() * sizeof(int32_t));
+        if (in.ds_pdst[r]) {                                 // the last tokens' rows, at p % r
+            std::vector<int64_t> dst;
+            std::vector<int32_t> src;
+            for (int i = T - in.ds_np[r]; i < T; ++i) {
+                dst.push_back((p0 + i) % r);
+                src.push_back(i);
+            }
+            ggml_backend_tensor_set(in.ds_pdst[r], dst.data(), 0, dst.size() * sizeof(int64_t));
+            ggml_backend_tensor_set(in.ds_psrc[r], src.data(), 0, src.size() * sizeof(int32_t));
+        }
+    }
+    if (in.ds_pin) {
+        const int r = m.layers[m.cand_src].ratio;
+        const int64_t n_blk = in.ds_pin->ne[0];
+        std::vector<float> pin((size_t) n_blk * T, 0.0f);
+        for (int i = 0; i < T; ++i) {
+            const int nv = (p0 + i + 1) / r;
+            if (nv > 0) pin[(size_t) i * n_blk + (nv - 1) / m.cand_bs] = 1e30f;
+        }
+        ggml_backend_tensor_set(in.ds_pin, pin.data(), 0, pin.size() * sizeof(float));
+    }
+    for (size_t j = 0; j < in.ds_eg.size(); ++j) {
+        std::vector<float> rows;
+        ds_engram_rows(e, (int) j, toks, T, p0, rows);
+        ggml_backend_tensor_set(in.ds_eg[j], rows.data(), 0, rows.size() * sizeof(float));
+    }
 }
 
 // run T tokens at positions p0..p0+T-1; returns the greedy next token after the last one
@@ -4745,7 +5277,7 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
     ggml_set_input(in.pos);
     in.mask = ggml_new_tensor_2d(c, GGML_TYPE_F16, n_kv, T);
     ggml_set_input(in.mask);
-    if (m.flint || m.gemma4) {
+    if (m.flint || m.gemma4 || m.ds41) {
         in.mask_swa = ggml_new_tensor_2d(c, GGML_TYPE_F16, std::min(n_kv, m.swa_rows), T);
         ggml_set_input(in.mask_swa);
         in.kv_idx_swa = ggml_new_tensor_1d(c, GGML_TYPE_I64, T);
@@ -4771,6 +5303,7 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
         x = ggml_add(c, ggml_mul(c, x, in.img_keep), in.img);
     }
     kpool_new(e, c, in, p0, T);
+    if (m.ds41) ds_new(e, c, in, p0, T);
     ggml_tensor * ple_in = nullptr;
     if (m.ple_layer >= 0) {
         if (out && out->snap) die("verify-window snapshots are not supported with qwen4exp");
@@ -4853,6 +5386,47 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
         }
         x = res;                                             // [n_embd, hc, T]
     }
+    if (m.ds41) {                                            // mHC as glm5-next's, its pre-mix one sublayer late (llama.cpp's
+        DsGraph dg;                                          // "single-pass mHC"): the attention collapses the streams with
+        dg.topk.assign(m.n_layer, nullptr);                  // the previous block's FFN pre-mix (block 0: stream 0), the FFN
+        ggml_tensor * res = ggml_repeat_4d(c, ggml_reshape_3d(c, x, m.n_embd, 1, T), m.n_embd, m.hc, T, 1);   // with this
+        ggml_tensor * pre_prev = nullptr;                    // block's attention pre-mix; the head with the last FFN's
+        for (int il = 0; il < m.n_layer; ++il) {
+            Layer & L = m.layers[il];
+            if (L.eg >= 0) res = ds_engram(e, c, L, res, in.ds_eg[L.eg], T);
+            ggml_tensor * apre, * apost, * acomb, * fpre, * fpost, * fcomb;
+            ds_hc_mixes(e, c, res, L.hc_attn_fn, L.hc_attn_scale, L.hc_attn_base, &apre, &apost, &acomb);
+            ggml_tensor * h = pre_prev ? ggml_dsv4_hc_pre(c, res, pre_prev)
+                                       : ggml_cont(c, ggml_view_2d(c, res, m.n_embd, T, res->nb[2], 0));
+            h = norm(c, h, L.attn_norm, m.rms_eps);
+            ggml_format_name(h, "attn_norm-%d", il);
+            e.cur_layer = il;
+            h = ds_attn_layer(e, c, gf, il, h, in, dg, T);
+            ggml_format_name(h, "attn_out-%d", il);
+            res = ggml_dsv4_hc_post(c, h, res, apost, acomb);
+            ds_hc_mixes(e, c, res, L.hc_ffn_fn, L.hc_ffn_scale, L.hc_ffn_base, &fpre, &fpost, &fcomb);
+            ggml_tensor * f = norm(c, ggml_dsv4_hc_pre(c, res, apre), L.ffn_norm, m.rms_eps);
+            ggml_format_name(f, "ffn_norm-%d", il);
+            ggml_tensor * pred = nullptr, * pred2 = nullptr;     // the next blocks' MoE inputs as guessed from here: their
+            auto pred_of = [&](int j) {                      // attention pre-mix of these streams (see glm_moe_layer)
+                const Layer & N = m.layers[j];
+                ggml_tensor * pp, * po, * co;
+                ds_hc_mixes(e, c, res, N.hc_attn_fn, N.hc_attn_scale, N.hc_attn_base, &pp, &po, &co);
+                return norm(c, ggml_dsv4_hc_pre(c, res, pp), N.ffn_norm, m.rms_eps);
+            };
+            if (e.predict && il + 1 < m.n_layer) pred = pred_of(il + 1);
+            if (pred && e.predict2 && il + 2 < m.n_layer) pred2 = pred_of(il + 2);
+            f = glm_moe_layer(e, c, gf, il, f, T, pred, pred2);
+            ggml_format_name(f, "ffn_out-%d", il);
+            res = ggml_dsv4_hc_post(c, f, res, fpost, fcomb);
+            ggml_format_name(res, "l_out-%d", il);
+            pre_prev = fpre;
+        }
+        const int64_t To = out && out->all ? T : 1;          // (only the positions whose logits are wanted)
+        res = ggml_view_3d(c, res, m.n_embd, m.hc, To, res->nb[1], res->nb[2], (size_t) (T - To) * res->nb[2]);
+        pre_prev = ggml_view_2d(c, pre_prev, m.hc, To, pre_prev->nb[1], (size_t) (T - To) * pre_prev->nb[1]);
+        x = ggml_dsv4_hc_pre(c, res, pre_prev);              // [n_embd, To]
+    }
     if (m.ling) {                                            // pre-norm blocks: KDA or MLA, then the FFN, each with
         for (int il = 0; il < m.n_layer; ++il) {             // its residual (bailingmoe3.cpp)
             Layer & L = m.layers[il];
@@ -4908,7 +5482,7 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
         x = res;                                             // [n_embd, hc, T]
     }
     for (int il = 0; il < m.n_layer && m.gemma4; ++il) x = gemma_block(e, c, gf, il, x, in, p0, T, n_kv);
-    for (int il = 0; il < m.n_layer && !m.qwen4 && !m.nemo && !m.glm5 && !m.lfm && !m.gemma4 && !m.ling; ++il) {
+    for (int il = 0; il < m.n_layer && !m.qwen4 && !m.nemo && !m.glm5 && !m.lfm && !m.gemma4 && !m.ling && !m.ds41; ++il) {
         Layer & L = m.layers[il];
         ggml_tensor * h = norm(c, x, L.attn_norm, m.rms_eps);
         ggml_format_name(h, "attn_norm-%d", il);
@@ -4955,6 +5529,8 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
             acc = acc ? ggml_add(c, acc, v) : v;
         }
         x = norm(c, ggml_scale(c, acc, 1.0f / m.hc), m.out_norm, m.rms_eps);
+    } else if (m.ds41) {                                     // (the streams collapsed above: the wanted positions)
+        x = norm(c, x, m.out_norm, m.rms_eps);
     } else {
         if (!(out && out->all)) x = ggml_view_2d(c, x, m.n_embd, 1, x->nb[1], (size_t) (T - 1) * x->nb[1]);   // the last
         x = hid && out->all ? hid : norm(c, x, m.out_norm, m.rms_eps);
@@ -5210,8 +5786,14 @@ static int forward_once(Engine & e, const int32_t * toks, int T, int p0, Out * o
         img_span(e, p0 + i, lo, hi);
         for (int j = 0; j < n_kv; ++j) mask[(size_t) i * n_kv + j] = j <= p0 + i || (j >= lo && j < hi) ? zero : ninf;
     }
-    ggml_backend_tensor_set(in.mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
-    if (in.mask_swa) flint_swa_inputs(e, in.mask_swa, in.kv_idx_swa, p0, T);
+    if (in.mask->buffer) ggml_backend_tensor_set(in.mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));   // (deepseek41:
+    if (in.mask_swa) flint_swa_inputs(e, in.mask_swa, in.kv_idx_swa, p0, T);                                   // not read)
+    if (m.ds41) {
+        if ((int) e.tok_at.size() < p0) die("the Engram token history has a gap");
+        ds_set(e, in, toks, p0, T);
+        e.tok_at.resize(p0);
+        e.tok_at.insert(e.tok_at.end(), toks, toks + T);
+    }
     if (in.kv_idx) {
         std::vector<int64_t> rows(T);
         for (int i = 0; i < T; ++i) rows[i] = p0 + i;
@@ -5625,8 +6207,10 @@ static std::vector<ggml_tensor *> state_tensors(Engine & e) {
         if (L.ple_state) r.push_back(L.ple_state);
         if (L.swa && L.k_cache) {                            // flint's ring: the state at a position, kept whole
             r.push_back(L.k_cache);
-            r.push_back(L.v_cache);
+            if (L.v_cache) r.push_back(L.v_cache);           // (deepseek41: the key is the value)
         }
+        if (L.cst_kv) r.push_back(L.cst_kv);                 // deepseek41: the unfinished group's rows
+        if (L.cst_sc) r.push_back(L.cst_sc);
     }
     return r;
 }
@@ -6004,6 +6588,7 @@ static std::vector<PosTensor> position_tensors(Engine & e) {
         add(L.idx_raw, 1, 1);
         add(L.idx_pool, 1, e.m.kpool);
         add(L.lat_cache, 1, 1);                              // glm5-next's MLA latents
+        add(L.comp_cache, 1, L.ratio);                       // deepseek41's compressed rows (one per ratio positions)
     }
     add(e.m.mtp.k_cache, 2, 1);
     add(e.m.mtp.v_cache, 2, 1);
@@ -6479,6 +7064,7 @@ int main(int argc, char ** argv) {
         else if (a == "--vision") {}                         // (the server's flag for pictures: GENI always works)
         else if (a == "--draft-vocab") e.draft_vocab = next();
         else if (a == "--mtp-gguf") e.mtp_gguf = next();
+        else if (a == "--engram") e.engram = next();
         else if (a == "--nostall") nostall_arg = next();
         else if (a == "--nostall-every") nostall_every = std::max(0, atoi(next()));
         else if (a == "--spec-min-p") spec_min_p = (float) atof(next());

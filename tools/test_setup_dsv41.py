@@ -121,5 +121,46 @@ class Install(unittest.TestCase):
             self.run_setup(hip=True)
 
 
+class MacFamily(unittest.TestCase):
+    """On a Mac (and a GPU that shares the system's memory) Momoe's ggml engine runs it: momoe_setup's family."""
+
+    G = setup.GGML_FAMILIES["deepseek41"]
+
+    def test_the_same_pinned_shards(self):
+        for m, parts in self.G["parts"].items():
+            self.assertEqual([p[0] for p in parts], FAM["models"][m]["shards"])
+            self.assertEqual([(p[1], p[2]) for p in parts], [FAM["sha256"][n] for n in FAM["models"][m]["shards"]])
+        self.assertEqual(self.G["extra"], [(setup.DSV41_ISTA_ENGRAM, "deepseek-v4.1-flash-shared")])
+        self.assertEqual(self.G["arch"], "deepseek41")
+        self.assertIn("deepseek41", setup.MOMOE_MENU)
+
+    def run_main(self, platform, gpus):
+        calls = []
+        with mock.patch.object(setup.sys, "platform", platform), mock.patch.object(setup, "WIN", False), \
+                mock.patch.object(setup, "gpus", return_value=gpus), mock.patch.object(setup, "gpu_problem", return_value=None), \
+                mock.patch.object(setup, "momoe_setup", side_effect=lambda *x: calls.append("momoe") or 0), \
+                mock.patch.object(setup, "install_dsv41", side_effect=lambda *x: calls.append("dsv41") or 0), \
+                mock.patch.object(setup, "step", side_effect=SystemExit("Strata's path")), \
+                mock.patch.object(setup.sys, "argv", ["setup.py", "--setup", "--yes", "--no-start", "--family", "deepseek41"]), \
+                mock.patch.dict(setup.os.environ, {"MOMOE_MAC_MEMORY_GIB": "64"}):
+            try:
+                setup.main()
+            except SystemExit:
+                pass
+        return calls
+
+    def test_routing(self):
+        self.assertEqual(self.run_main("darwin", []), ["momoe"])
+        spark = [{"index": 0, "name": "NVIDIA GB10", "vram_gb": 119.0, "arch": "121", "driver": "580", "unified": True}]
+        self.assertEqual(self.run_main("linux", spark), ["momoe"])
+        card = [{**CARD, "index": 0, "unified": False}]
+        self.assertEqual(self.run_main("linux", card), [])      # (the PC's own path: install_dsv41 after step 1)
+
+    def test_the_mac_pool_leaves_room(self):
+        # 123 GiB of experts, 5.74 GiB of other weights and the 3.66 GiB staging copy, 32K context: 28 GiB on 64 GB
+        pool = setup.mac_pool_gib(64, 123.0, 5.74 + 3.66, 0, 3200 * 32768 / 2**30) - self.G["mac_margin_gib"]
+        self.assertEqual(pool, 28)
+
+
 if __name__ == "__main__":
     unittest.main()

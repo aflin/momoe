@@ -6887,7 +6887,8 @@ def momoe_title(family: str) -> str:
 
 # the families momoe_setup offers, in its menu's order (NVFP4's packs are Strata's own format: its engine only)
 MOMOE_MENU = ("ornith", "qwen36", "qwen36-bartowski", "kat-coder", "qwen", "swift", "coder", "unsloth", "bolt",
-              "ornith122", "glm53", "ling3", "ling3sante", "flint", "lightning", "gemma4", "lfm25", "lfm25-8b")
+              "ornith122", "glm53", "ling3", "ling3sante", "flint", "lightning", "gemma4", "lfm25", "lfm25-8b",
+              "deepseek41")
 
 
 def momoe_menu(a, ram: float) -> str:
@@ -6910,6 +6911,20 @@ def momoe_menu(a, ram: float) -> str:
     return MOMOE_MENU[pick - 1]
 
 
+def staging_gib(files: list) -> float:
+    """The engine's staging copy of one layer's routed experts (a big prompt batch reads them from it), GiB: the largest
+    layer's *_exps tensors."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    from gguf_reader import GGUFFile
+    per = {}
+    for f in files:
+        for t in GGUFFile(f).tensors:
+            m = re.match(r"blk\.(\d+)\..*_exps\.weight$", t.name)
+            if m:
+                per[int(m.group(1))] = per.get(int(m.group(1)), 0) + (t.expected_bytes() or 0)
+    return max(per.values(), default=0) / 2**30
+
+
 def kv_bytes_per_token(files: list) -> int:
     """The KV cache a token takes (keys and values, f16) in the model's attention layers, from its metadata: the
     layers with KV heads (a per-layer list), else one in full_attention_interval, else every block; 0 when unknown."""
@@ -6917,6 +6932,11 @@ def kv_bytes_per_token(files: list) -> int:
     from gguf_reader import GGUFFile
     md = GGUFFile(files[0]).metadata
     a = md.get("general.architecture", "")
+    if a == "deepseek41":                               # only its KV sources keep rows past the window: one (512 wide,
+        ratios = md.get(f"{a}.attention.compress_ratios") or []   # with its 128-wide index key) per ratio positions, f16
+        src = md.get(f"{a}.kv_source_layer_ids") or md.get(f"{a}.attention.kv_source_layers") or []
+        hd = int(md.get(f"{a}.attention.key_length") or 0) + int(md.get(f"{a}.attention.indexer.key_length") or 0)
+        return int(sum(hd * 2 / int(ratios[i]) for i in src if i < len(ratios) and ratios[i]))
     kv = md.get(f"{a}.attention.head_count_kv")
     blocks = int(md.get(f"{a}.block_count", 0) or 0)
     head = int(md.get(f"{a}.attention.key_length") or 0) or (
@@ -7227,6 +7247,20 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
             verify_sha256(f, size, sha)
     check_shards(paths)
     ok("model file present" if len(paths) == 1 else f"model files present ({len(paths)})")
+    extras = []                                        # files beside the model's (DeepSeek's Engram table): in their own
+    for name, sub in fam.get("extra", ()):             # folder, shared by the family's sizes; --gguf-dir: yours, beside
+        size, sha = DSV41_ALL_FILES[name]              # the shards or one folder up
+        f = Path(a.models_dir) / sub / name
+        if own:
+            mine = [d / name for d in (folder, folder.parent, folder.parent / sub) if (d / name).exists()]
+            if not mine and not f.exists():
+                fail(f"{name} is missing", f"put it beside the model's files ({folder}), or drop --gguf-dir to download it")
+            f = mine[0] if mine else f
+        elif not (f.exists() and done(f)):
+            download(fam["hf"] + name, f, pin=(size, sha))
+        verify_sha256(f, size, sha, own=bool(own) and f.parent != Path(a.models_dir) / sub)
+        ok(f"{name}: {f.parent}")
+        extras.append(f)
 
     step(4, "the tokenizer")
     pack = data / "packs" / tag.lower()
@@ -7268,6 +7302,9 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     if mac:
         w, kvt, avail = weights_gib(paths), kv_bytes_per_token(paths), mac_available_gib()
         w = (w[0], w[1] + kv_ring_gib(paths))          # (flint's sliding-window rings: held with the other weights)
+        if family == "deepseek41":                     # its prompt's staging copy (one layer's 384 experts, 3.7 GiB at
+            w = (w[0], w[1] + staging_gib(paths))      # 2.00 bpw) with them: on a 64 GB Mac a pool that left it out
+                                                       # froze the machine (46 GiB of Metal memory, 2026-10-26)
         if vision and vision.get("gpu"):                # the image encoder on the GPU: held beside them too.  Measured on
             # the M1 Ultra (64 GB): the encoder's process peaks at its file + 0.15-0.2 GB, but the engine beside it needs
             # more room than that: GLM-5.3-Flash UD-IQ3_XXS ran with a 33 GiB pool alone and with pictures at 30, not 31
@@ -7278,6 +7315,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         for c in ((fixed,) if fixed else (65536, 32768)):
             c = min(c, 16384) if ram < 16 and not a.context else c
             pool, ctx = mac_pool_gib(ram, *w, avail, kvt * c / 2**30, draft_gib), c
+            if pool is not None and fam.get("mac_margin_gib"):
+                pool = max(3, pool - fam["mac_margin_gib"])
             if draft and pool is not None and mac_pool_gib(ram, *w, avail, kvt * c / 2**30) is None:
                 # every expert fits only without the draft layer: faster so (the M1 Ultra, Flash-Next IQ3_XXS: 29.7
                 # tok/s, its server 29.2, against 24.3 / 19.4 drafting from a 37 GiB pool)
@@ -7288,6 +7327,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     if unified and ram < 16 and not a.context:
         ctx = min(ctx, 16384)
     args = ["-m", str(paths[0]), "--ctx", str(ctx)]
+    for f in extras:                                   # (DeepSeek: its Engram table)
+        args += ["--engram", str(f)]
     if mac:
         if pool is not None:
             args += ["--pool-gib", str(pool), "--nocache"]
@@ -7319,6 +7360,10 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     cfg = {"exe": str(exe), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{size_of(q).lower()}", "log": str(ROOT / "logs" / (cfg_path.stem + ".log")),
            "port": port, "setup_tag": tag, "fit_max_tokens": True}   # (the model card's sampling: write_setup_config)
+    if fam.get("arch"):                                # (DeepSeek: the server's family - its tool calls, end token, effort)
+        cfg["arch"] = fam["arch"]
+    if fam.get("engine_ready_s"):                      # a model read from 150+ GB of files: its start may take long
+        cfg["engine_ready_s"] = fam["engine_ready_s"]
     if vision:
         cfg["args"].append("--vision")
         cfg["vision"] = vision
@@ -7798,6 +7843,33 @@ MULTI_FILE_FAMILIES = {
                            "shards": [DSV41_SHARD.format(i=i) for i in range(1, 10)], "shared": []},
         },
     },
+}
+
+
+# Momoe's ggml engine runs DeepSeek-V4.1-Flash too (src/metal: deepseek41): on a Mac (momoe-metal) and on a GPU that
+# shares the system's memory (momoe-cuda), installed by momoe_setup; a PC with its own NVIDIA card keeps upstream's
+# strata-dsv41 (install_dsv41).  The same pinned IST-DAS shards; the Engram table in the shared folder ("extra"); the
+# DSpark drafter is not used there.  Checked against strata-dsv41 (KL, greedy tokens) on prompts up to 2,110 tokens
+GGML_FAMILIES["deepseek41"] = {
+    "title": "DeepSeek-V4.1-Flash", "by": "DeepSeek; the 2-bit GGUFs by IST-DAS", "arch": "deepseek41",
+    "about": "40 layers of 384 experts, 6 a word, and an n-gram table read from the SSD: a 249-266 GB download; on a "
+             "Mac the experts that do not fit are read from the SSD",
+    "hf": hf(DSV41_ISTA_REPO), "tag": "deepseek-v4.1-flash-", "name": "deepseek-v4.1-flash",
+    "parts": {m: [(n, *DSV41_ISTA_FILES[n]) for n in MULTI_FILE_FAMILIES["deepseek41"]["models"][m]["shards"]]
+              for m in ("IST-DAS-2.00bpw", "IST-DAS-2.25bpw", "IST-DAS-1.75bpw")},
+    "extra": [(DSV41_ISTA_ENGRAM, "deepseek-v4.1-flash-shared")],   # (the file, its folder in the models folder)
+    "models": {"IST-DAS-2.00bpw": {"about": "2.00 bpw, 138 GB + the 111 GB n-gram table; measured on a 64 GB Mac",
+                                   "ram_gb": 64},
+               "IST-DAS-2.25bpw": {"about": "2.25 bpw, 155 GB + the n-gram table; better quality, not measured here",
+                                   "ram_gb": 64},
+               "IST-DAS-1.75bpw": {"about": "1.75 bpw, 121 GB + the n-gram table; weaker on prose, not measured here",
+                                   "ram_gb": 48}},
+    "default": "IST-DAS-2.00bpw",
+    "context": 32768, "min_vram_gb": 12, "engine_ready_s": 3600,
+    # a Mac's pool this much smaller than mac_pool_gib's: on the 64 GB M1 Ultra a 36 GiB pool (46 GiB of Metal memory with
+    # the staging copy) froze the machine, while 28 and 32 GiB wrote at 8.7 and 8.9 tok/s (2026-10-26): 28 there
+    "mac_margin_gib": 7,
+    "license": "DeepSeek's model license: https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF",
 }
 
 
@@ -8299,8 +8371,8 @@ def main() -> int:
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib})
 
-    if a.family in GGML_FAMILIES:                    # Momoe's ggml engine (Bolt, GLM-5.3-Flash, LFM2.5)
-        return momoe_setup(a, data, port, a.family)
+    if a.family in GGML_FAMILIES and a.family not in MULTI_FILE_FAMILIES:   # Momoe's ggml engine (Bolt, GLM-5.3-Flash,
+        return momoe_setup(a, data, port, a.family)  # LFM2.5; DeepSeek only on a Mac or a shared-memory GPU, below)
     if sys.platform == "darwin":                     # an Apple Silicon Mac: momoe-metal, every GGUF family
         return momoe_setup(a, data, port)
     if not WIN and a.backend != "hip" and any(g.get("unified") and gpu_problem(g) is None for g in gpus()):
@@ -8539,7 +8611,7 @@ def main() -> int:
                 + ((f"   (recommended for {ram:.0f} GB of RAM: {size_of(qwen36_size(ram))})" if f == "qwen36" else
                     f"   (recommended for Strix Halo: {STRIX_HALO_MODEL})") if f == rec_fam and rec_fam != fams[0]
                    else ""))
-        extra = [] if hip else list(GGML_FAMILIES)       # Momoe's ggml engine: NVIDIA cards
+        extra = [] if hip else [f for f in GGML_FAMILIES if f not in MULTI_FILE_FAMILIES]   # Momoe's ggml engine: NVIDIA
         for i, f in enumerate(extra, len(fams) + 1):
             d = GGML_FAMILIES[f]
             say(f"  {i}) {d['title']:20s} {d['by']} - {d['about']}   [Momoe's ggml engine]")

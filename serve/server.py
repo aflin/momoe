@@ -3491,7 +3491,8 @@ class Service:
         self.family = family
         if family == "deepseek41":
             from serve import dsml
-            eos = (getattr(self.tok, "special_ids", None) or {}).get("eos", 1)
+            sp = getattr(self.tok, "special_ids", None) or {}     # (upstream's pack: "eos"; Momoe's: the GGUF's key)
+            eos = sp.get("eos", sp.get("tokenizer.ggml.eos_token_id", 1))
             self.stop_ids = {int(eos)}
             self.parser_cls = dsml.DsmlOutputParser
             self._force_text = dsml.to_dsml_force
