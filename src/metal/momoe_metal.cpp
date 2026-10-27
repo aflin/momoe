@@ -1062,6 +1062,10 @@ static void load_dspark(Engine & e) {
         const char * name = gguf_get_tensor_name(g, i);
         ggml_tensor * s = ggml_get_tensor(meta, name);
         ggml_tensor * t = s->type == GGML_TYPE_BF16 ? ggml_new_tensor(cw, GGML_TYPE_F32, ggml_n_dims(s), s->ne) : ggml_dup_tensor(cw, s);
+        if (strstr(name, "attn_output_a.weight") && ggml_n_dims(s) == 2) {   // (stored [d, rank * groups]: the model's
+            if (s->ne[1] % m.o_lora) die("--dspark: attn_output_a's rows are not whole groups");   // [d, rank, groups])
+            t = ggml_new_tensor_3d(cw, s->type, s->ne[0], m.o_lora, s->ne[1] / m.o_lora);
+        }
         ggml_set_name(t, (std::string("dspark.") + name).c_str());
         int il = -1;
         char rest[128] = {0};
