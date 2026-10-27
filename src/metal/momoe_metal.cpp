@@ -749,6 +749,30 @@ struct Engine {
     std::string draft_vocab;                                 // --draft-vocab: the draft head's token subset
     std::string mtp_gguf;                                    // --mtp-gguf: qwen4exp's MTP layer (not in its GGUFs)
     std::string engram;                                      // --engram: deepseek41's Engram file (else found by its name)
+    // deepseek41's DSpark drafter (--dspark FILE, llama.cpp's dflash graph_dsv41 + its DSpark heads): three blocks as the
+    // model's (window-only attention, mHC, a small MoE whose experts stay whole), each with a window ring (its Layer's
+    // k_cache) that the model's forward fills from its blocks' inputs (`targets`, through fc and enc_norm); a draft is
+    // a block of `block` positions [the last token, the mask token...], every position read at once, the Markov head
+    // (mk_w1, mk_w2) biasing each one's logits by the token before it and the confidence head (conf) cutting the block
+    struct Dspark {
+        std::string path;
+        bool on = false;
+        std::vector<Layer> layers;
+        std::vector<int> targets;
+        int n_expert = 0, n_used = 0, block = 0;
+        int32_t mask_tok = 0;
+        float scale = 1.0f, conf_min = 0.65f;
+        std::vector<float> clamp_exp, clamp_sh;
+        ggml_tensor *fc = nullptr, *enc_norm = nullptr, *out_norm = nullptr, *mk_w1 = nullptr, *mk_w2 = nullptr, *conf = nullptr;
+        ggml_context * c = nullptr;                          // the draft graph, kept: its shapes never change
+        ggml_cgraph * gf = nullptr;
+        ggml_backend_sched_t sched = nullptr;
+        ggml_tensor *tok = nullptr, *pos = nullptr, *idx = nullptr, *mask = nullptr;
+        std::vector<ggml_tensor *> best, cf;                 // each position's token and confidence
+        ggml_tensor *on_cpu = nullptr, *on_gpu = nullptr;
+        double t = 0;
+        uint64_t calls = 0;
+    } ds;
     double t_mtp = 0;                                        // time in the MTP layer
     int max_window = 8;                                      // verify windows up to this many tokens
     ggml_backend_t metal = nullptr, cpu = nullptr;
@@ -983,6 +1007,132 @@ static void load_mtp_qwen4(Engine & e) {
     ggml_free(meta);
     m.has_mtp = true;
     fprintf(stderr, "momoe-metal: MTP layer from %s: %.2f GiB\n", path, bytes / 1073741824.0);
+}
+
+// deepseek41's DSpark drafter (see Engine::Dspark), from its own GGUF (llama.cpp's dflash arch): its blocks' tensors by
+// the model's names (the experts whole), the encoder (fc, enc.output_norm), its output norm and its two heads; the
+// token embedding and the output head are the model's.  BF16 tensors (the Markov head) as F32
+static void load_dspark(Engine & e) {
+    Model & m = e.m;
+    auto & D = e.ds;
+    const char * path = D.path.c_str();
+    if (!m.ds41) die("--dspark: only for DeepSeek-V4.1 models");
+    ggml_context * meta = nullptr;
+    gguf_init_params gp = {/*no_alloc*/ true, &meta};
+    gguf_context * g = gguf_init_from_file(path, gp);
+    if (!g) die("cannot read %s as GGUF", path);
+    if (gguf_get_val_str(g, gguf_find_key(g, "general.architecture")) != std::string("dflash")) die("--dspark: %s is not a DFlash / DSpark file", path);
+    auto k = [&](const char * s) { return std::string("dflash.") + s; };
+    auto has = [&](const char * s) { return gguf_find_key(g, k(s).c_str()) >= 0; };
+    const int n_layer = gguf_int(g, k("block_count"));
+    if (!has("hyper_connection.single_pass") || !gguf_get_val_bool(g, gguf_find_key(g, k("hyper_connection.single_pass").c_str())))
+        die("--dspark: only the single-pass mHC drafter (DeepSeek-V4.1's)");
+    if (gguf_int(g, k("embedding_length")) != m.n_embd || gguf_int(g, k("attention.key_length")) != m.ds_hd ||
+        gguf_int(g, k("attention.head_count")) != m.n_head || gguf_int(g, k("attention.sliding_window")) != m.n_swa ||
+        gguf_int(g, k("hyper_connection.count")) != m.hc)
+        die("--dspark: the drafter's shapes are not this model's");
+    for (uint64_t r : gguf_uarr(g, k("attention.compress_ratios")))
+        if (r) die("--dspark: a drafter block with compression (not done)");
+    for (uint64_t t : gguf_uarr(g, k("target_layers"))) {
+        if ((int) t >= m.n_layer) die("--dspark: a target block past the model's");
+        D.targets.push_back((int) t);
+    }
+    D.block = gguf_int(g, k("block_size"));
+    D.n_expert = gguf_int(g, k("expert_count"));
+    D.n_used = gguf_int(g, k("expert_used_count"));
+    D.scale = has("expert_weights_scale") ? gguf_float(g, k("expert_weights_scale")) : 1.0f;
+    if (gguf_int(g, k("expert_gating_func")) != 4) die("--dspark: only the sqrt(softplus) router");
+    D.clamp_exp = gguf_per_block_f(g, k("swiglu_clamp_exp"), n_layer, 0.0f);
+    D.clamp_sh = has("swiglu_clamp_shexp") ? gguf_per_block_f(g, k("swiglu_clamp_shexp"), n_layer, 0.0f) : D.clamp_exp;
+    if (has("sample_from_anchor") && !gguf_get_val_bool(g, gguf_find_key(g, k("sample_from_anchor").c_str())))
+        die("--dspark: only the anchor-first block (sample_from_anchor)");
+    const int64_t mi = gguf_find_key(g, "tokenizer.ggml.mask_token_id");
+    if (mi < 0) die("--dspark: the file names no mask token");
+    D.mask_tok = (int32_t) gguf_get_val_u32(g, mi);
+    if (D.block < 2 || D.targets.empty() || D.n_used < 1) die("--dspark: an empty drafter");
+    D.layers.resize(n_layer);
+    const int fd = open(path, O_RDONLY);
+    if (fd < 0) die("cannot open %s", path);
+    const size_t data_off = gguf_get_data_offset(g);
+    ggml_init_params ip = {ggml_tensor_overhead() * 256, nullptr, true};
+    ggml_context * cw = ggml_init(ip);
+    struct ToRead { ggml_tensor * t; ggml_tensor * s; size_t off; };
+    std::vector<ToRead> rd;
+    for (int i = 0; i < (int) gguf_get_n_tensors(g); ++i) {
+        const char * name = gguf_get_tensor_name(g, i);
+        ggml_tensor * s = ggml_get_tensor(meta, name);
+        ggml_tensor * t = s->type == GGML_TYPE_BF16 ? ggml_new_tensor(cw, GGML_TYPE_F32, ggml_n_dims(s), s->ne) : ggml_dup_tensor(cw, s);
+        ggml_set_name(t, (std::string("dspark.") + name).c_str());
+        int il = -1;
+        char rest[128] = {0};
+        ggml_tensor ** to = nullptr;
+        if (sscanf(name, "blk.%d.%127s", &il, rest) == 2 && il >= 0 && il < n_layer) {
+            Layer & L = D.layers[il];
+            const std::map<std::string, ggml_tensor **> slot = {
+                {"attn_norm.weight", &L.attn_norm}, {"attn_sinks.weight", &L.sinks}, {"attn_q_a.weight", &L.wq_a},
+                {"attn_q_a_norm.weight", &L.q_a_norm}, {"attn_q_b.weight", &L.wq_b}, {"attn_kv.weight", &L.wkv_a},
+                {"attn_kv_a_norm.weight", &L.kv_a_norm}, {"attn_output_a.weight", &L.wo_a}, {"attn_output_b.weight", &L.wo},
+                {"hc_attn_fn.weight", &L.hc_attn_fn}, {"hc_attn_base.weight", &L.hc_attn_base},
+                {"hc_attn_scale.weight", &L.hc_attn_scale}, {"hc_ffn_fn.weight", &L.hc_ffn_fn},
+                {"hc_ffn_base.weight", &L.hc_ffn_base}, {"hc_ffn_scale.weight", &L.hc_ffn_scale},
+                {"ffn_norm.weight", &L.ffn_norm}, {"ffn_gate_inp.weight", &L.gate_inp}, {"exp_probs_b.bias", &L.exp_probs_b},
+                {"ffn_gate_shexp.weight", &L.gate_sh}, {"ffn_up_shexp.weight", &L.up_sh}, {"ffn_down_shexp.weight", &L.down_sh},
+                {"ffn_gate_exps.weight", &L.exps[0]}, {"ffn_up_exps.weight", &L.exps[1]}, {"ffn_down_exps.weight", &L.exps[2]}};
+            auto it = slot.find(rest);
+            if (it != slot.end()) to = it->second;
+        } else {
+            const std::map<std::string, ggml_tensor **> slot = {
+                {"fc.weight", &D.fc}, {"enc.output_norm.weight", &D.enc_norm}, {"output_norm.weight", &D.out_norm},
+                {"markov_w1.weight", &D.mk_w1}, {"markov_w2.weight", &D.mk_w2}, {"conf_proj.weight", &D.conf}};
+            auto it = slot.find(name);
+            if (it != slot.end()) to = it->second;
+        }
+        if (!to) { fprintf(stderr, "momoe-metal: DSpark tensor %s not used\n", name); continue; }
+        *to = t;
+        rd.push_back({t, s, data_off + gguf_get_tensor_offset(g, i)});
+    }
+    if (!D.fc || !D.enc_norm || !D.out_norm || !D.mk_w1 || !D.mk_w2 || !D.conf) die("--dspark: the drafter's encoder or heads are missing");
+    for (const Layer & L : D.layers)
+        if (!L.wq_a || !L.wq_b || !L.wkv_a || !L.kv_a_norm || !L.wo_a || !L.wo || !L.sinks || !L.hc_attn_fn || !L.hc_ffn_fn ||
+            !L.gate_inp || !L.exp_probs_b || !L.exps[0] || !L.exps[1] || !L.exps[2] || !L.gate_sh || !L.down_sh)
+            die("--dspark: a drafter block's tensors are missing");
+    if (D.fc->ne[0] != (int64_t) D.targets.size() * m.n_embd) die("--dspark: fc does not take the target blocks' features");
+    ggml_backend_buffer_t bw = ggml_backend_alloc_ctx_tensors(cw, card(e, n_cards(e) - 1));
+    if (!bw) die("cannot allocate the DSpark drafter");
+    e.bufs.push_back(bw);
+    size_t bytes = 0;
+    std::vector<char> raw;
+    for (const ToRead & r : rd) {
+        raw.resize(ggml_nbytes(r.s));
+        read_at(fd, raw.data(), raw.size(), r.off);
+        bytes += ggml_nbytes(r.t);
+        if (r.s->type == GGML_TYPE_BF16) {
+            std::vector<float> f(ggml_nelements(r.s));
+            ggml_get_type_traits(GGML_TYPE_BF16)->to_float(raw.data(), f.data(), (int64_t) f.size());
+            tset(r.t, f.data(), 0, f.size() * sizeof(float));
+        } else {
+            tset(r.t, raw.data(), 0, raw.size());
+        }
+    }
+    close(fd);
+    // the window rings, as the model's (m.swa_rows positions)
+    ggml_context * cs = ggml_init(ip);
+    for (Layer & L : D.layers) {
+        L.k_cache = ggml_new_tensor_2d(cs, GGML_TYPE_F16, m.ds_hd, m.swa_rows);
+        L.swa = true;
+    }
+    ggml_backend_buffer_t bs = ggml_backend_alloc_ctx_tensors(cs, card(e, n_cards(e) - 1));
+    if (!bs) die("cannot allocate the DSpark drafter's rings");
+    ggml_backend_buffer_clear(bs, 0);
+    e.bufs.push_back(bs);
+    gguf_free(g);
+    ggml_free(meta);
+    D.on = true;
+    fprintf(stderr, "momoe-metal: DSpark drafter from %s: %.2f GiB, %d blocks of %d experts (%d used), drafts of up to %d "
+            "tokens (confidence at least %.2f), its input from blocks", path, bytes / 1073741824.0, n_layer, D.n_expert,
+            D.n_used, D.block, D.conf_min);
+    for (int t : D.targets) fprintf(stderr, " %d", t);
+    fprintf(stderr, "\n");
 }
 
 #if defined(MOMOE_CUDA)
@@ -5392,9 +5542,18 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
         dg.topk.assign(m.n_layer, nullptr);                  // the previous block's FFN pre-mix (block 0: stream 0), the FFN
         ggml_tensor * res = ggml_repeat_4d(c, ggml_reshape_3d(c, x, m.n_embd, 1, T), m.n_embd, m.hc, T, 1);   // with this
         ggml_tensor * pre_prev = nullptr;                    // block's attention pre-mix; the head with the last FFN's
+        std::vector<ggml_tensor *> feats;                    // the DSpark drafter's input: its target blocks' inputs
         for (int il = 0; il < m.n_layer; ++il) {
             Layer & L = m.layers[il];
             if (L.eg >= 0) res = ds_engram(e, c, L, res, in.ds_eg[L.eg], T);
+            if (e.ds.on && std::find(e.ds.targets.begin(), e.ds.targets.end(), il) != e.ds.targets.end()) {
+                ggml_tensor * acc = nullptr;                 // (build_hc_mean: the streams' mean)
+                for (int64_t s4 = 0; s4 < m.hc; ++s4) {
+                    ggml_tensor * v = ggml_view_2d(c, res, m.n_embd, T, res->nb[2], s4 * res->nb[1]);
+                    acc = acc ? ggml_add(c, acc, v) : v;
+                }
+                feats.push_back(ggml_scale(c, acc, 1.0f / m.hc));
+            }
             ggml_tensor * apre, * apost, * acomb, * fpre, * fpost, * fcomb;
             ds_hc_mixes(e, c, res, L.hc_attn_fn, L.hc_attn_scale, L.hc_attn_base, &apre, &apost, &acomb);
             ggml_tensor * h = pre_prev ? ggml_dsv4_hc_pre(c, res, pre_prev)
@@ -5422,6 +5581,17 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
             res = ggml_dsv4_hc_post(c, f, res, fpost, fcomb);
             ggml_format_name(res, "l_out-%d", il);
             pre_prev = fpre;
+        }
+        if (e.ds.on) {                                       // the drafter's rings at these positions (graph_dsv41's
+            ggml_tensor * f = feats[0];                      // embd batch): fc, enc_norm, each block's KV row, rotated
+            for (size_t j = 1; j < feats.size(); ++j) f = ggml_concat(c, f, feats[j], 0);
+            ggml_tensor * xe = norm(c, ggml_mul_mat(c, e.ds.fc, f), e.ds.enc_norm, m.rms_eps);
+            ggml_tensor * pos = ggml_view_1d(c, in.pos, T, 0);
+            for (Layer & D : e.ds.layers) {
+                ggml_tensor * kv = norm(c, ggml_mul_mat(c, D.wkv_a, xe), D.kv_a_norm, m.rms_eps);
+                kv = ds_rope(m, c, ggml_reshape_3d(c, kv, m.ds_hd, 1, T), pos, false);
+                ggml_build_forward_expand(gf, ggml_set_rows(c, D.k_cache, ggml_reshape_2d(c, kv, m.ds_hd, T), in.kv_idx_swa));
+            }
         }
         const int64_t To = out && out->all ? T : 1;          // (only the positions whose logits are wanted)
         res = ggml_view_3d(c, res, m.n_embd, m.hc, To, res->nb[1], res->nb[2], (size_t) (T - To) * res->nb[2]);
@@ -5556,6 +5726,146 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
     b.hid = hid;
     b.logits = logits;
     b.best = best;
+}
+
+// the DSpark drafter's graph (graph_dsv41's token batch and build_dspark_markov_head): `block` positions [the last token,
+// the mask token...] through its blocks - the window's ring and the whole block seen at once (the block's window is its
+// first position's), mHC with the pre-mix one sublayer late, its MoE (experts whole) - the model's output head, then
+// position by position the Markov head's bias from the token before (the last token, then each position's choice) and
+// the confidence head.  Built once: the inputs (tokens, positions, ring rows, mask) are set for each draft
+static void ds_draft_build(Engine & e) {
+    Model & m = e.m;
+    auto & D = e.ds;
+    const int B = D.block, W = m.swa_rows;
+    const int64_t hd = m.ds_hd;
+    ggml_init_params ip = {ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(8192, false), nullptr, true};
+    ggml_context * c = ggml_init(ip);
+    ggml_cgraph * gf = ggml_new_graph_custom(c, 8192, false);
+    D.tok = ggml_new_tensor_1d(c, GGML_TYPE_I32, B);
+    D.pos = ggml_new_tensor_1d(c, GGML_TYPE_I32, B);
+    D.idx = ggml_new_tensor_1d(c, GGML_TYPE_I64, B);
+    D.mask = ggml_new_tensor_2d(c, GGML_TYPE_F16, W, B);
+    for (ggml_tensor * t : {D.tok, D.pos, D.idx, D.mask}) ggml_set_input(t);
+    ggml_tensor * x = ggml_get_rows(c, m.tok_embd, D.tok);
+    if (!kHostMem && m.tok_embd->buffer && ggml_backend_buffer_is_host(m.tok_embd->buffer)) {   // (momoe-cuda: the
+        D.on_cpu = x;                                        // embeddings in RAM, as build_forward's)
+        x = D.on_gpu = ggml_scale(c, x, 1.0f);
+    }
+    ggml_tensor * res = ggml_repeat_4d(c, ggml_reshape_3d(c, x, m.n_embd, 1, B), m.n_embd, m.hc, B, 1);
+    ggml_tensor * pre_prev = nullptr;
+    for (size_t il = 0; il < D.layers.size(); ++il) {
+        Layer & L = D.layers[il];
+        ggml_tensor * apre, * apost, * acomb, * fpre, * fpost, * fcomb;
+        ds_hc_mixes(e, c, res, L.hc_attn_fn, L.hc_attn_scale, L.hc_attn_base, &apre, &apost, &acomb);
+        ggml_tensor * h = pre_prev ? ggml_dsv4_hc_pre(c, res, pre_prev)
+                                   : ggml_cont(c, ggml_view_2d(c, res, m.n_embd, B, res->nb[2], 0));
+        h = norm(c, h, L.attn_norm, m.rms_eps);
+        {                                                    // the attention (window only, plain RoPE)
+            ggml_tensor * qr = norm(c, ggml_mul_mat(c, L.wq_a, h), L.q_a_norm, m.rms_eps);
+            ggml_tensor * q = ds_rope(m, c, ggml_reshape_3d(c, ggml_mul_mat(c, L.wq_b, qr), hd, m.n_head, B), D.pos, false);
+            ggml_tensor * kv = norm(c, ggml_mul_mat(c, L.wkv_a, h), L.kv_a_norm, m.rms_eps);
+            kv = ds_rope(m, c, ggml_reshape_3d(c, kv, hd, 1, B), D.pos, false);
+            ggml_build_forward_expand(gf, ggml_set_rows(c, L.k_cache, ggml_reshape_2d(c, kv, hd, B), D.idx));
+            ggml_tensor * kp = ggml_permute(c, ggml_view_3d(c, L.k_cache, hd, 1, W, L.k_cache->nb[1], L.k_cache->nb[1], 0), 0, 2, 1, 3);
+            ggml_tensor * o = ggml_flash_attn_ext(c, ggml_permute(c, q, 0, 2, 1, 3), kp, kp, D.mask, 1.0f / sqrtf((float) hd), 0.0f, 0.0f);
+            ggml_flash_attn_ext_add_sinks(o, L.sinks);
+            ggml_prec_set_acc(o, GGML_PREC_F32);
+            o = ds_rope(m, c, ggml_reshape_3d(c, o, hd, m.n_head, B), D.pos, false, true);
+            o = ggml_permute(c, ggml_reshape_3d(c, o, m.n_head / m.o_groups * hd, m.o_groups, B), 0, 2, 1, 3);
+            ggml_tensor * oa = ggml_cont_2d(c, ggml_permute(c, ggml_mul_mat(c, L.wo_a, o), 0, 2, 1, 3), (int64_t) m.o_lora * m.o_groups, B);
+            h = ggml_mul_mat(c, L.wo, oa);
+        }
+        res = ggml_dsv4_hc_post(c, h, res, apost, acomb);
+        ds_hc_mixes(e, c, res, L.hc_ffn_fn, L.hc_ffn_scale, L.hc_ffn_base, &fpre, &fpost, &fcomb);
+        ggml_tensor * f = norm(c, ggml_dsv4_hc_pre(c, res, apre), L.ffn_norm, m.rms_eps);
+        {                                                    // the MoE: sqrt(softplus) router, experts whole
+            const int k = D.n_used;
+            ggml_tensor * lg = ggml_mul_mat(c, L.gate_inp, f);
+            ggml_prec_set_acc(lg, GGML_PREC_F32);
+            ggml_tensor * probs = ggml_sqrt(c, ggml_softplus(c, lg));                     // [n_expert, B]
+            ggml_tensor * top = ggml_argsort_top_k(c, ggml_add(c, probs, L.exp_probs_b), k);   // [k, B]
+            ggml_tensor * w = ggml_reshape_2d(c, ggml_get_rows(c, ggml_reshape_3d(c, probs, 1, D.n_expert, B), top), k, B);
+            if (k > 1) w = ggml_div(c, w, ggml_clamp(c, ggml_sum_rows(c, w), 6.103515625e-5f, INFINITY));
+            w = ggml_scale(c, ggml_reshape_3d(c, w, 1, k, B), D.scale);
+            ggml_tensor * f3 = ggml_reshape_3d(c, f, m.n_embd, 1, B);
+            ggml_tensor * up = ggml_mul_mat_id(c, L.exps[1], f3, top);
+            ggml_tensor * gt = ggml_mul_mat_id(c, L.exps[0], f3, top);
+            ggml_tensor * dn = ggml_mul(c, ggml_mul_mat_id(c, L.exps[2], glm_swiglu(c, gt, up, D.clamp_exp[il]), top), w);
+            ggml_tensor * moe = ggml_view_2d(c, dn, m.n_embd, B, dn->nb[2], 0);
+            for (int i = 1; i < k; ++i) moe = ggml_add(c, moe, ggml_view_2d(c, dn, m.n_embd, B, dn->nb[2], i * dn->nb[1]));
+            ggml_tensor * sh = ggml_mul_mat(c, L.down_sh, glm_swiglu(c, ggml_mul_mat(c, L.gate_sh, f), ggml_mul_mat(c, L.up_sh, f), D.clamp_sh[il]));
+            f = ggml_add(c, moe, sh);
+        }
+        res = ggml_dsv4_hc_post(c, f, res, fpost, fcomb);
+        pre_prev = fpre;
+    }
+    ggml_tensor * hs = ggml_dsv4_hc_pre(c, res, pre_prev);                                 // [n_embd, B], un-normed
+    ggml_tensor * logits = ggml_mul_mat(c, m.output, norm(c, hs, D.out_norm, m.rms_eps));  // [V, B]
+    ggml_tensor * prev = ggml_view_1d(c, D.tok, 1, 0);
+    D.best.clear();
+    D.cf.clear();
+    for (int i = 0; i < B; ++i) {
+        ggml_tensor * w1p = ggml_get_rows(c, D.mk_w1, prev);                                // [R, 1]
+        ggml_tensor * col = ggml_add(c, ggml_view_2d(c, logits, logits->ne[0], 1, logits->nb[1], i * logits->nb[1]),
+                                     ggml_mul_mat(c, D.mk_w2, w1p));
+        ggml_tensor * hi = ggml_cont(c, ggml_view_2d(c, hs, m.n_embd, 1, hs->nb[1], i * hs->nb[1]));
+        ggml_tensor * ci = ggml_sigmoid(c, ggml_mul_mat(c, D.conf, ggml_concat(c, hi, w1p, 0)));   // [1, 1]
+        prev = ggml_argmax(c, col);
+        for (ggml_tensor * t : {prev, ci}) {
+            ggml_set_output(t);
+            ggml_build_forward_expand(gf, t);
+        }
+        D.best.push_back(prev);
+        D.cf.push_back(ci);
+    }
+    D.c = c;
+    D.gf = gf;
+    D.sched = ggml_backend_sched_new(e.sched_backends.data(), nullptr, (int) e.sched_backends.size(), 8192, false, true);
+    if (D.on_gpu) {
+        ggml_backend_sched_set_tensor_backend(D.sched, D.on_cpu, e.cpu);
+        ggml_backend_sched_set_tensor_backend(D.sched, D.on_gpu, e.metal);
+    }
+    if (!ggml_backend_sched_alloc_graph(D.sched, gf)) die("cannot allocate the DSpark drafter's graph");
+}
+
+// a draft after `tok` (not yet read by the model) at position p0: the drafter's tokens for p0+1.. while each is at least
+// conf_min sure (anchor-first: its position 0 is the token after `tok`)
+static std::vector<int32_t> ds_draft(Engine & e, int32_t tok, int p0) {
+    Model & m = e.m;
+    auto & D = e.ds;
+    const double t0 = now_s();
+    if (!D.gf) ds_draft_build(e);
+    const int B = D.block, W = m.swa_rows, last = p0 + B - 1;
+    std::vector<int32_t> toks(B, D.mask_tok), pos(B);
+    std::vector<int64_t> idx(B);
+    toks[0] = tok;
+    for (int i = 0; i < B; ++i) {
+        pos[i] = p0 + i;
+        idx[i] = (p0 + i) % W;
+    }
+    std::vector<ggml_fp16_t> mask((size_t) W * B);
+    const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(-INFINITY);
+    for (int r = 0; r < W; ++r) {                            // the position ring row r holds (as flint_swa_inputs): seen
+        const int p = last - (((last - r) % W) + W) % W;     // by every position when within the first one's window
+        const ggml_fp16_t v = p >= 0 && p0 - p < m.n_swa ? zero : ninf;
+        for (int i = 0; i < B; ++i) mask[(size_t) i * W + r] = v;
+    }
+    ggml_backend_tensor_set(D.tok, toks.data(), 0, toks.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(D.pos, pos.data(), 0, pos.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(D.idx, idx.data(), 0, idx.size() * sizeof(int64_t));
+    ggml_backend_tensor_set(D.mask, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+    if (ggml_backend_sched_graph_compute(D.sched, D.gf) != GGML_STATUS_SUCCESS) die("the DSpark drafter's graph failed");
+    std::vector<int32_t> best(B);
+    std::vector<float> cf(B);
+    for (int i = 0; i < B; ++i) {
+        ggml_backend_tensor_get(D.best[i], &best[i], 0, sizeof(int32_t));
+        ggml_backend_tensor_get(D.cf[i], &cf[i], 0, sizeof(float));
+    }
+    std::vector<int32_t> out;
+    for (int i = 0; i < B && cf[i] >= D.conf_min; ++i) out.push_back(best[i]);
+    D.t += now_s() - t0;
+    ++D.calls;
+    return out;
 }
 
 static int g_built = 0;                                      // forward graphs built and the time it took (the stats
@@ -6216,6 +6526,9 @@ static std::vector<ggml_tensor *> state_tensors(Engine & e) {
         }
         if (L.cst_kv) r.push_back(L.cst_kv);                 // deepseek41: the unfinished group's rows
         if (L.cst_sc) r.push_back(L.cst_sc);
+    }
+    for (auto & L : e.ds.layers) {                           // deepseek41's DSpark drafter: its rings
+        if (L.k_cache) r.push_back(L.k_cache);
     }
     return r;
 }
@@ -6950,7 +7263,7 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                 }
                 float pb = 0;
                 int d = 0;
-                for (size_t i = 0; i < tt.size(); i += e.max_batch) {
+                for (size_t i = 0; i < tt.size() && !e.ds.on; i += e.max_batch) {   // (DSpark: no MTP layer to run)
                     const int T = (int) std::min(tt.size() - i, (size_t) e.max_batch);
                     d = mtp_forward(e, hh.data() + i * ne, tt.data() + i, T, q0 + (int) i, hc, &pb);
                 }
@@ -6967,7 +7280,7 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                     }
                     return dr;
                 };
-                std::vector<int32_t> drafts = chain(d, p);
+                std::vector<int32_t> drafts = e.ds.on ? ds_draft(e, next, p) : chain(d, p);
                 int t = next;
                 bool go = emit(t);
                 while (go) {
@@ -6998,11 +7311,14 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                         forward(e, W.data(), n + 1, p);
                     }
                     live.insert(live.end(), W.begin(), W.begin() + n + 1);
-                    last_h.assign(ov.hidden.begin() + (size_t) n * ne, ov.hidden.begin() + (size_t) (n + 1) * ne);
+                    if (m.has_mtp) last_h.assign(ov.hidden.begin() + (size_t) n * ne, ov.hidden.begin() + (size_t) (n + 1) * ne);
                     for (int j = 0; j <= n && go; ++j) go = emit(nx[j]);
                     if (!go) break;
+                    if (e.ds.on) drafts = ds_draft(e, nx[n], p + n + 1);
+                    else {
                     const int dn = mtp_forward(e, ov.hidden.data(), nx.data(), n + 1, p + 1, hc, &pb);
                     drafts = chain(dn, p + n + 1);
+                    }
                     p += n + 1;
                     t = nx[n];
                 }
@@ -7073,6 +7389,8 @@ int main(int argc, char ** argv) {
         else if (a == "--draft-vocab") e.draft_vocab = next();
         else if (a == "--mtp-gguf") e.mtp_gguf = next();
         else if (a == "--engram") e.engram = next();
+        else if (a == "--dspark") e.ds.path = next();        // (deepseek41: its DSpark drafter's GGUF)
+        else if (a == "--dspark-conf") e.ds.conf_min = (float) atof(next());
         else if (a == "--nostall") nostall_arg = next();
         else if (a == "--nostall-every") nostall_every = std::max(0, atoi(next()));
         else if (a == "--spec-min-p") spec_min_p = (float) atof(next());
@@ -7103,7 +7421,11 @@ int main(int argc, char ** argv) {
         } else die("unknown option %s", a.c_str());
     }
     if (!model || (prompt.empty() && !serve)) die("usage: momoe-metal -m MODEL.gguf (--tokens 1,2,3 [-n N] | --serve) [--slots N | --pool-gib G]");
-    e.load_mtp = mtp_k > 0;
+    if (!e.ds.path.empty()) {                                // DSpark: windows of the last token and up to its block (5)
+        if (mtp_k > 0) die("--dspark and --mtp: one drafter at a time");
+        mtp_k = 8;                                           // (the windows' room until the file's block size is read)
+    }
+    e.load_mtp = mtp_k > 0 && e.ds.path.empty();
     e.max_window = std::max(2, mtp_k + 1);
     if (getenv("MOMOE_DIRECT")) g_direct = true;
     bool small_uma = false;                                  // a unified-memory machine under 16 GiB (uma_small)
@@ -7141,6 +7463,11 @@ int main(int argc, char ** argv) {
     // time: 18-19 without it.  Nemotron: the copies)
     e.hybrid = !kHostMem && !g_direct && !getenv("MOMOE_NO_HYBRID") && e.split.empty();
     load(e, model, pool_gib, slots);
+    if (!e.ds.path.empty()) {                                // (before the pool takes what is left)
+        load_dspark(e);
+        if (e.ds.block > mtp_k) die("--dspark: a drafter block longer than 8 (not done)");
+        mtp_k = e.ds.block;
+    }
     if (e.helper && e.m.nemo) e.hybrid = false;
     if (mtp_k > 0 && e.m.nemo) die("--mtp: not yet for Nemotron models");
     if (!kHostMem && pool_gib <= 0 && slots <= 0) fit_pool(e);
@@ -7180,7 +7507,7 @@ int main(int argc, char ** argv) {
         cuda_graphs_off = true;                             // splits, instantiating them ran out of VRAM (12 GB card;
     }                                                       // MOMOE_CUDA_GRAPHS=1: on anyway); and for kept graphs
 #endif
-    if (mtp_k > 0 && !e.m.has_mtp) die("--mtp: this model file has no MTP layer");
+    if (mtp_k > 0 && !e.m.has_mtp && !e.ds.on) die("--mtp: this model file has no MTP layer");
     e.readers.device = e.device;
     e.fillers.device = e.device;
     if (e.hybrid) e.fillers.start(getenv("MOMOE_FILLERS") ? atoi(getenv("MOMOE_FILLERS")) : 2);
@@ -7354,6 +7681,9 @@ int main(int argc, char ** argv) {
             }
             return dr;
         };
+        std::vector<int32_t> drafts;
+        if (e.ds.on) drafts = ds_draft(e, next, p);          // (DSpark: its rings were filled with the prompt)
+        else {
         // the MTP layer over the prompt: (state i, token i+1), the last with the first generated token
         std::vector<int32_t> mt(prompt.begin() + 1, prompt.end());
         mt.push_back(next);
@@ -7362,7 +7692,8 @@ int main(int argc, char ** argv) {
             const int T = (int) std::min(mt.size() - i, (size_t) e.max_batch);
             d = mtp_forward(e, H.data() + i * ne, mt.data() + i, T, 1 + (int) i, hc, &pb);
         }
-        std::vector<int32_t> drafts = chain(d, p);
+        drafts = chain(d, p);
+        }
         out.push_back(next);
         int t = next;
         uint64_t windows = 0, accepted = 0, drafted = 0, redone = 0;
@@ -7397,8 +7728,11 @@ int main(int argc, char ** argv) {
                 ++redone;
             }
             t_rb += now_s() - r0;
+            if (e.ds.on) drafts = ds_draft(e, ov.next[n], p + n + 1);
+            else {
             const int dn = mtp_forward(e, ov.hidden.data(), ov.next.data(), n + 1, p + 1, hc, &pb);
             drafts = chain(dn, p + n + 1);              // dn follows the MTP's last position, p+n+1
+            }
             p += n + 1;
             t = ov.next[n];
         }
@@ -7416,10 +7750,11 @@ int main(int argc, char ** argv) {
         printf("tokens:");
         for (auto x : out) printf(" %d", x);
         printf("\n");
-        fprintf(stderr, "momoe-metal: MTP up to %d drafts (min p %.2f): %llu windows, %llu drafts, %llu accepted, %.2f tokens "
-                "per window; MTP layer %.1f ms per window\n", mtp_k, spec_min_p, (unsigned long long) windows,
-                (unsigned long long) drafted, (unsigned long long) accepted, (double) (accepted + windows) / windows,
-                1000 * e.t_mtp / windows);
+        fprintf(stderr, "momoe-metal: %s up to %d drafts (min p %.2f): %llu windows, %llu drafts, %llu accepted, %.2f tokens "
+                "per window; %s %.1f ms per window\n", e.ds.on ? "DSpark" : "MTP", mtp_k, e.ds.on ? e.ds.conf_min : spec_min_p,
+                (unsigned long long) windows, (unsigned long long) drafted, (unsigned long long) accepted,
+                (double) (accepted + windows) / windows, e.ds.on ? "the drafter" : "MTP layer",
+                1000 * (e.ds.on ? e.ds.t : e.t_mtp) / windows);
         fprintf(stderr, "momoe-metal: generated %d tokens in %.2f s (%.1f tok/s): expert hit rate %.1f%%\n", n_gen, tg,
                 (n_gen - 1) / tg, 100.0 * e.pool.hits / std::max<uint64_t>(1, e.pool.hits + e.pool.misses));
 #if defined(MOMOE_CUDA)
