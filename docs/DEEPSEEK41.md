@@ -34,23 +34,40 @@ original model, upstream's measurement (4,995 positions): perplexity +15.5% at 2
 | --- | --- | ---: | ---: | ---: |
 | PC: RTX 4070 Ti 12 GB, 63 GB RAM, files on a SATA SSD RAID1 | `strata-dsv41`, 8K context | 3.8 tok/s | 81.7 tok/s | - |
 | M1 Ultra, 64 GB | `momoe-metal`, setup's config (28 GiB pool, 32K context) | 7.4 tok/s | 82.6 tok/s | 71.9 tok/s |
+| DGX Spark, 128 GB shared | `momoe-cuda`, setup's config (an 85 GiB pool, 32K context) | 16.0 tok/s | 255 tok/s | 238 tok/s |
 
-The server's benchmark (`tools/strata_bench.py`), 2 or 3 runs each; the reports are in `bench/results/2026-10-26-dsv41-*`.
-On the M1 Ultra an agent session wrote 5.9 tok/s, and its turns (2,800-3,000 new tokens each) took about 90 s to
-start. The first token of a short chat: 3.3 s on the M1 Ultra, 13.4 s on the PC.
+The server's benchmark (`tools/strata_bench.py`), 2 or 3 runs each; the reports are in `bench/results/2026-10-2*-dsv41-*`.
+An agent session (turns of 2,800-3,000 new tokens) wrote 5.9 tok/s on the M1 Ultra, its turns starting after about
+90 s, and 14.4 tok/s on the Spark, after about 22 s. The first token of a short chat: 0.8 s on the Spark, 3.3 s on the
+M1 Ultra, 13.4 s on the PC. The prompt speeds on the Spark varied between the two runs (4K: 144 and 366 tok/s).
 
-**Checked:** MoMoE's engine against `strata-dsv41` (the log-probabilities of every answer token, both fed the same
-tokens; greedy, 6 experts, no drafting), on prompts of 14, 22 and 2,110 tokens: KL mean 0.001-0.010, the same top
-token at 97-100% of the steps; the code prompt's greedy answer was the same 42 tokens. The server's chat, thinking on
-and off, tool calls (OpenAI and Anthropic) and streaming on both engines.
+**Checked:** MoMoE's engine against `strata-dsv41` (the log-probabilities of 64 answer tokens, both fed the same
+tokens; greedy, 6 experts, no drafting):
 
-## Memory on a Mac
+| Prompt | `momoe-cuda` (PC / Spark) KL mean, same top token | `momoe-metal` (M1 Ultra) |
+| --- | --- | --- |
+| 14-22 tokens (two) | 0.001-0.012, 97-100% | 0.001-0.009, 100% |
+| 2,110 tokens | 0.006, 98% | 0.007, 97% |
+| 8,000 tokens | 0.017, 95% (Spark) | - |
+| 19,999 tokens | 0.016, 95% (Spark) | - |
+
+The difference grows from short prompts to 8K and then stays: upstream's engine keeps the attention's caches in FP8
+and FP4, as DeepSeek's own inference code does, and MoMoE's (as llama.cpp's) in F16, so a few of the 512 rows the
+sparse attention picks differ on long prompts. The code prompt's greedy answer was the same 42 tokens. The server's
+chat, thinking on and off, tool calls (OpenAI and Anthropic) and streaming on both engines; a conversation continued
+from the cache after another one ran (1,352 of 1,406 tokens reused) answered exactly as the same prompt read fresh.
+
+## Memory
 
 The pool is smaller than for other models of this size: besides the 5.7 GiB of other weights, the engine keeps a
 staging copy of one layer's experts (3.7 GiB) for long prompts. On the 64 GB M1 Ultra a 36 GiB pool (46 GiB of GPU
 memory in all) froze the machine; setup leaves 7 GiB more free and gives 28 GiB there. A 32 GiB pool wrote 8.9 tok/s
 against 8.7 at 28: little to gain from the risk. Run by hand without `--pool-gib`, the engine leaves 15% of the GPU's
-working set free.
+working set free when it has to make the pool smaller (a pool that fits beside a 3% margin is left as it is).
+
+On the DGX Spark setup keeps 20 GiB from the pool for the rest of the system (`MOMOE_UMA_RESERVE_GIB` in the config):
+with the engine's default 10 the memory available fell to 8 GB while it wrote; with 20 it stayed at 16-18 GB, at the
+same speed.
 
 ## Not in this version
 

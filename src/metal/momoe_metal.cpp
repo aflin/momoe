@@ -6097,10 +6097,11 @@ static void fit_pool_metal(Engine & e) {
     e.reserve_only = true;
     forward(e, toks.data(), T, e.n_ctx - T);
     e.reserve_only = false;
-    // the margin left free: 3% when a pool was asked for (setup's configs, measured with it); without one, 15% - a pool
-    // fitted to 3% of the 64 GB M1 Ultra's 48 GiB working set (46.6 GiB in all, DeepSeek-V4.1) froze the machine
-    const double margin = getenv("MOMOE_METAL_MARGIN_MIB") ? atof(getenv("MOMOE_METAL_MARGIN_MIB")) * 1048576.0
-                                                           : std::max(512.0 * 1048576.0, (e.pool_asked ? 0.03 : 0.15) * (double) tot);
+    // the margin left free: 3% (whatever fits with it is left as it is: setup's configs, measured so); a pool nobody
+    // asked for that has to be cut down is cut to leave 15% - one fitted to 3% of the 64 GB M1 Ultra's 48 GiB working
+    // set (46.6 GiB in all, DeepSeek-V4.1) froze the machine
+    const bool env_margin = getenv("MOMOE_METAL_MARGIN_MIB") != nullptr;
+    double margin = env_margin ? atof(getenv("MOMOE_METAL_MARGIN_MIB")) * 1048576.0 : std::max(512.0 * 1048576.0, 0.03 * (double) tot);
 #if !defined(MOMOE_CUDA)
     const double used = (double) ggml_backend_metal_allocated(e.metal);
 #else
@@ -6109,6 +6110,7 @@ static void fit_pool_metal(Engine & e) {
     ggml_backend_sched_free(e.sched);
     e.sched = keep;
     ++g_sched_gen;
+    if (!env_margin && !e.pool_asked && used + margin > (double) tot) margin = std::max(margin, 0.15 * (double) tot);
     const double over = used + margin - (double) tot;
     if (getenv("MOMOE_METAL_FIT_DEBUG"))
         fprintf(stderr, "momoe-metal: GPU working set %.3f GiB, allocated %.3f GiB (pool %.3f GiB)\n", tot / 1073741824.0,
