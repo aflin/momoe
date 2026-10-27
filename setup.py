@@ -7248,7 +7248,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     check_shards(paths)
     ok("model file present" if len(paths) == 1 else f"model files present ({len(paths)})")
     extras = []                                        # files beside the model's (DeepSeek's Engram table): in their own
-    for name, sub in fam.get("extra", ()):             # folder, shared by the family's sizes; --gguf-dir: yours, beside
+    extra_files = list(fam.get("extra", ())) + (list(fam.get("uma_extra", ())) if unified and not mac else [])
+    for name, sub, flag in extra_files:                # folder, shared by the family's sizes; --gguf-dir: yours, beside
         size, sha = DSV41_ALL_FILES[name]              # the shards or one folder up
         f = Path(a.models_dir) / sub / name
         if own:
@@ -7257,10 +7258,10 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
                 fail(f"{name} is missing", f"put it beside the model's files ({folder}), or drop --gguf-dir to download it")
             f = mine[0] if mine else f
         elif not (f.exists() and done(f)):
-            download(fam["hf"] + name, f, pin=(size, sha))
+            download((dsv41_hf(name) if name in DSV41_ALL_FILES else fam["hf"]) + name, f, pin=(size, sha))
         verify_sha256(f, size, sha, own=bool(own) and f.parent != Path(a.models_dir) / sub)
         ok(f"{name}: {f.parent}")
-        extras.append(f)
+        extras.append((f, flag))
 
     step(4, "the tokenizer")
     pack = data / "packs" / tag.lower()
@@ -7327,8 +7328,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     if unified and ram < 16 and not a.context:
         ctx = min(ctx, 16384)
     args = ["-m", str(paths[0]), "--ctx", str(ctx)]
-    for f in extras:                                   # (DeepSeek: its Engram table)
-        args += ["--engram", str(f)]
+    for f, flag in extras:                             # (DeepSeek: its Engram table; on the Spark its drafter)
+        args += [flag, str(f)]
     if mac:
         if pool is not None:
             args += ["--pool-gib", str(pool), "--nocache"]
@@ -7859,7 +7860,9 @@ GGML_FAMILIES["deepseek41"] = {
     "hf": hf(DSV41_ISTA_REPO), "tag": "deepseek-v4.1-flash-", "name": "deepseek-v4.1-flash",
     "parts": {m: [(n, *DSV41_ISTA_FILES[n]) for n in MULTI_FILE_FAMILIES["deepseek41"]["models"][m]["shards"]]
               for m in ("IST-DAS-2.00bpw", "IST-DAS-2.25bpw", "IST-DAS-1.75bpw")},
-    "extra": [(DSV41_ISTA_ENGRAM, "deepseek-v4.1-flash-shared")],   # (the file, its folder in the models folder)
+    "extra": [(DSV41_ISTA_ENGRAM, "deepseek-v4.1-flash-shared", "--engram")],   # (the file, its folder, its flag)
+    # on a GPU that shares the system's memory also the DSpark drafter (8 GB): measured on the Spark, see uma_extra's use
+    "uma_extra": [(DSV41_DSPARK, "deepseek-v4.1-flash-shared", "--dspark")],
     "models": {"IST-DAS-2.00bpw": {"about": "2.00 bpw, 138 GB + the 111 GB n-gram table; measured on a 64 GB Mac",
                                    "ram_gb": 64},
                "IST-DAS-2.25bpw": {"about": "2.25 bpw, 155 GB + the n-gram table; better quality, not measured here",

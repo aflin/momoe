@@ -773,6 +773,11 @@ struct Engine {
         double t = 0;
         uint64_t calls = 0;
     } ds;
+    // deepseek41's verify windows (ds_window / ds_rollback): the compressor rows of each source with a ratio above 1 (the
+    // graph's, then this window's on the host) and its unfinished group's rows as they were before the window
+    struct DsWin { Layer * L; ggml_tensor * kv, * sc; std::vector<float> hkv, hsc; };
+    std::vector<DsWin> dswin;
+    std::vector<std::vector<float>> cst_saved;               // every source's cst_kv, cst_sc (in the layers' order)
     double t_mtp = 0;                                        // time in the MTP layer
     int max_window = 8;                                      // verify windows up to this many tokens
     ggml_backend_t metal = nullptr, cpu = nullptr;
@@ -4820,6 +4825,11 @@ static void ds_compress(Engine & e, ggml_context * c, ggml_cgraph * gf, Layer & 
     ggml_tensor * comp;
     if (r > 1) {
         ggml_tensor * ssc = ggml_mul_mat(c, L.comp_gate, x);
+        if (T <= 16) {                                       // (a verify window: kept for ds_rollback)
+            ggml_set_output(skv);
+            ggml_set_output(ssc);
+            e.dswin.push_back({&L, skv, ssc, {}, {}});
+        }
         ggml_tensor * v = ggml_get_rows(c, ggml_concat(c, L.cst_kv, skv, 1), in.ds_ridx[r]);   // [hd, r nb]
         ggml_tensor * sc = ggml_get_rows(c, ggml_concat(c, L.cst_sc, ssc, 1), in.ds_ridx[r]);
         v = ggml_cont(c, ggml_permute(c, ggml_reshape_3d(c, v, hd, r, nb), 1, 0, 2, 3));   // [r, hd, nb]
@@ -5458,7 +5468,10 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
         x = ggml_add(c, ggml_mul(c, x, in.img_keep), in.img);
     }
     kpool_new(e, c, in, p0, T);
-    if (m.ds41) ds_new(e, c, in, p0, T);
+    if (m.ds41) {
+        ds_new(e, c, in, p0, T);
+        e.dswin.clear();
+    }
     ggml_tensor * ple_in = nullptr;
     if (m.ple_layer >= 0) {
         if (out && out->snap) die("verify-window snapshots are not supported with qwen4exp");
@@ -6217,6 +6230,13 @@ static int forward_once(Engine & e, const int32_t * toks, int T, int p0, Out * o
 #endif
     }
     e.t_compute += now_s() - tc0;
+    if (m.ds41 && T > 1)                                     // a verify window's compressor rows, for ds_rollback
+        for (auto & w : e.dswin) {
+            w.hkv.resize(ggml_nelements(w.kv));
+            w.hsc.resize(ggml_nelements(w.sc));
+            tget(w.kv, w.hkv.data(), 0, ggml_nbytes(w.kv));
+            tget(w.sc, w.hsc.data(), 0, ggml_nbytes(w.sc));
+        }
     if (show_top) {
         const int64_t V = logits->ne[0];
         std::vector<float> lv(V);
@@ -6569,6 +6589,41 @@ static void rollback(Engine & e, int T, int n_keep) {
         for (int ch = 0; ch < conv_ch; ++ch)
             for (int t = 0; t < cw; ++t) st[(size_t) ch * cw + t] = w[(size_t) ch * (cw + T) + n_keep + t];
         tset(L.conv_state, st.data(), 0, st.size() * sizeof(float));
+    }
+}
+
+// deepseek41's verify windows, without the whole state saved and the accepted tokens run again: what a failed draft
+// leaves behind is overwritten or masked before it is read (the rings' rows past the last accepted position, the groups
+// its rejected tokens completed: invisible until those positions are read again), except a source's unfinished group:
+// its rows are put back as they were before the window, then the accepted tokens' own (the window's compressor rows)
+static void ds_window(Engine & e) {
+    e.cst_saved.clear();
+    for (Layer & L : e.m.layers)
+        for (ggml_tensor * t : {L.cst_kv, L.cst_sc})
+            if (t) {
+                e.cst_saved.emplace_back(ggml_nelements(t));
+                tget(t, e.cst_saved.back().data(), 0, ggml_nbytes(t));
+            }
+}
+
+static void ds_rollback(Engine & e, int p, int n) {
+    const int q = p + n;                                     // the last accepted position
+    size_t k = 0;
+    for (Layer & L : e.m.layers) {
+        if (!L.cst_kv) continue;
+        std::vector<float> & skv = e.cst_saved[k++], & ssc = e.cst_saved[k++];
+        const int r = L.ratio, hd = e.m.ds_hd, g0 = q / r * r;
+        if ((q + 1) % r) {                                   // q's group is unfinished: its rows read from the window
+            const Engine::DsWin * w = nullptr;
+            for (const auto & x : e.dswin) if (x.L == &L) w = &x;
+            if (!w || w->hkv.empty()) die("deepseek41: a verify window kept no compressor rows");
+            for (int s = std::max(g0, p); s <= q; ++s) {
+                memcpy(&skv[(size_t) (s % r) * hd], &w->hkv[(size_t) (s - p) * hd], hd * sizeof(float));
+                memcpy(&ssc[(size_t) (s % r) * hd], &w->hsc[(size_t) (s - p) * hd], hd * sizeof(float));
+            }
+        }
+        tset(L.cst_kv, skv.data(), 0, skv.size() * sizeof(float));
+        tset(L.cst_sc, ssc.data(), 0, ssc.size() * sizeof(float));
     }
 }
 
@@ -7295,7 +7350,8 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                     Out ov;
                     ov.all = true;
                     ov.logits = !greedy;
-                    if (T > 1) save_state(e, e.saved);
+                    if (T > 1 && m.ds41) ds_window(e);   // (deepseek41: its own, smaller rollback)
+                    else if (T > 1) save_state(e, e.saved);
                     forward(e, W.data(), T, p, &ov);
                     std::vector<int32_t> nx;                 // the next token after each kept position: the greedy
                     int n = 0;                               // one, or sampled position by position
@@ -7310,7 +7366,8 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                         ++n;
                     }
                     accepted += n;
-                    if (n + 1 < T) {
+                    if (n + 1 < T && m.ds41) ds_rollback(e, p, n);
+                    else if (n + 1 < T) {
                         restore_state(e, e.saved);
                         forward(e, W.data(), n + 1, p);
                     }
@@ -7715,7 +7772,8 @@ int main(int argc, char ** argv) {
             Out ov;
             ov.all = true;
             ov.snap = false;             // snapshots in the window cost 19-30 ms (M4): the state is copied aside instead
-            if (T > 1) save_state(e, e.saved);   // and the window is run again up to the last accepted token if a draft fails
+            if (T > 1 && e.m.ds41) ds_window(e);           // (deepseek41: its own, smaller rollback)
+            else if (T > 1) save_state(e, e.saved);   // and the window is run again up to the last accepted token if a draft fails
             const double f0 = now_s();
             forward(e, W.data(), T, p, &ov);
             t_win[std::min(T, 5)] += now_s() - f0;
@@ -7726,7 +7784,8 @@ int main(int argc, char ** argv) {
             accepted += n;
             for (int j = 0; j <= n; ++j) out.push_back(ov.next[j]);
             const double r0 = now_s();
-            if (n + 1 < T) {                                  // a draft failed: the state as before the window, then the
+            if (n + 1 < T && e.m.ds41) ds_rollback(e, p, n);
+            else if (n + 1 < T) {                             // a draft failed: the state as before the window, then the
                 restore_state(e, e.saved);                    // accepted tokens again (their K/V are rewritten too)
                 forward(e, W.data(), n + 1, p);
                 ++redone;
