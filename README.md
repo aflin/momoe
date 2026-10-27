@@ -121,7 +121,7 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 | Gemma 4 26B-A4B | 92.4 (UD-IQ3_XXS) / 75.2 (UD-Q4_K_XL) | 59.3 (UD-Q4_K_XL) | - | 85.2 (UD-Q4_K_XL) | 28.8 (UD-IQ3_XXS) |
 | LFM2.5-24B-A2B | 75.9 (UD-Q4_K_XL) | 134.0 | 6.9 | 104.3 | 59.0 (11.9 as an 8 GB Mac) |
 | LFM2.5-8B-A1B UD-Q4_K_XL | 305.5 | 161.7 | 16.6 | 185.3 | 43.1 (as an 8 GB Mac) |
-| DeepSeek-V4.1-Flash IST-DAS 2.00 bpw | 3.8 (`strata-dsv41`) | 16.0 | - | 7.4 | - |
+| DeepSeek-V4.1-Flash IST-DAS 2.00 bpw | 3.8 (`strata-dsv41`) | 19.2 (DSpark) | - | 7.4 | - |
 | Flash-Next NVFP4 | Strata's own packs: a PC with an NVIDIA card only, not tested in MoMoE | | | | |
 
 - **Engines:** on the PC, Strata's engine runs the Flash-Next and Qwen3.6 families, and `momoe-cuda` runs the rest

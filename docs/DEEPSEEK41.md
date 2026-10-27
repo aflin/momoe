@@ -34,11 +34,12 @@ original model, upstream's measurement (4,995 positions): perplexity +15.5% at 2
 | --- | --- | ---: | ---: | ---: |
 | PC: RTX 4070 Ti 12 GB, 63 GB RAM, files on a SATA SSD RAID1 | `strata-dsv41`, 8K context | 3.8 tok/s | 81.7 tok/s | - |
 | M1 Ultra, 64 GB | `momoe-metal`, setup's config (28 GiB pool, 32K context) | 7.4 tok/s | 82.6 tok/s | 71.9 tok/s |
-| DGX Spark, 128 GB shared | `momoe-cuda`, setup's config (an 85 GiB pool, 32K context) | 16.0 tok/s | 255 tok/s | 238 tok/s |
+| DGX Spark, 128 GB shared | `momoe-cuda`, setup's config (a 77 GiB pool, 32K context, DSpark drafting) | 19.2 tok/s | 268 tok/s | 242 tok/s |
+| DGX Spark, without DSpark | `momoe-cuda`, an 85 GiB pool | 16.0 tok/s | 255 tok/s | 238 tok/s |
 
 The server's benchmark (`tools/strata_bench.py`), 2 or 3 runs each; the reports are in `bench/results/2026-10-2*-dsv41-*`.
 An agent session (turns of 2,800-3,000 new tokens) wrote 5.9 tok/s on the M1 Ultra, its turns starting after about
-90 s, and 14.4 tok/s on the Spark, after about 22 s. The first token of a short chat: 0.8 s on the Spark, 3.3 s on the
+90 s, and on the Spark 19.6 tok/s with DSpark (14.4 without), after about 22 s. The first token of a short chat: 0.8 s on the Spark, 3.3 s on the
 M1 Ultra, 13.4 s on the PC. The prompt speeds on the Spark varied between the two runs (4K: 144 and 366 tok/s).
 
 **Checked:** MoMoE's engine against `strata-dsv41` (the log-probabilities of 64 answer tokens, both fed the same
@@ -57,6 +58,22 @@ sparse attention picks differ on long prompts. The code prompt's greedy answer w
 chat, thinking on and off, tool calls (OpenAI and Anthropic) and streaming on both engines; a conversation continued
 from the cache after another one ran (1,352 of 1,406 tokens reused) answered exactly as the same prompt read fresh.
 
+## DSpark drafting
+
+DSpark is DeepSeek-V4.1's draft model (Unsloth's `dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf`, 8 GB): three small
+blocks that read the model's inner state at blocks 37-39 and propose the next 5 tokens at once; the model checks them
+in one pass and keeps the ones it would have written itself, so the answer is the model's. MoMoE's engine runs it
+after llama.cpp's graph (`--dspark FILE`; a draft is cut where its confidence head falls under 0.65,
+`--dspark-conf`). Setup turns it on on a GPU that shares the system's memory (the Spark) and leaves it off on a Mac,
+where its 7.5 GiB would come out of an already small pool (not measured there).
+
+On the Spark: chat 16.0 -> 19.2 tok/s and agent work 14.4 -> 19.6 (the server's benchmark); 1.9-4 tokens a check
+(code 4, thinking text 2), 85-90% of the drafts kept. Greedy answers were the same with and without it except at
+near ties (a long answer's choice between two phrasings, a word's ending), and matched `strata-dsv41`'s on the
+code and thinking prompts; a run with the drafter loaded but no draft kept was identical to one without it. A
+failed draft is not paid for with the whole state copied and the accepted tokens run again: only the compressor's
+unfinished group is put back (the first version did that and was slower than no drafting on two of three questions).
+
 ## Memory
 
 The pool is smaller than for other models of this size: besides the 5.7 GiB of other weights, the engine keeps a
@@ -71,7 +88,7 @@ same speed.
 
 ## Not in this version
 
-- Drafting with the DSpark model on MoMoE's engine (upstream's PC engine has it: `--dspark auto`).
+- DSpark on a Mac (built, not measured: see above).
 - Pictures.
 - AMD cards (upstream's engine supports the Radeon AI PRO R9700; MoMoE's setup offers NVIDIA only for now).
 - More than one card with upstream's engine (not tried here).
