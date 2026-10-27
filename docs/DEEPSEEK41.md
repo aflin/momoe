@@ -65,7 +65,7 @@ blocks that read the model's inner state at blocks 37-39 and propose the next 5 
 in one pass and keeps the ones it would have written itself, so the answer is the model's. MoMoE's engine runs it
 after llama.cpp's graph (`--dspark FILE`; a draft is cut where its confidence head falls under 0.65,
 `--dspark-conf`). Setup turns it on on a GPU that shares the system's memory (the Spark) and leaves it off on a Mac,
-where its 7.5 GiB would come out of an already small pool (not measured there).
+where its 7.5 GiB come out of an already small pool.
 
 On the Spark: chat 16.0 -> 19.2 tok/s and agent work 14.4 -> 19.6 (the server's benchmark); 1.9-4 tokens a check
 (code 4, thinking text 2), 85-90% of the drafts kept. Greedy answers were the same with and without it except at
@@ -73,6 +73,12 @@ near ties (a long answer's choice between two phrasings, a word's ending), and m
 code and thinking prompts; a run with the drafter loaded but no draft kept was identical to one without it. A
 failed draft is not paid for with the whole state copied and the accepted tokens run again: only the compressor's
 unfinished group is put back (the first version did that and was slower than no drafting on two of three questions).
+
+On the M1 Ultra (64 GB) the drafter takes the pool from 28 to 20 GiB (the GPU memory in all stays the same): chat
+7.4 -> 7.75 tok/s, agent work 5.9 -> 6.55, but prompts 4-5% slower (4K 82.6 -> 79.1, 16K 71.9 -> 69.6) and an agent
+turn's first token 90 -> 97 s; drafts kept as on the Spark (2-3.3 tokens a check). Too little for an 8 GB download:
+setup leaves it off there; add `--dspark FILE` and a pool 8 GiB smaller to the config to try it. A Mac with more
+memory, whose pool would not shrink as much, is not measured.
 
 ## Memory
 
@@ -88,7 +94,6 @@ same speed.
 
 ## Not in this version
 
-- DSpark on a Mac (built, not measured: see above).
 - Pictures.
 - AMD cards (upstream's engine supports the Radeon AI PRO R9700; MoMoE's setup offers NVIDIA only for now).
 - More than one card with upstream's engine (not tried here).
