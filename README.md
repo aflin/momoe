@@ -31,12 +31,13 @@ Any OpenAI- or Anthropic-compatible app can use the address `momoe status` shows
 ## What MoMoE is
 
 MoMoE began as a fork of **[Strata](https://github.com/Niko1221/Strata)**, by Niko1221 and the Strata contributors,
-and Strata is still its base. It has three engines:
+and Strata is still its base. It has four engines:
 
 | Engine | Runs on | Models |
 | --- | --- | --- |
 | **Strata's engine** (`momoe`) | Linux + NVIDIA | Qwen3.8-Flash-Next and its variants, the Qwen3.6 family |
-| **`momoe-cuda`** (MoMoE's own) | Linux + NVIDIA, the DGX Spark, a Jetson | every family below; on a PC: Nemotron 3.5 Bolt and Lightning, GLM-5.3-Flash, Ornith-1.5-122B, Ling-3.0-flash, Flint, Gemma 4, LFM2.5 |
+| **Strata's DeepSeek engine** (`strata-dsv41`) | Linux + NVIDIA | DeepSeek-V4.1-Flash on a PC ([docs/DEEPSEEK41.md](docs/DEEPSEEK41.md)) |
+| **`momoe-cuda`** (MoMoE's own) | Linux + NVIDIA, the DGX Spark, a Jetson | every family below (DeepSeek-V4.1-Flash on the Spark); on a PC: Nemotron 3.5 Bolt and Lightning, GLM-5.3-Flash, Ornith-1.5-122B, Ling-3.0-flash, Flint, Gemma 4, LFM2.5 |
 | **`momoe-metal`** (MoMoE's own) | Apple Silicon Macs | every family below |
 
 - **Strata's engine** is Strata's, with MoMoE's additions (the Qwen3.6 family's path began as
@@ -120,6 +121,7 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 | Gemma 4 26B-A4B | 92.4 (UD-IQ3_XXS) / 75.2 (UD-Q4_K_XL) | 59.3 (UD-Q4_K_XL) | - | 85.2 (UD-Q4_K_XL) | 28.8 (UD-IQ3_XXS) |
 | LFM2.5-24B-A2B | 75.9 (UD-Q4_K_XL) | 134.0 | 6.9 | 104.3 | 59.0 (11.9 as an 8 GB Mac) |
 | LFM2.5-8B-A1B UD-Q4_K_XL | 305.5 | 161.7 | 16.6 | 185.3 | 43.1 (as an 8 GB Mac) |
+| DeepSeek-V4.1-Flash IST-DAS 2.00 bpw | 3.8 (`strata-dsv41`) | 19.2 (DSpark) | - | 7.4 | - |
 | Flash-Next NVFP4 | Strata's own packs: a PC with an NVIDIA card only, not tested in MoMoE | | | | |
 
 - **Engines:** on the PC, Strata's engine runs the Flash-Next and Qwen3.6 families, and `momoe-cuda` runs the rest
@@ -134,6 +136,9 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
   does not hold, and prompts read at 1,189 / 1,494 tok/s (4K / 16K tokens). Its 54-56 GB file has to be in the RAM's
   file cache: the first answer after another large model ran is slow (9-12 tok/s) until it is again. On the M1 Ultra
   setup drafts with its MTP layer (without drafting 16.7 tok/s); the plain model there is not measured yet.
+- **DeepSeek-V4.1-Flash** (249 GB of files with its n-gram table): on a PC upstream Strata's DeepSeek engine, on the
+  Spark and a Mac MoMoE's; checked against each other, the measurements and the memory it needs:
+  [docs/DEEPSEEK41.md](docs/DEEPSEEK41.md).
 - **Details:** how each column was measured, drafting per model, and the engines' speed-ups:
   [design/benchmark-notes.md](design/benchmark-notes.md). The raw numbers are in [bench/results](bench/results).
 

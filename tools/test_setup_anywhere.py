@@ -8,6 +8,7 @@ expert pool sized to the model.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import sys
 import unittest
@@ -275,7 +276,10 @@ class MacDraft(unittest.TestCase):
     other weights: the expert pool is that much smaller.  The families with their own MTP layer fetch nothing."""
     KV = 0.75 * 2**30 / 32768                          # Flash-Next IQ3_XXS: 0.75 GiB at 32K
 
-    def run_setup(self, family, draft_ready, mem=32, weights=(40.0, 3.95), avail=24.0):
+    def run_setup(self, family, draft_ready, mem=32, weights=(40.0, 3.95), avail=24.0, draft_opt=None, answer=None,
+                  prior=None):
+        """draft_opt: --draft; answer: setup run in a terminal, this the answer to its drafting question (its question's
+        default and the lines said kept in self.asked, self.said); prior: an earlier config's "draft" """
         import tempfile
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -298,12 +302,30 @@ class MacDraft(unittest.TestCase):
         a = mock.Mock(gpu=None, gpus=None, family=family, model=None, context=None, host=None, api_key=None, check=False,
                       vision_tokens=None, gguf_dir=None,
                       config_name=None, no_start=True, yes=True, draft_vocab=None, models_dir=str(data / "models"),
-                      helper_tier=False, layer_split=None, backend=None, vision=None, kv=None)
+                      helper_tier=False, layer_split=None, backend=None, vision=None, kv=None, draft=draft_opt)
+        if answer is not None:
+            a.yes = False
+        self.asked, self.said = [], []
+        cfg_dir = data / "config"
+        if prior:
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            fam = setup.GGML_FAMILIES.get(family) or setup.FAMILIES[family]
+            q = setup.momoe_size(family, None, mem)
+            (cfg_dir / f"{(fam['tag'] + setup.size_of(q)).lower()}.json").write_text(json.dumps({"draft": prior}))
+        def ask(q, choices, default, yes):                 # (the drafting question answered; the others: the default)
+            if "drafting" not in q:
+                return default
+            self.asked.append(default)
+            return answer
         patches = [mock.patch.object(setup.sys, "platform", "darwin"), mock.patch.object(setup, "WIN", False),
+                   mock.patch.object(setup, "config_dir", return_value=cfg_dir),
+                   mock.patch.object(setup, "ask", side_effect=ask),
+                   mock.patch.object(setup.sys.stdin, "isatty", return_value=answer is not None),
                    mock.patch.object(setup.subprocess, "run", return_value=mock.Mock(stdout="Apple M4", returncode=0)),
                    mock.patch.object(setup.platform, "machine", return_value="arm64"),
                    mock.patch.object(setup, "mac_memory_gib", return_value=mem),
-                   mock.patch.object(setup, "say"), mock.patch.object(setup, "ok"), mock.patch.object(setup, "warn"),
+                   mock.patch.object(setup, "say", side_effect=lambda *x: self.said.append(" ".join(map(str, x)))),
+                   mock.patch.object(setup, "ok"), mock.patch.object(setup, "warn"),
                    mock.patch.object(setup, "step"), mock.patch.object(setup, "pip_install"),
                    mock.patch.object(setup, "run", side_effect=lambda cmd, **kw: ran.append(cmd) or fake_run(cmd)),
                    mock.patch.object(setup, "stamp_ggml_build"),          # the build is mocked: no stamp in this folder
@@ -364,6 +386,47 @@ class MacDraft(unittest.TestCase):
         args, _, _ = self.run_setup("ornith122", True, mem=32, weights=w, avail=23.0)
         self.assertIn("--pool-gib", args)
         self.assertNotIn("--mtp", args)
+
+    def test_draft_off_and_on(self):
+        # --draft off: no draft layer (nothing fetched), the family's own MTP block left out; on: kept where the rules
+        # would drop it (every expert fits without it; GLM's 9% pool)
+        args, ran, draft = self.run_setup("qwen", False, draft_opt="off")
+        self.assertNotIn("--mtp-gguf", args)
+        self.assertEqual(ran, [])
+        args, _, draft = self.run_setup("qwen", True, mem=64, weights=(39.97, 3.95), avail=57.0, draft_opt="on")
+        self.assertIn(str(draft), args)
+        args, _, _ = self.run_setup("glm53", True, mem=64, weights=(102.32, 9.77), avail=57.0, draft_opt="off")
+        self.assertNotIn("--mtp", args)
+        args, _, _ = self.run_setup("glm53", True, mem=32, weights=(102.32, 9.77), avail=23.0, draft_opt="on")
+        self.assertEqual(args[args.index("--mtp") + 1], "3")
+
+    def test_deepseek_on_a_mac(self):
+        # no DSpark by default; --draft on: the drafter (7.6 GiB) held beside the model, the pool that much smaller (setup's
+        # 64 GB config: 28 -> 20 GiB; measured on the M1 Ultra: chat 7.4 -> 7.75 tok/s)
+        with mock.patch.object(setup, "staging_gib", return_value=3.66):
+            w = (123.0, 5.74)
+            args, _, _ = self.run_setup("deepseek41", True, mem=64, weights=w, avail=57.0)
+            kv = self.KV * 32768 / 2**30                 # (this helper's KV cache: Flash-Next's)
+            self.assertNotIn("--dspark", args)
+            self.assertEqual(int(args[args.index("--pool-gib") + 1]), setup.mac_pool_gib(64, 123.0, 5.74 + 3.66, 57.0, kv) - 7)
+            args, _, _ = self.run_setup("deepseek41", True, mem=64, weights=w, avail=57.0, draft_opt="on")
+            self.assertTrue(args[args.index("--dspark") + 1].endswith(setup.DSV41_DSPARK))
+            self.assertEqual(int(args[args.index("--pool-gib") + 1]),
+                             setup.mac_pool_gib(64, 123.0, 5.74 + 3.66 + 7.6, 57.0, kv) - 7)
+
+    def test_asked_with_what_the_memory_holds(self):
+        # in a terminal: the question, its default the rules' choice (GLM on 32 GB: a 9% pool, so no), the answer kept
+        args, _, _ = self.run_setup("glm53", True, mem=32, weights=(102.32, 9.77), avail=23.0, answer="y")
+        self.assertEqual(self.asked, ["n"])
+        self.assertIn("--mtp", args)
+        said = " ".join(self.said)
+        self.assertIn("102 GiB of experts", said)
+        self.assertIn("this Mac has 32 GB", said)
+        # an earlier setup run's choice: the question's default, and with --yes the choice
+        self.run_setup("glm53", True, mem=32, weights=(102.32, 9.77), avail=23.0, answer="n", prior="on")
+        self.assertEqual(self.asked, ["y"])
+        args, _, _ = self.run_setup("glm53", True, mem=32, weights=(102.32, 9.77), avail=23.0, prior="on")
+        self.assertIn("--mtp", args)
 
     def test_glm_drafts_only_from_a_big_enough_pool(self):
         # GLM-5.3-Flash on the M4 Air (a 9 GiB pool, 9% of its experts): 1.4 tok/s without drafting, 1.0-1.1 with; on

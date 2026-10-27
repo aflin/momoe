@@ -53,6 +53,8 @@ build-vision-cuda12.bat
 # setup.py outputs (engine, downloads) and release builds
 /engine/
 /engine-cuda12/
+/engine-dsv41/
+/build-dsv41.bat
 /build-release*/
 /dist/
 *.done
