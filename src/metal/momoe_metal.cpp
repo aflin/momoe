@@ -5602,6 +5602,10 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
         if (e.ds.on) {                                       // the drafter's rings at these positions (graph_dsv41's
             ggml_tensor * f = feats[0];                      // embd batch): fc, enc_norm, each block's KV row, rotated
             for (size_t j = 1; j < feats.size(); ++j) f = ggml_concat(c, f, feats[j], 0);
+            // each token's features RMS-normed first: the same after enc_norm (a token's scale cancels), and on Metal
+            // a batch above 16 tokens multiplies in half precision, where the residual streams' largest values
+            // overflowed (the drafter's rings NaN, no draft ever kept)
+            f = ggml_rms_norm(c, f, m.rms_eps);
             ggml_tensor * xe = norm(c, ggml_mul_mat(c, e.ds.fc, f), e.ds.enc_norm, m.rms_eps);
             ggml_tensor * pos = ggml_view_1d(c, in.pos, T, 0);
             for (Layer & D : e.ds.layers) {
@@ -5877,6 +5881,12 @@ static std::vector<int32_t> ds_draft(Engine & e, int32_t tok, int p0) {
     for (int i = 0; i < B; ++i) {
         ggml_backend_tensor_get(D.best[i], &best[i], 0, sizeof(int32_t));
         ggml_backend_tensor_get(D.cf[i], &cf[i], 0, sizeof(float));
+    }
+    static const bool dbg = getenv("MOMOE_DSPARK_DEBUG") != nullptr;
+    if (dbg) {                                               // (each draft's tokens and confidences)
+        fprintf(stderr, "dspark p0 %d tok %d:", p0, tok);
+        for (int i = 0; i < B; ++i) fprintf(stderr, " %d(%.2f)", best[i], cf[i]);
+        fprintf(stderr, "\n");
     }
     std::vector<int32_t> out;
     for (int i = 0; i < B && cf[i] >= D.conf_min; ++i) out.push_back(best[i]);
