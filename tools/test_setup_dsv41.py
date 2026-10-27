@@ -131,7 +131,7 @@ class MacFamily(unittest.TestCase):
             self.assertEqual([p[0] for p in parts], FAM["models"][m]["shards"])
             self.assertEqual([(p[1], p[2]) for p in parts], [FAM["sha256"][n] for n in FAM["models"][m]["shards"]])
         self.assertEqual(self.G["extra"], [(setup.DSV41_ISTA_ENGRAM, "deepseek-v4.1-flash-shared", "--engram")])
-        self.assertEqual(self.G["uma_extra"], [(setup.DSV41_DSPARK, "deepseek-v4.1-flash-shared", "--dspark")])
+        self.assertEqual(self.G["drafter"][:3], (setup.DSV41_DSPARK, "deepseek-v4.1-flash-shared", "--dspark"))
         self.assertIn("unsloth/DeepSeek-V4.1-Flash-1017-GGUF", setup.dsv41_hf(setup.DSV41_DSPARK))   # (Unsloth's repo)
         self.assertEqual(self.G["arch"], "deepseek41")
         self.assertIn("deepseek41", setup.MOMOE_MENU)

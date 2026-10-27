@@ -7091,6 +7091,90 @@ def momoe_vision(a, family: str, fam: dict, folder: Path, model: Path, cuda: tup
     return v
 
 
+def drafter_of(fam: dict, family: str, mac: bool, own_mtp: bool):
+    """What a model drafts with on Momoe's ggml engine here, and the GiB it holds beside the model: (what, GiB), or None."""
+    if own_mtp:
+        return "its own MTP layer (in the model file)", 0.0
+    if mac and family in FAMILIES:
+        return "a draft layer made from the original Qwen checkpoint's MTP tensors (a ~5 GB download, 0.9 GB)", 0.9
+    if fam.get("drafter"):
+        return f"the DSpark drafter (an {DSV41_ALL_FILES[fam['drafter'][0]][0] / 1e9:.0f} GB download)", fam["drafter"][3]
+    if fam.get("draft_args") or "--mtp" in list(fam.get("engine_args", [])) + list(fam.get("mac_args", []) if mac else []):
+        return "its own MTP block (in the model file)", 0.0
+    return None
+
+
+def draft_choice(a, fam: dict, family: str, mac: bool, unified: bool, gpu, ram: float, paths: list, own_mtp: bool,
+                 tag: str):
+    """Drafting on (True) or off (False) as chosen: --draft, else asked (setup in a terminal, a model with a drafter) with
+    what this machine's memory holds of the model with and without the drafter, else an earlier config's choice; None:
+    setup's measured rules decide (as before the option)."""
+    has = drafter_of(fam, family, mac, own_mtp)
+    asked = getattr(a, "draft", None)
+    if asked in ("on", "off"):
+        if not has:
+            warn(f"--draft {asked}: {fam['title']} has no draft layer on this machine: not used")
+            return None
+        return asked == "on"
+    if not has:
+        return None
+    prior = None                                       # a choice made in an earlier setup run of this model
+    name = getattr(a, "config_name", None)
+    for p in (config_path_for(name, tag) if isinstance(name, str) and name else None, config_dir() / f"{tag.lower()}.json"):
+        if p and p.exists():
+            try:
+                prior = json.loads(p.read_text(encoding="utf-8-sig")).get("draft")
+            except (OSError, ValueError):
+                prior = None
+            break
+    if getattr(a, "yes", False) or not sys.stdin.isatty():
+        return None if prior not in ("on", "off") else prior == "on"
+    what, dgib = has
+    experts, rest = weights_gib(paths)
+    if family == "deepseek41":
+        rest += staging_gib(paths)
+    if mac:                                            # what the pool holds without and with the drafter (as below)
+        def held(extra):
+            pool = mac_pool_gib(ram, experts, rest + extra)
+            if pool is not None and fam.get("mac_margin_gib"):
+                pool = max(3, pool - fam["mac_margin_gib"])
+            return experts if pool is None else min(experts, pool)
+        room = f"this Mac has {ram:.0f} GB, about {MAC_GPU_SHARE * ram:.0f} GiB of it usable by the GPU"
+    elif unified:
+        def held(extra):
+            return max(0.0, min(experts, ram - fam.get("uma_reserve_gib", 10) - rest - extra))
+        room = f"this machine has {ram:.0f} GB shared by the CPU and GPU"
+    else:
+        def held(extra):
+            return max(0.0, min(experts, gpu["vram_gb"] - rest - 2.0 - extra))
+        room = f"the card has {gpu['vram_gb']:.0f} GB (the experts it cannot hold come from {ram:.0f} GB of RAM and the SSD)"
+    h0, h1 = held(0.0), held(dgib)
+    # setup's measured rules: what it would choose without asking (see where use_draft is None below)
+    if own_mtp:
+        suggest = True
+    elif fam.get("drafter"):
+        suggest = unified and not mac
+    elif mac and family in FAMILIES:
+        suggest = h0 < experts
+    elif fam.get("draft_args"):
+        suggest = (unified and not mac) or (mac and h1 >= 0.9 * experts)
+    else:
+        suggest = not (mac and h0 < 0.15 * experts)
+    if prior in ("on", "off"):
+        suggest = prior == "on"
+    say()
+    say(f"  Drafting: {fam['title']} can use {what}. It proposes several tokens a step and the model keeps the ones it")
+    say("  would have written itself, so the answer is the same; it pays when most of the experts are in memory, and from")
+    say("  the SSD it can be slower.")
+    say(f"  The model: {experts:.0f} GiB of experts and {rest:.1f} GiB of other weights; {room}.")
+    say(f"  Without drafting it holds {h0:.0f} GiB of the experts ({100 * h0 / experts:.0f}%)" +
+        (f", with the drafter's {dgib:.1f} GiB {h1:.0f} GiB ({100 * h1 / experts:.0f}%)." if dgib else ", the same with it."))
+    if family == "deepseek41":
+        say("  Measured: on the DGX Spark (77 GiB of experts with it) chat 16.0 -> 19.2 tok/s; on a 64 GB Mac (20 GiB) "
+            "+5-11% writing, 4-5% slower prompts.")
+    return ask("  Use drafting? (y / n)", ["y", "n"], "y" if suggest else "n", False) == "y"
+
+
 def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     """A model on Momoe's ggml engine: momoe-metal on an Apple Silicon Mac, momoe-cuda on Linux with an NVIDIA card.
     Every GGUF family: the ggml families (Bolt, GLM-5.3-Flash, LFM2.5) everywhere, the Qwen families on a Mac and on a
@@ -7247,11 +7331,9 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
             verify_sha256(f, size, sha)
     check_shards(paths)
     ok("model file present" if len(paths) == 1 else f"model files present ({len(paths)})")
-    extras = []                                        # files beside the model's (DeepSeek's Engram table): in their own
-    extra_files = list(fam.get("extra", ())) + (list(fam.get("uma_extra", ())) if unified and not mac else [])
-    for name, sub, flag in extra_files:                # folder, shared by the family's sizes; --gguf-dir: yours, beside
-        size, sha = DSV41_ALL_FILES[name]              # the shards or one folder up
-        f = Path(a.models_dir) / sub / name
+    def fetch_extra(name, sub):                        # a file beside the model's (DeepSeek's Engram table, its drafter):
+        size, sha = DSV41_ALL_FILES[name]              # in its own folder, shared by the family's sizes; --gguf-dir:
+        f = Path(a.models_dir) / sub / name            # yours, beside the shards or one folder up
         if own:
             mine = [d / name for d in (folder, folder.parent, folder.parent / sub) if (d / name).exists()]
             if not mine and not f.exists():
@@ -7261,7 +7343,9 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
             download((dsv41_hf(name) if name in DSV41_ALL_FILES else fam["hf"]) + name, f, pin=(size, sha))
         verify_sha256(f, size, sha, own=bool(own) and f.parent != Path(a.models_dir) / sub)
         ok(f"{name}: {f.parent}")
-        extras.append((f, flag))
+        return f
+
+    extras = [(fetch_extra(name, sub), flag) for name, sub, flag in fam.get("extra", ())]
 
     step(4, "the tokenizer")
     pack = data / "packs" / tag.lower()
@@ -7273,8 +7357,13 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     if vision is None and getattr(a, "vision_tokens", None) is not None:
         warn("--vision-tokens: images are off for this model, so it is not used")
 
+    use_draft = draft_choice(a, fam, family, mac, unified, gpu, ram, paths, own_mtp, tag)   # None: the rules below
+    drafter_gib = 0.0                                  # (DeepSeek: its DSpark drafter, held beside the model)
+    if fam.get("drafter") and (use_draft if use_draft is not None else unified and not mac):
+        name, sub, flag, drafter_gib = fam["drafter"]
+        extras.append((fetch_extra(name, sub), flag))
     draft = None
-    if mac and family in FAMILIES and not own_mtp:
+    if mac and family in FAMILIES and not own_mtp and use_draft is not False:
         # the Flash-Next families' files have no MTP layer: Strata's own draft layer, as its setup makes it on a PC
         # (the ~5 GB of MTP tensors from the original Qwen checkpoint, checked, the experts packed Q2_0: 0.9 GB).
         # Measured on an M4 Air (32 GB, IQ3_XXS, --mtp 3): 8.7-8.8 tok/s against 7.6 without; Q4_0 (1.6 GB): 7.6, its
@@ -7302,8 +7391,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     pool, ctx = None, a.context or fam.get("context") or 32768
     if mac:
         w, kvt, avail = weights_gib(paths), kv_bytes_per_token(paths), mac_available_gib()
-        w = (w[0], w[1] + kv_ring_gib(paths))          # (flint's sliding-window rings: held with the other weights)
-        if family == "deepseek41":                     # its prompt's staging copy (one layer's 384 experts, 3.7 GiB at
+        w = (w[0], w[1] + kv_ring_gib(paths) + drafter_gib)   # (flint's sliding-window rings, DeepSeek's drafter: held
+        if family == "deepseek41":                     # with the other weights)                     # its prompt's staging copy (one layer's 384 experts, 3.7 GiB at
             w = (w[0], w[1] + staging_gib(paths))      # 2.00 bpw) with them: on a 64 GB Mac a pool that left it out
                                                        # froze the machine (46 GiB of Metal memory, 2026-10-26)
         if vision and vision.get("gpu"):                # the image encoder on the GPU: held beside them too.  Measured on
@@ -7318,7 +7407,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
             pool, ctx = mac_pool_gib(ram, *w, avail, kvt * c / 2**30, draft_gib), c
             if pool is not None and fam.get("mac_margin_gib"):
                 pool = max(3, pool - fam["mac_margin_gib"])
-            if draft and pool is not None and mac_pool_gib(ram, *w, avail, kvt * c / 2**30) is None:
+            if draft and pool is not None and mac_pool_gib(ram, *w, avail, kvt * c / 2**30) is None and use_draft is None:
                 # every expert fits only without the draft layer: faster so (the M1 Ultra, Flash-Next IQ3_XXS: 29.7
                 # tok/s, its server 29.2, against 24.3 / 19.4 drafting from a 37 GiB pool)
                 draft, draft_gib, pool = None, 0.0, None
@@ -7338,17 +7427,21 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     else:
         args += ["--chunk", str(fam.get("chunk", 1024))]
         ok(f"{ctx // 1024}K context")
-    if own_mtp:                                          # the 35B-A3B families draft with the file's own MTP layer
+    if own_mtp and use_draft is not False:               # the 35B-A3B families draft with the file's own MTP layer
         args += ["--mtp", "4", "--draft-vocab", str(ROOT / "data" / DRAFT_VOCABS[a.draft_vocab or "en"])]
     if draft:                                            # (--mtp 2 measured the same as 3 on the M4 Air)
         args += ["--mtp", "3", "--mtp-gguf", str(draft)]
-    if fam.get("draft_args") and (unified and not mac or mac and (pool is None or pool >= 0.9 * w[0])):
+    if fam.get("draft_args") and (use_draft if use_draft is not None else
+                                  unified and not mac or mac and (pool is None or pool >= 0.9 * w[0])):
         # drafting pays only where (nearly) every expert is in memory (Ornith-122B, --mtp 3, 300 tokens: the Spark 26.4
         # -> 33.2 tok/s, the M1 Ultra with a 36 of 38.8 GiB pool 16.4 -> 19.8); from the SSD (the M4 Air, 11 GiB) or
         # with the CPU computing the experts (a 12 GB card) it is slower: 4.1-4.5 -> 4.0, 19.1 -> 12.5
         args += fam["draft_args"]
     eargs = list(fam.get("engine_args", [])) + (list(fam.get("mac_args", [])) if mac else [])
-    if mac and pool is not None and "--mtp" in eargs and pool < 0.15 * w[0]:
+    if use_draft is False and "--mtp" in eargs:          # --draft off (or the answer): the family's own drafting left out
+        i = eargs.index("--mtp")
+        del eargs[i:i + 2]
+    if mac and pool is not None and "--mtp" in eargs and pool < 0.15 * w[0] and use_draft is None:
         # a family's own drafting from a pool this small: every failed draft reads more from the SSD (GLM-5.3-Flash on
         # the M4 Air, a 9% pool: 1.4 tok/s without, 1.0-1.1 with --mtp 3 (and with the 9 GiB pool, Metal out of memory)
         i = eargs.index("--mtp")
@@ -7363,6 +7456,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
            "port": port, "setup_tag": tag, "fit_max_tokens": True}   # (the model card's sampling: write_setup_config)
     if fam.get("arch"):                                # (DeepSeek: the server's family - its tool calls, end token, effort)
         cfg["arch"] = fam["arch"]
+    if use_draft is not None:                          # an explicit choice: kept for later setup runs (draft_choice)
+        cfg["draft"] = "on" if use_draft else "off"
     if fam.get("engine_ready_s"):                      # a model read from 150+ GB of files: its start may take long
         cfg["engine_ready_s"] = fam["engine_ready_s"]
     if unified and not mac and fam.get("uma_reserve_gib"):   # more memory kept from the pool for the rest of the system
@@ -7861,8 +7956,9 @@ GGML_FAMILIES["deepseek41"] = {
     "parts": {m: [(n, *DSV41_ISTA_FILES[n]) for n in MULTI_FILE_FAMILIES["deepseek41"]["models"][m]["shards"]]
               for m in ("IST-DAS-2.00bpw", "IST-DAS-2.25bpw", "IST-DAS-1.75bpw")},
     "extra": [(DSV41_ISTA_ENGRAM, "deepseek-v4.1-flash-shared", "--engram")],   # (the file, its folder, its flag)
-    # on a GPU that shares the system's memory also the DSpark drafter (8 GB): measured on the Spark, see uma_extra's use
-    "uma_extra": [(DSV41_DSPARK, "deepseek-v4.1-flash-shared", "--dspark")],
+    # its DSpark drafter (8 GB; 7.6 GiB in memory): on by default on a GPU that shares the system's memory (the Spark:
+    # chat 16.0 -> 19.2 tok/s), off on a Mac (the 64 GB M1 Ultra: +5-11% writing, -4-5% prompts); --draft / asked
+    "drafter": (DSV41_DSPARK, "deepseek-v4.1-flash-shared", "--dspark", 7.6),
     "models": {"IST-DAS-2.00bpw": {"about": "2.00 bpw, 138 GB + the 111 GB n-gram table; measured on a 64 GB Mac",
                                    "ram_gb": 64},
                "IST-DAS-2.25bpw": {"about": "2.25 bpw, 155 GB + the n-gram table; better quality, not measured here",
@@ -8242,6 +8338,10 @@ def main() -> int:
                     help="NVIDIA: the CUDA toolkit of this model's engine. auto (default): CUDA 13; CUDA 12 (experimental) when a chosen card is older than CUDA 13 supports (Pascal, "
                          "Volta). 12 also runs with an older driver (Windows 528+, Linux 525+). docs/OLDER_GPUS.md")
     ap.add_argument("--check", action="store_true", help="only check this PC and exit")
+    ap.add_argument("--draft", choices=["on", "off"],
+                    help="drafting (Momoe's ggml engine): a draft layer proposes several tokens a step and the model keeps "
+                         "the ones it would have written (the answer stays the model's). Without this setup decides by "
+                         "what was measured, or asks; on / off: as you choose, kept in the config for later setup runs")
     ap.add_argument("--draft-vocab", choices=list(DRAFT_VOCABS),
                     help="the draft layer's tokens: cjk = with Chinese, Japanese and Korean (default), en = English "
                          "and code only (~110 MiB less VRAM, English answers 1-2%% faster), cyrillic = English, code "
@@ -8635,6 +8735,9 @@ def main() -> int:
             return momoe_setup(a, data, port, extra[pick - len(fams) - 1])
         family = fams[pick - 1]
     fam = FAMILIES[family]
+    if getattr(a, "draft", None):                      # (Strata's engine drafts with its MTP layer as its pack is made)
+        warn(f"--draft {a.draft}: {fam['title']} runs on Strata's engine here, which always drafts; --draft is for "
+             "Momoe's ggml engine (a Mac, the DGX Spark, the other families)")
     if fam.get("ready") and hip:
         # not a risk the user could take: the HIP engine has no NVFP4 expert kernels at all, so it would not start
         fail(f"{fam['title']} runs on NVIDIA cards only: the AMD engine has no NVFP4 kernels",
