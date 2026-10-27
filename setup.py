@@ -7167,7 +7167,7 @@ def draft_choice(a, fam: dict, family: str, mac: bool, unified: bool, gpu, ram: 
     say("  would have written itself, so the answer is the same; it pays when most of the experts are in memory, and from")
     say("  the SSD it can be slower.")
     say(f"  The model: {experts:.0f} GiB of experts and {rest:.1f} GiB of other weights; {room}.")
-    say(f"  Without drafting it holds {h0:.0f} GiB of the experts ({100 * h0 / experts:.0f}%)" +
+    say(f"  Without drafting its memory holds about {h0:.0f} GiB of the experts ({100 * h0 / experts:.0f}%)" +
         (f", with the drafter's {dgib:.1f} GiB {h1:.0f} GiB ({100 * h1 / experts:.0f}%)." if dgib else ", the same with it."))
     if family == "deepseek41":
         say("  Measured: on the DGX Spark (77 GiB of experts with it) chat 16.0 -> 19.2 tok/s; on a 64 GB Mac (20 GiB) "
