@@ -7364,6 +7364,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         cfg["arch"] = fam["arch"]
     if fam.get("engine_ready_s"):                      # a model read from 150+ GB of files: its start may take long
         cfg["engine_ready_s"] = fam["engine_ready_s"]
+    if unified and not mac and fam.get("uma_reserve_gib"):   # more memory kept from the pool for the rest of the system
+        cfg["env"] = {"MOMOE_UMA_RESERVE_GIB": str(fam["uma_reserve_gib"])}
     if vision:
         cfg["args"].append("--vision")
         cfg["vision"] = vision
@@ -7869,6 +7871,9 @@ GGML_FAMILIES["deepseek41"] = {
     # a Mac's pool this much smaller than mac_pool_gib's: on the 64 GB M1 Ultra a 36 GiB pool (46 GiB of Metal memory with
     # the staging copy) froze the machine, while 28 and 32 GiB wrote at 8.7 and 8.9 tok/s (2026-10-26): 28 there
     "mac_margin_gib": 7,
+    # the DGX Spark: with the engine's 10 GiB kept (a 95 GiB pool) the memory available fell to 8 GB while it wrote; with
+    # 20 (85 GiB) to 17-18 GB, at the same speed (12.2 tok/s, 2026-10-27)
+    "uma_reserve_gib": 20,
     "license": "DeepSeek's model license: https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF",
 }
 

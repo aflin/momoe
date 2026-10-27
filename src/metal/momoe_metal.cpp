@@ -744,6 +744,7 @@ struct Engine {
     double t_cpu_wait = 0;
     bool load_mtp = false;                                   // --mtp K: draft K tokens with the MTP layer
     bool preloaded = false;                                  // every expert in its own slot (preload)
+    bool pool_asked = false;                                 // --pool-gib or --slots given (fit_pool_metal's margin)
     std::vector<ggml_backend_t> sched_backends;              // e.sched's (a reused graph's own scheduler)
     std::string draft_vocab;                                 // --draft-vocab: the draft head's token subset
     std::string mtp_gguf;                                    // --mtp-gguf: qwen4exp's MTP layer (not in its GGUFs)
@@ -6096,8 +6097,10 @@ static void fit_pool_metal(Engine & e) {
     e.reserve_only = true;
     forward(e, toks.data(), T, e.n_ctx - T);
     e.reserve_only = false;
+    // the margin left free: 3% when a pool was asked for (setup's configs, measured with it); without one, 15% - a pool
+    // fitted to 3% of the 64 GB M1 Ultra's 48 GiB working set (46.6 GiB in all, DeepSeek-V4.1) froze the machine
     const double margin = getenv("MOMOE_METAL_MARGIN_MIB") ? atof(getenv("MOMOE_METAL_MARGIN_MIB")) * 1048576.0
-                                                           : std::max(512.0 * 1048576.0, 0.03 * (double) tot);
+                                                           : std::max(512.0 * 1048576.0, (e.pool_asked ? 0.03 : 0.15) * (double) tot);
 #if !defined(MOMOE_CUDA)
     const double used = (double) ggml_backend_metal_allocated(e.metal);
 #else
@@ -6866,6 +6869,9 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
             }
         }
         out_line("RESUME %d", reused);
+        // the n-gram models' token history (Flash-Next's PLE, DeepSeek's Engram) is the prompt's own up to `reused`: a
+        // conversation put back from the cache left the history of the one that ran in between
+        e.tok_at.assign(ptoks.begin(), ptoks.begin() + reused);
         // the prompt
         const bool greedy = sp.temp <= 0;
         const bool draft = mtp_k > 0;                       // sampled: a draft is kept when it is the token sampled
@@ -7136,6 +7142,7 @@ int main(int argc, char ** argv) {
     if (e.helper && e.m.nemo) e.hybrid = false;
     if (mtp_k > 0 && e.m.nemo) die("--mtp: not yet for Nemotron models");
     if (!kHostMem && pool_gib <= 0 && slots <= 0) fit_pool(e);
+    e.pool_asked = pool_gib > 0 || slots > 0;
     if (kHostMem) fit_pool_metal(e);
     if (e.helper && kHostMem) die("--helper-tier: NVIDIA cards only");
     if (e.helper && e.pool.n_slots + (int) e.pool.g.size() >= e.m.n_exp_all) {
