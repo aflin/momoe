@@ -1,0 +1,9 @@
+# quant_quality.py pcompare (prompt path, int8 K/V), Flash-Next IQ3_XXS, RTX 4070 Ti
+reference: /tmp/claude-1000/-usr3-local-src-Strata/0b446e8f-0de0-4650-b892-6f030f7bd444/scratchpad/kl/pfn-i8-imma0
+pfn-i8-imma1                             prompts  20  top-1 100.00%  KL mean 0.01359  median 0.00056  max 0.11096
+reference: /tmp/claude-1000/-usr3-local-src-Strata/0b446e8f-0de0-4650-b892-6f030f7bd444/scratchpad/kl/pfn-i8-imma0
+pfn-i8-v1                                prompts  20  top-1  90.00%  KL mean 0.01022  median 0.00035  max 0.06550
+reference: /tmp/claude-1000/-usr3-local-src-Strata/0b446e8f-0de0-4650-b892-6f030f7bd444/scratchpad/kl/pfn-i8-imma0
+pfn-i8-imma0b                            prompts  20  top-1 100.00%  KL mean 0.00000  median 0.00000  max 0.00000
+reference: /tmp/claude-1000/-usr3-local-src-Strata/0b446e8f-0de0-4650-b892-6f030f7bd444/scratchpad/kl/pfn-new
+pfn-i8-imma0                             prompts  20  top-1  90.00%  KL mean 0.02674  median 0.00027  max 0.38444

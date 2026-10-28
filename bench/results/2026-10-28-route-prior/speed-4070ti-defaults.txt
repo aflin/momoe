@@ -1,0 +1,51 @@
+round 0 NEW: ready in 57 s
+  chat0  decode 69.0 tok/s  prompt 63.3 tok/s (34)  n 256
+  chat1  decode 64.8 tok/s  prompt 60.2 tok/s (27)  n 235
+  chat2  decode 62.9 tok/s  prompt 58.4 tok/s (29)  n 199
+  long   decode 57.3 tok/s  prompt 1589.1 tok/s (6345)  n 123
+round 0 IMMA0: ready in 57 s
+  chat0  decode 68.7 tok/s  prompt 66.6 tok/s (34)  n 256
+  chat1  decode 63.7 tok/s  prompt 59.7 tok/s (27)  n 235
+  chat2  decode 61.7 tok/s  prompt 57.7 tok/s (29)  n 199
+  long   decode 64.4 tok/s  prompt 1586.8 tok/s (6345)  n 153
+round 0 IL0: ready in 57 s
+  chat0  decode 69.5 tok/s  prompt 66.5 tok/s (34)  n 256
+  chat1  decode 64.6 tok/s  prompt 61.3 tok/s (27)  n 235
+  chat2  decode 62.5 tok/s  prompt 58.3 tok/s (29)  n 199
+  long   decode 57.0 tok/s  prompt 1593.7 tok/s (6345)  n 123
+round 1 IL0: ready in 57 s
+  chat0  decode 69.2 tok/s  prompt 67.2 tok/s (34)  n 256
+  chat1  decode 63.8 tok/s  prompt 61.9 tok/s (27)  n 235
+  chat2  decode 62.4 tok/s  prompt 57.3 tok/s (29)  n 199
+  long   decode 57.6 tok/s  prompt 1592.5 tok/s (6345)  n 123
+round 1 IMMA0: ready in 54 s
+  chat0  decode 69.0 tok/s  prompt 66.6 tok/s (34)  n 256
+  chat1  decode 63.8 tok/s  prompt 59.0 tok/s (27)  n 235
+  chat2  decode 61.6 tok/s  prompt 58.8 tok/s (29)  n 199
+  long   decode 63.0 tok/s  prompt 1583.2 tok/s (6345)  n 153
+round 1 NEW: ready in 57 s
+  chat0  decode 69.5 tok/s  prompt 68.5 tok/s (34)  n 256
+  chat1  decode 63.7 tok/s  prompt 60.6 tok/s (27)  n 235
+  chat2  decode 61.6 tok/s  prompt 59.5 tok/s (29)  n 199
+  long   decode 57.2 tok/s  prompt 1603.3 tok/s (6345)  n 123
+round 2 NEW: ready in 55 s
+  chat0  decode 68.7 tok/s  prompt 66.3 tok/s (34)  n 256
+  chat1  decode 63.8 tok/s  prompt 59.1 tok/s (27)  n 235
+  chat2  decode 61.6 tok/s  prompt 52.3 tok/s (29)  n 199
+  long   decode 57.5 tok/s  prompt 1583.6 tok/s (6345)  n 123
+round 2 IMMA0: ready in 57 s
+  chat0  decode 69.0 tok/s  prompt 64.9 tok/s (34)  n 256
+  chat1  decode 63.6 tok/s  prompt 57.7 tok/s (27)  n 235
+  chat2  decode 62.3 tok/s  prompt 56.3 tok/s (29)  n 199
+  long   decode 63.4 tok/s  prompt 1581.0 tok/s (6345)  n 153
+round 2 IL0: ready in 57 s
+  chat0  decode 68.8 tok/s  prompt 66.1 tok/s (34)  n 256
+  chat1  decode 63.8 tok/s  prompt 57.8 tok/s (27)  n 235
+  chat2  decode 61.4 tok/s  prompt 57.1 tok/s (29)  n 199
+  long   decode 56.8 tok/s  prompt 1595.3 tok/s (6345)  n 123
+
+medians over rounds:
+  chat0  | NEW: decode   69.0  prompt    66.3 | IMMA0: decode   69.0  prompt    66.6 | IL0: decode   69.2  prompt    66.5
+  chat1  | NEW: decode   63.8  prompt    60.2 | IMMA0: decode   63.7  prompt    59.0 | IL0: decode   63.8  prompt    61.3
+  chat2  | NEW: decode   61.6  prompt    58.4 | IMMA0: decode   61.7  prompt    57.7 | IL0: decode   62.4  prompt    57.3
+  long   | NEW: decode   57.3  prompt  1589.1 | IMMA0: decode   63.4  prompt  1583.2 | IL0: decode   57.0  prompt  1593.7

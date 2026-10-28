@@ -73,3 +73,6 @@ build-vision-cuda12.bat
 /*.json
 # local Windows HIP packaging output
 dist-hip/
+
+# tools/task_check.py datasets (downloaded, see its docstring)
+data/task_check/

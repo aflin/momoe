@@ -39,6 +39,22 @@ class Files(unittest.TestCase):
         self.assertTrue(setup.dsv41_hf(setup.DSV41_DSPARK).endswith(setup.HF_REVISIONS[setup.DSV41_REPO] + "/"))
         self.assertTrue(setup.dsv41_hf(setup.DSV41_SHARD.format(i=1)).endswith("/UD-Q8_K_XL/"))
 
+    def test_newer_shard1(self):
+        # shard 1 after ISTA's 2026-10-26 chat template update: its own size and hash, from files of yours only
+        for n, (size, sha) in setup.DSV41_NEW_SHARD1.items():
+            self.assertIn(n, setup.DSV41_ISTA_FILES)
+            self.assertNotEqual(setup.DSV41_ISTA_FILES[n][0], size)
+            self.assertNotEqual(setup.DSV41_ISTA_FILES[n][1], sha)
+        n = "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf"
+        pin, new = setup.DSV41_ISTA_FILES[n], setup.DSV41_NEW_SHARD1[n]
+        f = mock.Mock(is_file=lambda: True, stat=lambda: mock.Mock(st_size=new[0]))
+        f.name = n
+        with mock.patch.object(setup, "ok"):
+            self.assertEqual(setup.dsv41_pin(f, *pin, "/mine"), new)
+            self.assertEqual(setup.dsv41_pin(f, *pin, None), pin)         # downloaded: the pinned revision only
+        f.stat = lambda: mock.Mock(st_size=pin[0])
+        self.assertEqual(setup.dsv41_pin(f, *pin, "/mine"), pin)          # the older shard 1 of yours
+
     def test_choices(self):
         for m in FAM["models"]:
             self.assertIn(m, setup.model_choices())

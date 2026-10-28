@@ -4040,6 +4040,8 @@ class Service:
             ("strata:requests_total", "counter", "Requests finished", t["requests"]),
             ("strata:drafts_offered_total", "counter", "Speculative draft tokens offered", t["drafts_offered"]),
             ("strata:drafts_accepted_total", "counter", "Speculative draft tokens accepted", t["drafts_accepted"]),
+            ("strata:tool_calls_unread_total", "counter", "<tool_call> blocks returned as text (an undeclared name or a form the template does not use)",
+             t.get("tool_calls_unread", 0)),
             ("strata:model_loaded", "gauge", "1 while the model is loaded", int(self.loaded())),
         ]
         return "".join(f"# HELP {name} {help_}\n# TYPE {name} {kind}\n{name} {value}\n"
@@ -4951,11 +4953,17 @@ class Service:
             self.totals["tool_calls_from_reasoning"] = self.totals.get("tool_calls_from_reasoning", 0) + parser.rescued
             print(f"[momoe] tool calls inside the thinking: {parser.rescued} read as calls, {parser.refused} kept as "
                   f"reasoning (quoted, or the turn did not end on a stop)", flush=True)
+        rejected = []
         if parser.unread:
             named = getattr(parser, "unread_names", None)
             print(f"[momoe] {parser.unread} <tool_call> block(s) in the answer did not read as a call of a declared "
                   "tool and went back as text (a name the request did not declare, or a form the template does "
-                  "not use)" + (f"; the names the model wrote: {', '.join(named)}" if named else ""), flush=True)
+                  "not use)" + (f"; the names the model wrote: {', '.join(named)}" if named else "")
+                  + "; the response carries them as strata_rejected_tool_calls, /metrics counts them", flush=True)
+            with self.status_lock:
+                self.totals["tool_calls_unread"] = self.totals.get("tool_calls_unread", 0) + parser.unread
+            # #3796: the same names for the client (a machine-readable marker next to the text, which stays as the model wrote it)
+            rejected = [{"name": nm, "reason": "undeclared"} for nm in named or []]
         if stops is not None and stops.hit is None and stops.held:
             yield "event", Event("content", stops.flush())     # the held tail was not a stop string after all
         done = {"finish": finish, "completion_tokens": n, "reused": (timings or {}).get("cache_n", 0),
@@ -4963,6 +4971,8 @@ class Service:
                 "reasoning_recoveries": recovery_count}
         if stops is not None and stops.hit is not None:
             done["stop_sequence"] = stops.hit
+        if rejected:
+            done["rejected_tool_calls"] = rejected
         yield "done", done
 
 
@@ -5247,6 +5257,8 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
                              "prompt_tokens_details": {"cached_tokens": x.get("reused") or 0}}
             if x.get("timings"):
                 last["timings"] = x["timings"]          # llama.cpp's field: the speed its clients show
+            if x.get("rejected_tool_calls"):
+                last["strata_rejected_tool_calls"] = x["rejected_tool_calls"]     # #3796: only when a call was refused as undeclared
             yield last
 
 
@@ -5293,6 +5305,8 @@ def openai_collect(chunks) -> dict:
            "usage": last["usage"]}
     if last.get("timings"):
         out["timings"] = last["timings"]
+    if last.get("strata_rejected_tool_calls"):
+        out["strata_rejected_tool_calls"] = last["strata_rejected_tool_calls"]
     return out
 
 
@@ -5384,11 +5398,12 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
             # request, a cache write; input_tokens keeps the last token, as 0 makes Claude Code count the prompt twice (#1013)
             reused = max(0, min(x.get("reused") or 0, len(ids) - 1))
             read_now = len(ids) - reused
-            yield "message_delta", {"type": "message_delta", "delta": {"stop_reason": stop,
-                                                                       "stop_sequence": x.get("stop_sequence")},
-                                    "usage": {"input_tokens": 1, "cache_creation_input_tokens": read_now - 1,
-                                              "cache_read_input_tokens": reused,
-                                              "output_tokens": x["completion_tokens"]}}
+            delta_event = {"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": x.get("stop_sequence")},
+                           "usage": {"input_tokens": 1, "cache_creation_input_tokens": read_now - 1,
+                                     "cache_read_input_tokens": reused, "output_tokens": x["completion_tokens"]}}
+            if x.get("rejected_tool_calls"):
+                delta_event["strata_rejected_tool_calls"] = x["rejected_tool_calls"]     # #3796
+            yield "message_delta", delta_event
             yield "message_stop", {"type": "message_stop"}
 
 
@@ -5420,6 +5435,8 @@ def anthropic_collect(events) -> dict:
             msg["stop_reason"] = e["delta"]["stop_reason"]
             msg["stop_sequence"] = e["delta"].get("stop_sequence")
             msg["usage"].update(e["usage"])
+            if e.get("strata_rejected_tool_calls"):
+                msg["strata_rejected_tool_calls"] = e["strata_rejected_tool_calls"]
     for i in range(len(blocks) - 1):    # a turn with no </think> (serve/dsml.py): the text is the answer; it is not also a thinking block
         a, b = blocks[i], blocks[i + 1]
         if a.get("type") == "thinking" and b.get("type") == "text" and a.get("thinking", "").strip() == b.get("text", "").strip():
@@ -6551,6 +6568,11 @@ class Server(ThreadingHTTPServer):
     # (STRATA_HTTP_BACKLOG overrides it)
     request_queue_size = max(5, int(os.environ.get("STRATA_HTTP_BACKLOG") or 256))
 
+    def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
+        if ":" in server_address[0]:
+            self.address_family = socket.AF_INET6
+        super().__init__(server_address, RequestHandlerClass, bind_and_activate)
+
     def handle_error(self, request, client_address):
         if not isinstance(sys.exc_info()[1], ConnectionError):   # a client that hangs up needs no stack trace
             super().handle_error(request, client_address)
@@ -7150,7 +7172,7 @@ def main() -> int:
                                      "written by setup.py")
     ap.add_argument("--host", default=None,
                     help="the address to listen on: 127.0.0.1 = this PC only (the default), 0.0.0.0 = also other devices "
-                         "on your network (set an API key); also \"host\" in the config")
+                         "on your network, :: = all IPv6 interfaces (set an API key); also \"host\" in the config")
     ap.add_argument("--script", action="append",
                     help="the mock engine's answer (default: a short greeting); given more than once, requests get "
                          "them in turn and the last one repeats")
@@ -7478,18 +7500,19 @@ def main() -> int:
     httpd = serve(svc, host=a.host, port=a.port)
     svc.start_idle_unload()
     svc.start_vision_idle()
-    here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
+    here = "[::1]" if a.host == "::" else "127.0.0.1" if a.host in ("0.0.0.0", "") else f"[{a.host}]" if ":" in a.host else a.host
     print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
           f"context {engine.max_context} tokens{', images on' if vision else ''}"
           f"{', API key required' if svc.api_key else ''})", flush=True)
     print("       stop it with: momoe stop", flush=True)
     if a.host not in ("127.0.0.1", "localhost", "::1"):
         # issue #26: reachable from other devices - say at which address, and what can still block it
-        ips = lan_addresses()
+        ips = [f"[{a.host}]"] if ":" in a.host and a.host != "::" else [] if a.host == "::" else lan_addresses()
         for ip in ips:
             print(f"       from other devices: http://{ip}:{a.port}/v1", flush=True)
         if not ips:
-            print("       from other devices: http://<this PC's IP address>:" + str(a.port) + "/v1", flush=True)
+            address = "[<this PC's IPv6 address>]" if a.host == "::" else "<this PC's IP address>"
+            print(f"       from other devices: http://{address}:{a.port}/v1", flush=True)
         if not svc.api_key:
             print("       WARNING: no API key - anyone on your network can use this model. Add \"api_key\": \"...\" "
                   "to the config (clients send it as their API key)", flush=True)

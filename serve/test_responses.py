@@ -390,6 +390,21 @@ class OverHttp(Server):
         code, events = self.post({"model": "m", "input": "hi", "max_output_tokens": 5, "stream": True})
         self.assertEqual(events[-1]["type"], "response.incomplete")
 
+    def test_max_output_tokens_zero_and_minus_one_mean_no_cap(self):
+        # #4036: the documented "no cap" values; the answer is complete, not cut at the cap
+        for n in (0, -1):
+            code, r = self.post({"model": "m", "input": "hi", "max_output_tokens": n})
+            self.assertEqual((code, r["status"]), (200, "completed"), (n, r))
+            self.assertIsNone(r["incomplete_details"])
+            code, events = self.post({"model": "m", "input": "hi", "max_output_tokens": n, "stream": True})
+            self.assertEqual((code, events[-1]["type"]), (200, "response.completed"), n)
+
+    def test_max_output_tokens_bad_values_are_400(self):
+        for n in (-2, -100, 1.5, True, "5"):
+            code, r = self.post({"model": "m", "input": "hi", "max_output_tokens": n})
+            self.assertEqual(code, 400, (n, r))
+            self.assertEqual(r["error"]["param"], "max_output_tokens", n)
+
     def test_effort_none_does_not_think(self):
         self.engine.scripts = [self.tok.encode("Hello.<|im_end|>", parse_special=True)]
         self.engine.script = self.engine.scripts[0]

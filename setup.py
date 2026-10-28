@@ -26,7 +26,7 @@ Options: --family qwen|swift|coder|unsloth|qwen36|ornith|qwen36-bartowski|kat-co
 at least 1 - an explicit --rope-scaling none is refused for such a context), --vision yes|no|gpu|cpu, --port
 8080, --yes (recommended
 answers, no questions), --setup (install another model / change settings instead of starting), --no-start,
---host 0.0.0.0 --api-key KEY (reach it from other devices on your network), --experimental-speed-projection on|off
+--host 0.0.0.0 --api-key KEY (reach it over IPv4; use --host :: for IPv6), --experimental-speed-projection on|off
 (EXPERIMENTAL, off by default),
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --check (only check this PC), --resident-budget-gib N (UD-Q4_K_XL's or UD-IQ4_XS's experts in RAM),
 --kv-streaming on|off|auto.
@@ -7312,7 +7312,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
             if not f.exists():
                 fail(f"{f} is missing", f"put {name} in {folder}, or drop --gguf-dir to download it")
             if sha:
-                verify_sha256(f, size, sha, own=True)
+                verify_sha256(f, *dsv41_pin(f, size, sha, own), own=True)
             continue
         if not (f.exists() and done(f)):
             # the original Flash-Next's shard 2 is the same file for all its sizes and the Coder's: one already here
@@ -7903,6 +7903,25 @@ DSV41_ISTA_FILES = {
     "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf": (110595290816, "eb19f30d368d393784e1fc54fdfaffc427ebb2110bf3762fdf5a8fbb9a2d740a"),
 }
 DSV41_ALL_FILES = {**DSV41_FILES, **DSV41_ISTA_FILES}
+# ISTA re-published the first shard of each set on 2026-10-26 with a larger chat template (images in tool results; their PATCHING.md, and what their
+# patch_chat_template.py makes of a shard 1 already downloaded).  setup downloads the pinned revision, so DSV41_ISTA_FILES stays the older file; a
+# newer shard 1 "already here" (--gguf-dir) is the same weights with the newer template and is accepted by its own size and SHA-256, never fetched.
+# (Strata 94d7aab2)
+DSV41_NEW_SHARD1 = {
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00004.gguf": (39358841536, "a7be0d5a48e4d1c13c5535f9123d9131ab8964e5acf8a0c01d14970e4b7f4df9"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00001-of-00004.gguf": (39535788064, "d9b949d55e27242b8afc7c2928749b888372d4c39682f9a131670d1c2555155e"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf": (39075725728, "2dfe9711eac1f7814aa59154d11e8f27739f8b96875dc1e667eac9f8c756e1fe"),
+}
+
+
+def dsv41_pin(f: Path, size: int, sha: str, own) -> tuple:
+    """The (size, SHA-256) to check a DeepSeek file of yours against: a shard 1 with ISTA's 2026-10-26 chat template is
+    accepted by its own size and hash (--gguf-dir only); everything else keeps its pin."""
+    new = DSV41_NEW_SHARD1.get(f.name)
+    if new and own and f.is_file() and f.stat().st_size == new[0] and new[0] != size:
+        ok(f"{f.name}: the version with ISTA's newer chat template (the same weights); it is used as it is")
+        return new
+    return size, sha
 DSV41_PROFILES = ROOT / "data" / "dsv41"           # the shipped hot-expert profiles (profile-2.00.bin, profile-2.25.bin)
 DSV41_CONTEXT = 8192          # the context the engine was checked at upstream (4096 and 8192; 64K is not tried yet)
 DSV41_EXE = "strata-dsv41.exe" if WIN else "strata-dsv41"
@@ -8178,7 +8197,7 @@ def install_dsv41(a, data: Path, family, gpu, hip, cards, port, ram) -> int:
                 fail(f"{f} is missing", f"put {f.name} in {folder}, or drop --gguf-dir to download it")
             if not a.gguf_dir:
                 download(dsv41_hf(f.name) + f.name, f)
-        verify_sha256(f, *fam["sha256"][f.name], own=bool(a.gguf_dir))
+        verify_sha256(f, *dsv41_pin(f, *fam["sha256"][f.name], a.gguf_dir), own=bool(a.gguf_dir))
     for f in shared:                                  # the Engram, the drafter, the metadata shard: once for every official set
         if f.exists() and (done(f) or own_files[f]):
             ok(f"{f.name} already here ({f.parent})")
@@ -8304,9 +8323,10 @@ def main() -> int:
                          "(docs/SECOND_GPU.md). With --gpus, the main one first; otherwise the two best cards. Saved")
     ap.add_argument("--no-remote-expert-opt", action="store_true",
                     help="with two or more GPUs: leave out --remote-expert-opt, which setup adds there (#578)")
-    ap.add_argument("--host", help="where the server listens: 127.0.0.1 = this PC only (default), 0.0.0.0 = also other "
-                                   "devices on your network (issue #26; set --api-key too)")
-    ap.add_argument("--api-key", help="require this key from clients (recommended with --host 0.0.0.0); several keys: key1,key2")
+    ap.add_argument("--host", help="where the server listens: 127.0.0.1 = this PC only (default), 0.0.0.0 = all IPv4 "
+                                   "interfaces, :: = all IPv6 interfaces (issue #26; set --api-key too)")
+    ap.add_argument("--api-key", help="require this key from clients (recommended with --host 0.0.0.0 or --host ::); "
+                                      "several keys: key1,key2")
     ap.add_argument("--save", action="store_true",
                     help="momoe start: also write --host, --api-key, --draft-vocab and --vram-reserve-mib into the "
                          "config (without it they apply to this start only)")
