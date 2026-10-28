@@ -137,6 +137,29 @@ class Install(unittest.TestCase):
             self.run_setup(hip=True)
 
 
+class Update(unittest.TestCase):
+    """--update compiles strata-dsv41 again (when its sources changed) for the cards it was built for, only when an
+    installed model runs it."""
+    def test_rebuilds_for_its_cards(self):
+        import json as _json, tempfile
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup, "ROOT", Path(d)), \
+                mock.patch.object(setup, "build_dsv41_engine") as build, mock.patch.object(setup, "get_llama_cpp", return_value="/l"):
+            (Path(d) / "engine-dsv41").mkdir()
+            (Path(d) / "engine-dsv41" / "BUILD.json").write_text(_json.dumps({"archs": [86, 89], "src": "x"}))
+            setup.update_dsv41_engine([{"exe": "/x/engine/momoe"}])
+            build.assert_not_called()
+            setup.update_dsv41_engine([{"exe": "/x/engine/momoe"}, {"exe": f"/x/engine-dsv41/{setup.DSV41_EXE}"}])
+            build.assert_called_once_with({"arch": "86", "archs": [86, 89]}, True, "/l")
+
+    def test_no_record_no_build(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup, "ROOT", Path(d)), \
+                mock.patch.object(setup, "build_dsv41_engine") as build, mock.patch.object(setup, "warn") as w:
+            setup.update_dsv41_engine([{"exe": f"/x/engine-dsv41/{setup.DSV41_EXE}"}])
+            build.assert_not_called()
+            w.assert_called_once()
+
+
 class MacFamily(unittest.TestCase):
     """On a Mac (and a GPU that shares the system's memory) Momoe's ggml engine runs it: momoe_setup's family."""
 

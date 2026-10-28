@@ -5950,6 +5950,7 @@ def update_install(have: list, a) -> int:
                 "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
     update_installed_engine()
     update_ggml_engines()                              # Momoe: momoe-metal / momoe-cuda, when src/metal changed
+    update_dsv41_engine([json.loads(p.read_text(encoding="utf-8-sig")) for p in have])   # strata-dsv41, when src/dsv41 changed
     mtp_done: set = set()
     for cfg_path in have:
         cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
@@ -8105,6 +8106,20 @@ def build_dsv41_engine(gpu, yes, llama, toolkit=13) -> tuple[Path, list]:
     stamp.write_text(json.dumps({"source": "local", "archs": archs, "cuda_dirs": dirs, "src": src}, indent=1))
     ok(f"DeepSeek engine compiled: {eng / DSV41_EXE}")
     return eng / DSV41_EXE, dirs
+
+
+def update_dsv41_engine(cfgs: list) -> None:
+    """--update: strata-dsv41 compiled again when its sources changed (build_dsv41_engine's own test), for the cards it
+    was compiled for (engine-dsv41/BUILD.json), when an installed model runs it."""
+    if not any(Path(c.get("exe", "")).name == DSV41_EXE for c in cfgs):
+        return
+    stamp = ROOT / "engine-dsv41" / "BUILD.json"
+    archs = json.loads(stamp.read_text(encoding="utf-8")).get("archs", []) if stamp.exists() else []
+    if not archs:
+        warn("the DeepSeek engine has no record of the cards it was compiled for: run setup for the DeepSeek model again "
+             "to compile it")
+        return
+    build_dsv41_engine({"arch": str(archs[0]), "archs": archs}, True, get_llama_cpp())
 
 
 def install_dsv41(a, data: Path, family, gpu, hip, cards, port, ram) -> int:
