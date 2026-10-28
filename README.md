@@ -43,7 +43,9 @@ and Strata is still its base. It has four engines:
 - **Strata's engine** is Strata's, with MoMoE's additions (the Qwen3.6 family's path began as
   [#1402](https://github.com/Niko1221/Strata/pull/1402)): experts spread over VRAM, RAM and the SSD, an expert cache
   filled by predictions, and a multi-token draft layer. How it works: Strata's [paper](docs/paper/Strata-Paper.pdf) and
-  [DETAILS.md](docs/DETAILS.md). The server and the installer grew from Strata's too.
+  [DETAILS.md](docs/DETAILS.md). The server and the installer grew from Strata's too. It is Strata 0.2.7's engine, with
+  two of 0.2.7's new defaults off here, the routing that prefers experts already on the card among them: measured in
+  [docs/ROUTE_PRIOR.md](docs/ROUTE_PRIOR.md).
 - **MoMoE's engines** ([src/metal](src/metal/README.md)) are written for MoMoE on
   [ggml](https://github.com/ggml-org/llama.cpp), llama.cpp's library. They read a model's GGUF as it is and keep the
   experts they can in a pool on the GPU. The rest are, per model and machine:

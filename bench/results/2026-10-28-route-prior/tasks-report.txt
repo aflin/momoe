@@ -1,0 +1,6 @@
+arm                  code           math           copy           tool            all   samples
+OFF         191/200  95.5%  191/200  95.5%   78/80   97.5%   76/80   95.0%  536/560  95.7%   [0, 1, 2, 3]
+RP15        187/200  93.5%  171/200  85.5%   72/80   90.0%   42/80   52.5%  472/560  84.3%   [0, 1, 2, 3]
+
+paired (task, sample): 560; OFF only passes 72, RP15 only passes 8; sign test p = 0.000
+tokens/s per task (median): OFF 60.5, RP15 70.5

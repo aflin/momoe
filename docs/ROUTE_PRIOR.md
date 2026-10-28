@@ -1,0 +1,124 @@
+# Residency-biased routing (STRATA_ROUTE_PRIOR): off in MoMoE
+
+Strata 0.2.7 turns on, by default, a routing change for NVIDIA cards of 13 GiB or less: the router prefers experts
+that are already on the card. MoMoE takes Strata 0.2.7's engine but leaves this off. This page is why: on a 12 GB card
+it makes Qwen3.8-Flash-Next write 41-78% faster, and it makes the answers clearly worse, tool use most of all.
+
+## What it does
+
+Each token, a mixture-of-experts layer's router scores all 512 experts and runs the 10 best. With
+`STRATA_ROUTE_PRIOR=λ` (`src/kernels/cuda/route_prior.cu`), the 10 are picked again after a bonus of λ is added to the
+score of every expert already in the card's expert cache. A resident expert that scored a little lower then takes the
+place of a non-resident one that scored higher. The expert it pushed out is never computed, and the one it kept is
+weighted with its own router weight. Fewer experts have to come from RAM, which is where the speed comes from; the
+model runs a different set of experts from the one it chose, which is where the quality goes.
+
+This is not what Strata's adaptive expert tier or MoMoE's `--hybrid` do. Those compute every expert the router chose
+(on the card, by the CPU, or read over PCIe) and change only where it is computed and what the cache holds next; the
+answer stays the router's, apart from rounding.
+
+Strata's default (0.2.7): λ = 1.5 on a discrete NVIDIA card of 13 GiB or less, off elsewhere. Strata checked it on an
+RTX 3060 12 GB with 80 tasks: no copy or code errors; agent tasks passed 4.5 of 10 on average over 4 runs at 1.5
+against 5.6 of 10 over 7 runs with it off, which they put within the run-to-run spread.
+
+MoMoE: off on every card. `STRATA_ROUTE_PRIOR=<λ>` turns it on, `STRATA_ROUTE_PRIOR=auto` takes Strata's rule
+(`src/core/verify.cpp`, `g_route_prior`). It only acts on Flash-Next's shape (512 experts, 10 a token).
+
+## Measured
+
+Qwen3.8-Flash-Next IQ3_XXS, the `merge-strata-0.2.7` engine, 2026-10-28. The PC: an RTX 4070 Ti 12 GB (sm_89), 63 GB
+RAM, Linux, CUDA 13.0. The engine's own expert cache there holds 2,897 of the model's 24,576 experts. The raw results
+are in [bench/results/2026-10-28-route-prior](../bench/results/2026-10-28-route-prior/).
+
+### Speed
+
+`tools/ab_engine.py` (the server's timings, greedy, 3 rounds, medians), the config setup writes (MTP drafting,
+int8 K/V, 64K context):
+
+| Request | Off | λ = 1.0 | λ = 1.5 |
+| --- | ---: | ---: | ---: |
+| chat 1, writing | 69.4 tok/s | 106.0 (+53%) | 123.6 (+78%) |
+| chat 2 | 63.8 | 84.8 (+33%) | 89.7 (+41%) |
+| chat 3 | 62.1 | 89.2 (+44%) | 93.6 (+51%) |
+| after a 6,345-token prompt | 58.0 | 88.4 (+52%) | 84.0 (+45%) |
+
+Reading the long prompt itself was unchanged (1,571-1,604 tok/s). Across the task check below, whose requests are
+short and include tool round trips, the 4070 Ti wrote 63.0 tok/s off and 94.8 at λ = 1.5 (medians per task).
+
+### Next-token predictions
+
+`tools/quant_quality.py` (the model reads 4,995 tokens of code, docs, English, other languages and an agent transcript
+through the decode path, and every next-token distribution is compared with the run with the prior off; the same
+engine, expert cache and settings otherwise, with no adaptation, so the runs are deterministic: a repeat run gives
+KL 0):
+
+| λ | Same top token | KL mean | Perplexity (off: 4.138) | Agent transcript perplexity (off: 4.815) |
+| --- | ---: | ---: | ---: | ---: |
+| 1.0 | 87.2% | 0.144 | 4.362 (+5%) | 5.698 (+18%) |
+| 1.5 | 82.5% | 0.251 | 4.630 (+12%) | 6.001 (+25%) |
+| 2.0 | 74.9% | 0.455 | 5.397 (+30%) | 6.370 (+32%) |
+
+With the cache at 2,897 experts, the 4070 Ti's own. With 1,500 the numbers are close (λ = 1.5: KL 0.212, 83.5%).
+For scale:
+- IQ3_XXS against Q2_0, a whole quant level apart: KL 0.094 ([MAC.md](MAC.md)).
+- The same engine with the prior off, 1,500 against 2,897 cached experts (the experts on the card are computed by
+  the GPU's kernels, the others by the CPU's, which round differently): KL 0.025.
+
+At Strata's λ = 1.5 the model's first choice of next token changes about once every six tokens, and the loss is more
+than going down a quant level.
+
+### Answers to graded tasks
+
+`tools/task_check.py`: 140 tasks, each graded by a program. Code: 50 HumanEval problems (every third), the reply's
+function must pass the problem's tests. Math: 50 GSM8K test problems (every 26th), the last `ANSWER:` line must be the
+right number. Copy: 20 generated tasks (write 30 codes in reverse order, list the e-mail addresses in a text, change
+one field of a JSON object, replace a word everywhere in a passage), checked exactly. Tool use: 20 generated tasks
+through the OpenAI tools API against a made-up shop (an item's price, an order's lines, an exchange rate), the final
+total must be right.
+
+Each task 4 times per setting, with the config's sampling (temperature 1.0, top-p 0.95, top-k 20), thinking off. Two
+of the four on the 4070 Ti, two on a DGX Spark running the same engine (built for sm_121) with its expert cache held
+at 2,897 experts so it keeps what the 12 GB card keeps. The order of the two settings alternated.
+
+| | Code | Math | Copy | Tool use | All |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Off | 191/200 (95.5%) | 191/200 (95.5%) | 78/80 (97.5%) | 76/80 (95.0%) | 536/560 (95.7%) |
+| λ = 1.5 | 187/200 (93.5%) | 171/200 (85.5%) | 72/80 (90.0%) | 42/80 (52.5%) | 472/560 (84.3%) |
+
+Paired by task and sample: 72 pass only with the prior off, 8 only with it on (a sign test gives p = 5×10⁻¹⁴). Per
+machine: the 4070 Ti 95.0% against 80.4%, the Spark 96.4% against 88.2%.
+
+How the tasks failed with the prior on (against off, over the 560):
+- tool use: no final answer 34 times (4 off), a wrong total 4 (0 off). The model called tools that do not exist,
+  written as text (`load_skill`, `calculate_expression`), stopped in the middle of a sentence ("EUR = 1,981.30 × 0.92
+  = 1,822.796 ≈ 1"), or kept calling tools;
+- math: a wrong number 18 (7 off), no answer line 11 (2 off);
+- copy: a JSON object with more changed than the one field 6 (1 off), a reversed list that came back wrong 2 (1 off);
+- code: 13 failed tests (9 off), the smallest difference, which may be why a code check did not show it.
+
+Not measured: thinking on; other models (it only acts on Flash-Next's shape); λ = 1.0 in the task check; long agent
+sessions.
+
+### What this means
+
+The speed is real, and so is the cost: the answers change wherever the router's choices would have needed an expert
+that is not on the card, and in tool use, the work MoMoE is mostly for, they fail almost half the time. MoMoE keeps it
+off. If you want the speed for plain chat and can check the answers, `STRATA_ROUTE_PRIOR=1.0` loses less than 1.5
+(KL 0.14 against 0.25), but that setting has no task check here.
+
+## Also not a default here
+
+**The int8 prompt attention on sm_89.** Strata 0.2.7 also makes `STRATA_PROMPT_ATTN_IMMA` a default on every NVIDIA card
+from sm_80 (measured on sm_120 and sm_86: +1.1-1.8% prompt). It reads the prompt's int8 K/V on the int8 tensor cores
+with the other operand in three 8-bit parts (24 bits), so it is as precise as the kernel it replaces; only the order of
+the additions differs. On the 4070 Ti it was +0.4% (1,589 against 1,583 tok/s, within noise), and it changes answers:
+the prompt path's predictions differ from the old kernel by KL 0.014 (20 prompts, every top token the same), the size
+of a change of summation order alone (the old kernel's own other order, `STRATA_PROMPT_ATTN_V1=1`: 0.010). Not
+faster, so MoMoE leaves sm_89 on the old kernel (`strata::prompt_attn_imma_default`); `STRATA_PROMPT_ATTN_IMMA=1` turns
+it on. Other cards keep Strata's default.
+
+**Not checked yet: DeepSeek's five experts.** Strata's DeepSeek engine runs 5 of the model's 6 experts a token on
+cards of 16 GiB or less, and on Strix Halo (`src/dsv41/ds4_experts_rule.hpp`; `--experts 6` for all six). It drops
+the expert with the smallest weight rather than choosing another one, and Strata measured little loss (on 4 x R9700,
+KL 0.110 against 0.108 for all six, against the reference). MoMoE keeps Strata's default there; it has not been
+through the task check.

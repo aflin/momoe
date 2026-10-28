@@ -1,0 +1,51 @@
+round 0 OFF: ready in 57 s
+  chat0  decode 69.5 tok/s  prompt 66.8 tok/s (34)  n 256
+  chat1  decode 63.8 tok/s  prompt 58.5 tok/s (27)  n 235
+  chat2  decode 61.4 tok/s  prompt 59.5 tok/s (29)  n 199
+  long   decode 56.7 tok/s  prompt 1595.5 tok/s (6345)  n 123
+round 0 RP10: ready in 57 s
+  chat0  decode 105.4 tok/s  prompt 85.0 tok/s (34)  n 256
+  chat1  decode 83.5 tok/s  prompt 69.6 tok/s (27)  n 235
+  chat2  decode 89.0 tok/s  prompt 68.3 tok/s (29)  n 207
+  long   decode 88.3 tok/s  prompt 1570.6 tok/s (6345)  n 126
+round 0 RP15: ready in 51 s
+  chat0  decode 123.6 tok/s  prompt 92.7 tok/s (34)  n 256
+  chat1  decode 88.8 tok/s  prompt 85.5 tok/s (27)  n 245
+  chat2  decode 103.3 tok/s  prompt 81.5 tok/s (29)  n 213
+  long   decode 94.8 tok/s  prompt 1597.9 tok/s (6345)  n 133
+round 1 RP15: ready in 54 s
+  chat0  decode 124.2 tok/s  prompt 95.0 tok/s (34)  n 256
+  chat1  decode 95.9 tok/s  prompt 86.6 tok/s (27)  n 254
+  chat2  decode 90.9 tok/s  prompt 88.7 tok/s (29)  n 210
+  long   decode 84.0 tok/s  prompt 1605.5 tok/s (6345)  n 155
+round 1 RP10: ready in 57 s
+  chat0  decode 106.0 tok/s  prompt 81.8 tok/s (34)  n 256
+  chat1  decode 84.8 tok/s  prompt 73.5 tok/s (27)  n 235
+  chat2  decode 89.2 tok/s  prompt 76.7 tok/s (29)  n 207
+  long   decode 88.4 tok/s  prompt 1587.9 tok/s (6345)  n 126
+round 1 OFF: ready in 57 s
+  chat0  decode 69.4 tok/s  prompt 66.2 tok/s (34)  n 256
+  chat1  decode 64.1 tok/s  prompt 59.8 tok/s (27)  n 235
+  chat2  decode 62.1 tok/s  prompt 57.8 tok/s (29)  n 199
+  long   decode 58.0 tok/s  prompt 1576.6 tok/s (6345)  n 123
+round 2 OFF: ready in 54 s
+  chat0  decode 69.1 tok/s  prompt 66.5 tok/s (34)  n 256
+  chat1  decode 63.5 tok/s  prompt 59.0 tok/s (27)  n 235
+  chat2  decode 65.1 tok/s  prompt 57.8 tok/s (29)  n 199
+  long   decode 60.8 tok/s  prompt 1586.4 tok/s (6345)  n 135
+round 2 RP10: ready in 57 s
+  chat0  decode 107.0 tok/s  prompt 81.5 tok/s (34)  n 256
+  chat1  decode 85.4 tok/s  prompt 73.9 tok/s (27)  n 235
+  chat2  decode 90.3 tok/s  prompt 75.0 tok/s (29)  n 207
+  long   decode 89.2 tok/s  prompt 1571.2 tok/s (6345)  n 126
+round 2 RP15: ready in 54 s
+  chat0  decode 123.5 tok/s  prompt 92.5 tok/s (34)  n 256
+  chat1  decode 89.7 tok/s  prompt 87.4 tok/s (27)  n 245
+  chat2  decode 93.6 tok/s  prompt 85.8 tok/s (29)  n 211
+  long   decode 82.9 tok/s  prompt 1604.2 tok/s (6345)  n 122
+
+medians over rounds:
+  chat0  | OFF: decode   69.4  prompt    66.5 | RP10: decode  106.0  prompt    81.8 | RP15: decode  123.6  prompt    92.7
+  chat1  | OFF: decode   63.8  prompt    59.0 | RP10: decode   84.8  prompt    73.5 | RP15: decode   89.7  prompt    86.6
+  chat2  | OFF: decode   62.1  prompt    57.8 | RP10: decode   89.2  prompt    75.0 | RP15: decode   93.6  prompt    85.8
+  long   | OFF: decode   58.0  prompt  1586.4 | RP10: decode   88.4  prompt  1571.2 | RP15: decode   84.0  prompt  1604.2

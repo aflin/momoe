@@ -1,0 +1,57 @@
+# quant_quality.py compare, Flash-Next IQ3_XXS, RTX 4070 Ti, merge-strata-0.2.7 engine
+
+## 1500 expert slots, against prior off
+reference: /tmp/claude-1000/-usr3-local-src-Strata/0b446e8f-0de0-4650-b892-6f030f7bd444/scratchpad/kl/new.tsv
+run                                      segment         pos    top1       KL   KL p99     PPL PPL ref
+rp10.tsv                                 code            999  93.79%  0.06428      nan   2.084   2.081
+rp10.tsv                                 docs            999  80.38%  0.14177      nan  10.321  10.288
+rp10.tsv                                 english         999  85.79%  0.08943      nan   4.548   4.301
+rp10.tsv                                 multilingual    999  93.09%  0.04584      nan   2.756   2.694
+rp10.tsv                                 agent           999  87.29%  0.27016      nan   5.487   4.947
+rp10.tsv                                 all            4995  88.07%  0.12230   1.7613   4.305   4.148
+rp15.tsv                                 code            999  91.09%  0.13207      nan   2.121   2.081
+rp15.tsv                                 docs            999  74.87%  0.22956      nan  11.286  10.288
+rp15.tsv                                 english         999  79.08%  0.21469      nan   5.111   4.301
+rp15.tsv                                 multilingual    999  89.69%  0.10310      nan   2.914   2.694
+rp15.tsv                                 agent           999  82.98%  0.37859      nan   5.661   4.947
+rp15.tsv                                 all            4995  83.54%  0.21160   2.5767   4.582   4.148
+rp20.tsv                                 code            999  86.69%  0.26123      nan   2.302   2.081
+rp20.tsv                                 docs            999  69.27%  0.36928      nan  12.258  10.288
+rp20.tsv                                 english         999  68.77%  0.50270      nan   6.523   4.301
+rp20.tsv                                 multilingual    999  83.78%  0.28623      nan   3.587   2.694
+rp20.tsv                                 agent           999  77.58%  0.55568      nan   6.602   4.947
+rp20.tsv                                 all            4995  77.22%  0.39502   3.7646   5.344   4.148
+
+## 2897 expert slots (the 4070 Ti's own cache), against prior off at 2897
+reference: /tmp/claude-1000/-usr3-local-src-Strata/0b446e8f-0de0-4650-b892-6f030f7bd444/scratchpad/kl/c2897_rp0.tsv
+run                                      segment         pos    top1       KL   KL p99     PPL PPL ref
+c2897_rp1.0.tsv                          code            999  92.29%  0.08463      nan   2.108   2.089
+c2897_rp1.0.tsv                          docs            999  79.58%  0.17196      nan  10.368  10.323
+c2897_rp1.0.tsv                          english         999  85.09%  0.11670      nan   4.690   4.320
+c2897_rp1.0.tsv                          multilingual    999  93.09%  0.05722      nan   2.704   2.704
+c2897_rp1.0.tsv                          agent           999  85.99%  0.28728      nan   5.698   4.815
+c2897_rp1.0.tsv                          all            4995  87.21%  0.14356   1.8887   4.362   4.138
+c2897_rp1.5.tsv                          code            999  88.99%  0.16550      nan   2.123   2.089
+c2897_rp1.5.tsv                          docs            999  74.07%  0.26806      nan  10.816  10.323
+c2897_rp1.5.tsv                          english         999  77.58%  0.27080      nan   5.250   4.320
+c2897_rp1.5.tsv                          multilingual    999  88.79%  0.13025      nan   2.941   2.704
+c2897_rp1.5.tsv                          agent           999  83.28%  0.42234      nan   6.001   4.815
+c2897_rp1.5.tsv                          all            4995  82.54%  0.25139   2.9129   4.630   4.138
+c2897_rp2.0.tsv                          code            999  85.69%  0.30949      nan   2.345   2.089
+c2897_rp2.0.tsv                          docs            999  67.57%  0.38948      nan  11.586  10.323
+c2897_rp2.0.tsv                          english         999  65.87%  0.56565      nan   6.603   4.320
+c2897_rp2.0.tsv                          multilingual    999  78.98%  0.42996      nan   4.007   2.704
+c2897_rp2.0.tsv                          agent           999  76.38%  0.58220      nan   6.370   4.815
+c2897_rp2.0.tsv                          all            4995  74.89%  0.45536   4.4538   5.397   4.138
+
+## the same engine, prior off, 1500 vs 2897 slots (GPU vs CPU expert arithmetic)
+reference: /tmp/claude-1000/-usr3-local-src-Strata/0b446e8f-0de0-4650-b892-6f030f7bd444/scratchpad/kl/new.tsv
+run                                      segment         pos    top1       KL   KL p99     PPL PPL ref
+c2897_rp0.tsv                            all            4995  95.22%  0.02495   0.3877   4.138   4.148
+
+## old / main / merged engine, prior off
+reference: /tmp/claude-1000/-usr3-local-src-Strata/0b446e8f-0de0-4650-b892-6f030f7bd444/scratchpad/kl/main.tsv
+run                                      segment         pos    top1       KL   KL p99     PPL PPL ref
+new.tsv                                  all            4995 100.00%  0.00000   0.0000   4.148   4.148
+old.tsv                                  all            4995 100.00%  0.00000   0.0000   4.148   4.148
+main2.tsv                                all            4995 100.00%  0.00000   0.0000   4.148   4.148
