@@ -71,7 +71,10 @@ inline bool gr_v3_default(bool hip, int major, int minor, bool integrated, doubl
 /// STRATA_PROMPT_ATTN_IMMA (the prompt attention on int8 tensor cores, another summation order) when the user set nothing: ON for every CUDA card of
 /// compute capability 8.0 or newer (the int8 m16n8k32 MMA), not Turing / Volta / Pascal, not HIP.  `cc` = 10 * major + minor as the engine
 /// resolves it (an emulated or forced Turing counts as 75).  Measured on sm_120 (RTX PRO 5000) and sm_86 (2x RTX A4000): +1.1 .. +1.8% prompt.
-inline bool prompt_attn_imma_default(bool hip, int cc, bool v026 = false) { return !v026 && !hip && cc >= 80; }
+/// Momoe: not on sm_89 (Ada): on an RTX 4070 Ti (Flash-Next IQ3_XXS, int8 K/V, 3 rounds) the prompt was +0.4% (1589 vs 1583 tok/s, within
+/// noise), and the other summation order changes answers (prompt-path KL 0.014 against the 0.2.6 kernel, the size of a summation-order change),
+/// so sm_89 keeps 0.2.6's kernel; STRATA_PROMPT_ATTN_IMMA=1 still turns it on there.
+inline bool prompt_attn_imma_default(bool hip, int cc, bool v026 = false) { return !v026 && !hip && cc >= 80 && cc != 89; }
 
 /// STRATA_MMVQ_IL_89 (#3453: the decode kernel row tables of an Ada card, the cells where an RTX 4070 and an RTX 4080 agreed; bitwise the same
 /// output, only the rows-a-warp split differs) when the user set nothing: ON for compute capability 8.9 only (owner decision, 26 October: not yet

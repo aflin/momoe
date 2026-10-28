@@ -390,7 +390,7 @@ int main() {
         CHECK(prompt_attn_imma_default(false, 120));                        // RTX PRO 5000 / RTX 50: measured +1.6-1.8%
         CHECK(prompt_attn_imma_default(false, 86));                         // 2x RTX A4000 / RTX 3060: measured +1.1-1.3%
         CHECK(prompt_attn_imma_default(false, 80));
-        CHECK(prompt_attn_imma_default(false, 89));
+        CHECK(!prompt_attn_imma_default(false, 89));                        // Momoe: sm_89 keeps 0.2.6's kernel (+0.4% on a 4070 Ti)
         CHECK(!prompt_attn_imma_default(false, 75));                        // Turing (also a forced STRATA_QSA_WARP=1 card)
         CHECK(!prompt_attn_imma_default(false, 70));                        // Volta
         CHECK(!prompt_attn_imma_default(false, 60));                        // Pascal (P100)

@@ -2665,7 +2665,7 @@ int g_pa_imma = -1;   // STRATA_PROMPT_ATTN_IMMA: -1 not read yet; qsa_prompt_at
 
 template <int GQ>
 bool dispatch_g(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
-                const QsaShapes& s, float* attn, int64_t n_q, cudaStream_t st, bool volta, bool turing, bool t75) {
+                const QsaShapes& s, float* attn, int64_t n_q, cudaStream_t st, bool volta, bool turing, bool t75, int cc) {
     if constexpr (GQ == 8) {   // dense (Qwen3.6): 8 queries per block on sm_80+, fp16 or int8 K/V (above)
         const char* dn = std::getenv("STRATA_PROMPT_ATTN_DENSE");   // read per call: the parity test switches it
         if (ids == nullptr && !turing && !volta && !(dn && dn[0] == '0') && pools.k_q4 == nullptr && pools.v_q4 == nullptr) {
@@ -2718,14 +2718,15 @@ bool dispatch_g(const float* q, const QsaAttnPools& pools, const int32_t* ids, c
         // ON by default since 0.2.7 on every card that has them (Ampere and newer, CUDA builds; not Turing, Volta or Pascal, which
         // have no int8 m16n8k32 MMA this kernel needs): +1.6% / +1.8% prompt at 8K / 16K on the RTX PRO 5000 (sm_120) and +1.1% /
         // +1.3% at 8K / 16K on 2x RTX A4000 (sm_86), decode unchanged, 5 pairs each; another summation order (~1e-7), so a near-tie
-        // can flip a prompt's first token.  Sm_80, 8.9, 9.0 and the datacentre Blackwells run the same kernel unmeasured.
+        // can flip a prompt's first token.  Sm_80, 9.0 and the datacentre Blackwells run the same kernel unmeasured; Momoe: not sm_89 (a 4070 Ti
+        // measured +0.4%, within noise; strata::prompt_attn_imma_default).
         // STRATA_PROMPT_ATTN_IMMA=0 is the off switch (the v2 i8 kernel of 0.2.6), =1 as the default.
         if constexpr (GQ == G) {
             if (g_pa_imma < 0) {
                 const char* v = std::getenv("STRATA_PROMPT_ATTN_IMMA");
                 g_pa_imma = v == nullptr ? 2 : (v[0] == '1' ? 1 : 0);   // 2: the default (on where the kernel can run)
             }
-            if (!turing && (g_pa_imma == 1 || (g_pa_imma == 2 && strata::prompt_attn_imma_default(false, 80, strata::qwen_defaults_026()))))
+            if (!turing && (g_pa_imma == 1 || (g_pa_imma == 2 && strata::prompt_attn_imma_default(false, cc, strata::qwen_defaults_026()))))
                 return launch_i8v3(q, pools, ids, steps, cap, s, attn, n_q, st);
         }
         return launch_i8<GQ>(q, pools, ids, steps, cap, s, attn, n_q, st);
@@ -2805,6 +2806,7 @@ bool qsa_hip_wmma_active() { return qsa_prompt_attn_matrix_cores_requested(); }
 bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
                            int64_t cap, const QsaShapes& s, float* attn, int64_t n_q, void* stream) {
     if (n_q <= 0) return true;
+    int cc_now = 0;                                    // 10 * major + minor as resolved below (STRATA_QSA_WARP: 75)
     bool volta = false, turing = false, t75 = false;   // per call, from the CURRENT device (a layer split can mix Turing with newer cards)
     {   // sm_75 or newer: the MMA above compiles for both.  sm_80+ runs the cp.async kernel (launch_i8); Turing has
         // no cp.async, so it runs the v1 kernel (launch<1>, same accuracy, another summation order).  An older card
@@ -2834,6 +2836,7 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
         if (cc[dev] < 70) return false;
         volta = cc[dev] < 75;     // sm_70: the m8n8k4 kernel (STRATA_PA_VOLTA); STRATA_QSA_WARP=1 still forces the old one
         turing = cc[dev] < 80;
+        cc_now = cc[dev];
         t75 = cc[dev] == 75;      // a Turing card, or one run as such (STRATA_EMULATE_CC=75, STRATA_QSA_WARP=1)
     }
 #if defined(__HIPCC__)
@@ -2853,8 +2856,8 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
         !steps || !pools.page_table)
         return false;
     if (volta && (gq != G || ids == nullptr)) return false;
-    return gq == 8 ? dispatch_g<8>(q, pools, ids, steps, cap, s, attn, n_q, (cudaStream_t) stream, volta, turing, t75)
-                   : dispatch_g<G>(q, pools, ids, steps, cap, s, attn, n_q, (cudaStream_t) stream, volta, turing, t75);
+    return gq == 8 ? dispatch_g<8>(q, pools, ids, steps, cap, s, attn, n_q, (cudaStream_t) stream, volta, turing, t75, cc_now)
+                   : dispatch_g<G>(q, pools, ids, steps, cap, s, attn, n_q, (cudaStream_t) stream, volta, turing, t75, cc_now);
 }
 
 }  // namespace strata::kernels
