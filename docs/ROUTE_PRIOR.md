@@ -117,8 +117,36 @@ of a change of summation order alone (the old kernel's own other order, `STRATA_
 faster, so MoMoE leaves sm_89 on the old kernel (`strata::prompt_attn_imma_default`); `STRATA_PROMPT_ATTN_IMMA=1` turns
 it on. Other cards keep Strata's default.
 
-**Not checked yet: DeepSeek's five experts.** Strata's DeepSeek engine runs 5 of the model's 6 experts a token on
-cards of 16 GiB or less, and on Strix Halo (`src/dsv41/ds4_experts_rule.hpp`; `--experts 6` for all six). It drops
-the expert with the smallest weight rather than choosing another one, and Strata measured little loss (on 4 x R9700,
-KL 0.110 against 0.108 for all six, against the reference). MoMoE keeps Strata's default there; it has not been
-through the task check.
+**Kept: DeepSeek's five experts.** Strata's DeepSeek engine runs 5 of the model's 6 experts a token on cards of 16 GiB
+or less, on a GPU that shares the PC's memory (Strix Halo), and on two or more RDNA4 cards that hold half the experts
+(`src/dsv41/ds4_experts_rule.hpp`; `--experts 6` for all six). Unlike the route prior it keeps the model's own choice:
+the router's top 5, their weights renormalised, so only the weakest of the six is dropped. Strata measured it on
+4 x R9700 (KL against the reference 0.110 with 5, 0.108 with 6) and Strix Halo (decode +11-13%), not on a 12 GB card.
+
+Measured here: IST-DAS 2.00 bpw, `strata-dsv41` from this merge, the 4070 Ti PC above (15,025 of the experts on the
+CPU, in the model's files), 2026-10-28.
+
+| | 5 experts | 6 experts |
+| --- | ---: | ---: |
+| Decode, three chats (`tools/ab_engine.py`, 3 rounds, medians) | 3.7 / 5.1 / 4.2 tok/s | 3.2 / 4.2 / 3.2 (5: +16% / +21% / +31%) |
+| Decode after a 3,170-token prompt | 4.2 | 3.8 (+11%) |
+| Reading the 4,995-token text set below | 910 s | 1,125 s |
+
+The long prompt's own read could not be compared: the engine's saved prompt cache answered it after the first run.
+
+Next-token predictions (the engine's `--score`, the same text set as above in DeepSeek's tokens, compared with
+`tools/quant_quality.py`; a second run with 6 experts gave KL 0):
+
+| Text | Same top token | KL | Perplexity, 5 against 6 |
+| --- | ---: | ---: | ---: |
+| code | 93.8% | 0.032 | 4.452 / 4.498 |
+| docs | 90.3% | 0.039 | 23.874 / 23.217 (+2.8%) |
+| English | 89.5% | 0.032 | 5.108 / 5.251 |
+| other languages | 94.5% | 0.029 | 8.119 / 8.110 |
+| agent transcript | 96.5% | 0.016 | 2.818 / 2.851 |
+| all | 92.9% | 0.030 | 6.589 / 6.616 |
+
+KL 0.030 is an eighth of the route prior's 0.25 at λ = 1.5 and about a third of a quant level (0.094); the text is not
+harder for it to predict (perplexity -0.4% over the set, the agent transcript least changed). MoMoE keeps Strata's
+default: on a 12 GB card it writes 11-31% faster for a change the size of a rounding change. Not measured: graded tasks
+(DeepSeek writes 3-5 tok/s here: the task check above would take days), long prompts, the 2.25 and 1.75 bpw sets.

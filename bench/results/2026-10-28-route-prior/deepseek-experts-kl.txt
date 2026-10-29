@@ -1,0 +1,15 @@
+# strata-dsv41 --score, IST-DAS 2.00 bpw, RTX 4070 Ti: 6 experts (ref), 6 again, 5
+reference: /tmp/claude-1000/-usr3-local-src-Strata/0b446e8f-0de0-4650-b892-6f030f7bd444/scratchpad/kl/ds-e6.tsv
+run                                      segment         pos    top1       KL   KL p99     PPL PPL ref
+ds-e6b.tsv                               code            999 100.00%  0.00000      nan   4.498   4.498
+ds-e6b.tsv                               docs            999 100.00%  0.00000      nan  23.217  23.217
+ds-e6b.tsv                               english         999 100.00%  0.00000      nan   5.251   5.251
+ds-e6b.tsv                               multilingual    999 100.00%  0.00000      nan   8.110   8.110
+ds-e6b.tsv                               agent           999 100.00%  0.00000      nan   2.851   2.851
+ds-e6b.tsv                               all            4995 100.00%  0.00000   0.0000   6.616   6.616
+ds-e5.tsv                                code            999  93.79%  0.03175      nan   4.452   4.498
+ds-e5.tsv                                docs            999  90.29%  0.03932      nan  23.874  23.217
+ds-e5.tsv                                english         999  89.49%  0.03228      nan   5.108   5.251
+ds-e5.tsv                                multilingual    999  94.49%  0.02881      nan   8.119   8.110
+ds-e5.tsv                                agent           999  96.50%  0.01585      nan   2.818   2.851
+ds-e5.tsv                                all            4995  92.91%  0.02960   0.3337   6.589   6.616

@@ -1,0 +1,36 @@
+round 0 E5: ready in 53 s
+  chat0  decode 3.6 tok/s  prompt 4.4 tok/s (27)  n 128
+  chat1  decode 4.9 tok/s  prompt 1.9 tok/s (18)  n 128
+  chat2  decode 4.1 tok/s  prompt 2.3 tok/s (21)  n 128
+  long   decode 4.3 tok/s  prompt 95.8 tok/s (3170)  n 128
+round 0 E6: ready in 51 s
+  chat0  decode 3.2 tok/s  prompt 3.4 tok/s (27)  n 128
+  chat1  decode 4.2 tok/s  prompt 1.5 tok/s (18)  n 128
+  chat2  decode 3.2 tok/s  prompt 1.9 tok/s (21)  n 128
+  long   decode 3.8 tok/s  prompt 1.0 tok/s (1)  n 128
+round 1 E6: ready in 48 s
+  chat0  decode 3.2 tok/s  prompt 3.4 tok/s (27)  n 128
+  chat1  decode 4.1 tok/s  prompt 1.5 tok/s (18)  n 128
+  chat2  decode 3.2 tok/s  prompt 1.9 tok/s (21)  n 128
+  long   decode 3.7 tok/s  prompt 0.9 tok/s (1)  n 128
+round 1 E5: ready in 44 s
+  chat0  decode 3.7 tok/s  prompt 4.4 tok/s (27)  n 128
+  chat1  decode 5.1 tok/s  prompt 1.9 tok/s (18)  n 128
+  chat2  decode 4.2 tok/s  prompt 2.4 tok/s (21)  n 128
+  long   decode 4.2 tok/s  prompt 1.2 tok/s (1)  n 128
+round 2 E5: ready in 44 s
+  chat0  decode 3.7 tok/s  prompt 4.4 tok/s (27)  n 128
+  chat1  decode 5.1 tok/s  prompt 1.9 tok/s (18)  n 128
+  chat2  decode 4.2 tok/s  prompt 2.4 tok/s (21)  n 128
+  long   decode 4.2 tok/s  prompt 1.2 tok/s (1)  n 128
+round 2 E6: ready in 42 s
+  chat0  decode 3.3 tok/s  prompt 3.5 tok/s (27)  n 128
+  chat1  decode 4.3 tok/s  prompt 1.5 tok/s (18)  n 128
+  chat2  decode 3.4 tok/s  prompt 1.9 tok/s (21)  n 128
+  long   decode 3.9 tok/s  prompt 0.9 tok/s (1)  n 125
+
+medians over rounds:
+  chat0  | E5: decode    3.7  prompt     4.4 | E6: decode    3.2  prompt     3.4
+  chat1  | E5: decode    5.1  prompt     1.9 | E6: decode    4.2  prompt     1.5
+  chat2  | E5: decode    4.2  prompt     2.4 | E6: decode    3.2  prompt     1.9
+  long   | E5: decode    4.2  prompt     1.2 | E6: decode    3.8  prompt     0.9
