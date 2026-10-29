@@ -313,6 +313,9 @@ class MacDraft(unittest.TestCase):
             q = setup.momoe_size(family, None, mem)
             (cfg_dir / f"{(fam['tag'] + setup.size_of(q)).lower()}.json").write_text(json.dumps({"draft": prior}))
         def ask(q, choices, default, yes):                 # (the drafting question answered; the others: the default)
+            if q.startswith("Context") and self.ctx_pick is not None:
+                self.ctx_default = default
+                return self.ctx_pick
             if "drafting" not in q:
                 return default
             self.asked.append(default)
@@ -337,6 +340,7 @@ class MacDraft(unittest.TestCase):
                    mock.patch.object(setup, "weights_gib", return_value=weights),
                    mock.patch.object(setup, "kv_bytes_per_token", return_value=self.KV),
                    mock.patch.object(setup, "kv_ring_gib", return_value=0.0),
+                   mock.patch.object(setup, "model_context_limit", return_value=self.LIMIT),
                    mock.patch.object(setup, "mac_available_gib", return_value=avail),
                    mock.patch.object(setup, "name_config", side_effect=lambda p, a: p),
                    mock.patch.object(setup, "write_setup_config", side_effect=lambda p, c: written.update(c))]
@@ -413,6 +417,38 @@ class MacDraft(unittest.TestCase):
             self.assertTrue(args[args.index("--dspark") + 1].endswith(setup.DSV41_DSPARK))
             self.assertEqual(int(args[args.index("--pool-gib") + 1]),
                              setup.mac_pool_gib(64, 123.0, 5.74 + 3.66 + 7.6, 57.0, kv) - 7)
+
+    ctx_pick = None
+    LIMIT = 1048576                                         # GLM-5.3-Flash's trained context
+
+    def test_context_asked_up_to_the_models_limit(self):
+        # in a terminal (no --context): the context is asked; the default is the size setup picks on its own (64K
+        # where every expert fits beside its KV cache), the sizes go up to the model's limit, the pick is kept
+        try:
+            self.ctx_pick = "1"
+            args, _, _ = self.run_setup("glm53", True, mem=32, weights=(102.32, 9.77), avail=23.0, answer="n")
+            said = " ".join(self.said)
+            self.assertIn("This model was trained for 1,048,576 tokens", said)
+            self.assertIn("1024K tokens", said)
+            self.assertIn("(the model's limit)", said)
+            self.assertEqual(args[args.index("--ctx") + 1], "8192")         # the first size offered
+            self.ctx_pick = None
+            args_yes, _, _ = self.run_setup("glm53", True, mem=32, weights=(102.32, 9.77), avail=23.0)
+            self.assertNotIn("Context length", " ".join(self.said))          # --yes: not asked, as before
+            self.assertEqual(args_yes[args_yes.index("--ctx") + 1], self.default_ctx("glm53"))
+        finally:
+            self.ctx_pick = None
+
+    def default_ctx(self, family):
+        args, _, _ = self.run_setup(family, True, mem=32, weights=(102.32, 9.77), avail=23.0)
+        return args[args.index("--ctx") + 1]
+
+    def test_context_choices(self):
+        self.assertEqual(setup.ggml_context_choices(128000, 32768), [8192, 32768, 65536, 128000])   # LFM2.5-8B
+        self.assertEqual(setup.ggml_context_choices(262144, 32768)[-2:], [204800, 262144])
+        self.assertEqual(setup.ggml_context_choices(1048576, 65536)[-2:], [524288, 1048576])
+        self.assertIn(40960, setup.ggml_context_choices(262144, 40960))   # a family's own size is offered
+        self.assertEqual(setup.ggml_context_choices(0, 32768), setup.CONTEXTS)    # the file does not say
 
     def test_asked_with_what_the_memory_holds(self):
         # in a terminal: the question, its default the rules' choice (GLM on 32 GB: a 9% pool, so no), the answer kept

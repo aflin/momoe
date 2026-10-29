@@ -6973,6 +6973,52 @@ def kv_ring_gib(files: list) -> float:
     return sum(int(kvs[i] or 0) for i in range(min(blocks, len(swa))) if swa[i]) * KV_RING_ROWS * head * 2 * 2 / 2**30
 
 
+def model_context_limit(files: list) -> int:
+    """The context the model was trained for (its GGUF's <arch>.context_length), 0 when the file does not say."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    from gguf_reader import GGUFFile
+    md = GGUFFile(files[0]).metadata
+    return int(md.get(f"{md.get('general.architecture', '')}.context_length") or 0)
+
+
+def ggml_context_choices(limit: int, rec: int) -> list:
+    """The sizes offered for Momoe's ggml engine: setup's usual ones up to the model's limit, the limit itself last, and
+    the recommended size (a family's own value can be another number)."""
+    cs = [c for c in CONTEXTS if not limit or c < limit] + ([limit] if limit else [])
+    return sorted(set(cs + ([rec] if not limit or rec <= limit else [])))
+
+
+def ask_ggml_context(files: list, rec: int, w: tuple, kvt: int, mac: bool, unified: bool, ram: float, gpu: dict,
+                     fam: dict, mac_pool=None) -> int:
+    """The context, asked (Momoe's ggml engine, an interactive setup without --context): each size up to the model's
+    limit with the KV cache it takes and what that leaves for the experts - on a Mac its expert pool (mac_pool(ctx)),
+    on a GPU that shares the memory the memory left beside the engine's reserve, on a card of its own the card's
+    memory; `rec` (setup's own choice) is the default."""
+    limit = model_context_limit(files)
+    cs = ggml_context_choices(limit, rec)
+    exps, dense = w
+    say()
+    say("  Context length = how much text the model can see at once (your chat, files, tool output).")
+    say(f"  This model was trained for {limit:,} tokens. A longer context takes more memory for its KV cache, which"
+        if limit else "  A longer context takes more memory for its KV cache, which")
+    say(f"  leaves less for the experts ({exps:.0f} GiB of them; the ones that do not fit are read as needed, slower):")
+    for i, c in enumerate(cs, 1):
+        kv = kvt * c / 2**30
+        if mac:
+            p = mac_pool(c) if mac_pool else None
+            room = "every expert in memory" if p is None else f"a {p} GiB expert pool"
+        elif unified:
+            left = ram - fam.get("uma_reserve_gib", 10) - dense - kv
+            room = f"~{max(0.0, left):.0f} GiB of memory left for them"
+        else:
+            left = gpu["vram_gb"] - dense - kv - 1.5
+            room = f"~{max(0.0, left):.0f} GiB of the card left for them"
+        name = f"{c // 1024}K" if c % 1024 == 0 else f"{c:,}"
+        note = ("   (recommended)" if c == rec else "") + ("   (the model's limit)" if c == limit else "")
+        say(f"  {i}) {name} tokens: KV cache about {kv:.1f} GiB, {room}{note}")
+    return cs[int(ask("Context?", [str(i) for i in range(1, len(cs) + 1)], str(cs.index(rec) + 1), False)) - 1]
+
+
 def weights_gib(files: list) -> tuple:
     """A model's routed experts (the tensors named *_exps) and its other weights the GPU holds, GiB: not the PLE table,
     whose rows the CPU reads from the file; the MTP layer's experts with the others (the engine loads that layer
@@ -7390,10 +7436,14 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     # the context: --context, the family's, else on a Mac 64K when every expert fits beside its KV cache, else 32K; at
     # most 16K where the memory is under 16 GB (a Jetson, an 8 GB Mac: the KV cache takes the experts' memory)
     pool, ctx = None, a.context or fam.get("context") or 32768
+    w, kvt, draft_gib = (0.0, 0.0), 0, 0.0
+    if mac or not (a.context or a.yes):                # (read for the Mac's pool, or for the context question)
+        w, kvt = weights_gib(paths), kv_bytes_per_token(paths)
+        w = (w[0], w[1] + kv_ring_gib(paths) + drafter_gib)   # (flint's sliding-window rings, DeepSeek's drafter:
+                                                               # held with the other weights)
     if mac:
-        w, kvt, avail = weights_gib(paths), kv_bytes_per_token(paths), mac_available_gib()
-        w = (w[0], w[1] + kv_ring_gib(paths) + drafter_gib)   # (flint's sliding-window rings, DeepSeek's drafter: held
-        if family == "deepseek41":                     # with the other weights)                     # its prompt's staging copy (one layer's 384 experts, 3.7 GiB at
+        avail = mac_available_gib()
+        if family == "deepseek41":                     # its prompt's staging copy (one layer's 384 experts, 3.7 GiB at
             w = (w[0], w[1] + staging_gib(paths))      # 2.00 bpw) with them: on a 64 GB Mac a pool that left it out
                                                        # froze the machine (46 GiB of Metal memory, 2026-10-26)
         if vision and vision.get("gpu"):                # the image encoder on the GPU: held beside them too.  Measured on
@@ -7402,21 +7452,38 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
             # (Metal out of memory); Swift IQ3_XXS with every expert in memory ran out at the first picture
             w = (w[0], w[1] + Path(vision["mmproj"]).stat().st_size / 2**30 + 2.0)
         draft_gib = draft.stat().st_size / 2**30 if draft else 0.0
-        fixed = a.context or fam.get("context")
-        for c in ((fixed,) if fixed else (65536, 32768)):
-            c = min(c, 16384) if ram < 16 and not a.context else c
-            pool, ctx = mac_pool_gib(ram, *w, avail, kvt * c / 2**30, draft_gib), c
-            if pool is not None and fam.get("mac_margin_gib"):
-                pool = max(3, pool - fam["mac_margin_gib"])
-            if draft and pool is not None and mac_pool_gib(ram, *w, avail, kvt * c / 2**30) is None and use_draft is None:
-                # every expert fits only without the draft layer: faster so (the M1 Ultra, Flash-Next IQ3_XXS: 29.7
-                # tok/s, its server 29.2, against 24.3 / 19.4 drafting from a 37 GiB pool)
-                draft, draft_gib, pool = None, 0.0, None
-                ok("every expert fits in memory without the draft layer: no drafting (faster here)")
-            if pool is None:
-                break
+        draft0 = draft
+
+        def mac_fit(fixed, quiet=False, picked=False):
+            """The context and the expert pool for it: `fixed`, else 64K when every expert fits beside its KV cache,
+            else 32K; at most 16K under 16 GB unless it was asked for (--context, or picked).  (pool, ctx, draft,
+            draft_gib)"""
+            d, dg, p, cx = draft0, draft_gib, None, fixed
+            for c in ((fixed,) if fixed else (65536, 32768)):
+                c = min(c, 16384) if ram < 16 and not a.context and not picked else c
+                p, cx = mac_pool_gib(ram, *w, avail, kvt * c / 2**30, dg), c
+                if p is not None and fam.get("mac_margin_gib"):
+                    p = max(3, p - fam["mac_margin_gib"])
+                if d and p is not None and mac_pool_gib(ram, *w, avail, kvt * c / 2**30) is None and use_draft is None:
+                    # every expert fits only without the draft layer: faster so (the M1 Ultra, Flash-Next IQ3_XXS: 29.7
+                    # tok/s, its server 29.2, against 24.3 / 19.4 drafting from a 37 GiB pool)
+                    d, dg, p = None, 0.0, None
+                    if not quiet:
+                        ok("every expert fits in memory without the draft layer: no drafting (faster here)")
+                if p is None:
+                    break
+            return p, cx, d, dg
+
+        pool, ctx, draft, draft_gib = mac_fit(a.context or fam.get("context"), quiet=not a.context and not a.yes)
     if unified and ram < 16 and not a.context:
         ctx = min(ctx, 16384)
+    if not a.context and not a.yes:                    # asked, the size above recommended (--yes, --context: as before)
+        pick = ask_ggml_context(paths, ctx, w, kvt, mac, unified, ram, gpu, fam,
+                                (lambda c: mac_pool_gib(ram, *w, avail, kvt * c / 2**30, draft_gib)) if mac else None)
+        if mac:
+            pool, ctx, draft, draft_gib = mac_fit(pick, picked=True)
+        else:
+            ctx = pick
     args = ["-m", str(paths[0]), "--ctx", str(ctx)]
     for f, flag in extras:                             # (DeepSeek: its Engram table; on the Spark its drafter)
         args += [flag, str(f)]
