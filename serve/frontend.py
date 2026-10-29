@@ -1593,7 +1593,7 @@ class OutputParser:
         self.stray_think = 0         # ... and the strays of that kind dropped from the answer
         self.refused = 0             # declared calls kept as reasoning text (quoted, or the turn was cut)
         self.fence, self.line, self.ticks = "", "", 0
-        # recover (opt-in, the config's "tool_call_recovery"): a declared tool's call written next to the template's
+        # recover (on in the server since 0.2.8, off for a bare OutputParser; the config's "tool_call_recovery": false turns it off): a declared tool's call written next to the template's
         # form is the call - `<parameter=NAME>` as the opener, JSON inside <tool_call>, a bare <function=NAME> at the
         # start of a line outside code, or a second call in the same <tool_call> (which otherwise merges into one).
         self.recover = recover

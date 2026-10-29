@@ -3347,7 +3347,7 @@ class Service:
         self.parser_cls = OutputParser                   # reads the model's output (reasoning, content, tool calls)
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
-        self.tool_call_recovery = False                   # opt-in: tool calls in forms next to the template's
+        self.tool_call_recovery = True                    # default on (0.2.8): tool calls in forms next to the template's; config "tool_call_recovery": false turns it off
         self.images = None                                # serve/images.py's ImageGen when the config has "images"
         self.restore_after_load = None                    # a session file an image job saved before it unloaded
         # the end-of-turn tokens; a name the vocabulary has no single token for (Nemotron 3.5 Bolt has no
@@ -7185,6 +7185,15 @@ def default_model_name(cfg: dict) -> str:
     return cfg.get("model_name") or FAMILY_MODEL_NAMES.get(cfg.get("arch") or "qwen4exp", "qwen3.8-flash-next")
 
 
+def tool_call_recovery_setting(cfg: dict) -> bool:
+    """The config's "tool_call_recovery" (see OutputParser's recover): ON when the config does not name it (since 0.2.8; 0.2.7 and before: off),
+    "tool_call_recovery": false turns it off. Anything but true or false stops the start."""
+    recovery = cfg.get("tool_call_recovery", True)
+    if not isinstance(recovery, bool):
+        raise SystemExit(f"[momoe] config \"tool_call_recovery\" must be true or false, not {recovery!r}")
+    return recovery
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--engine", choices=["mock", "strata"], default="mock")
@@ -7467,10 +7476,7 @@ def main() -> int:
     if mode not in ("model", "on_request"):
         raise SystemExit(f"[momoe] config anthropic_thinking must be \"model\" or \"on_request\", not {mode!r}")
     svc.anthropic_think_unasked = mode == "model"
-    recovery = cfg.get("tool_call_recovery", False)     # opt-in: see OutputParser's recover
-    if not isinstance(recovery, bool):
-        raise SystemExit(f"[momoe] config \"tool_call_recovery\" must be true or false, not {recovery!r}")
-    svc.tool_call_recovery = recovery
+    svc.tool_call_recovery = tool_call_recovery_setting(cfg)
     etu = cfg.get("env_to_user", False)                # opt-in: see frontend._env_to_user
     if not isinstance(etu, bool):
         raise SystemExit(f"[momoe] config \"env_to_user\" must be true or false, not {etu!r}")
