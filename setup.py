@@ -7288,7 +7288,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         stamp_ggml_build(exe.parent)                   # what update_ggml_engines compares against
         ok(str(exe))
     else:
-        step(2, "building the engine (momoe-cuda; the first build takes 10-20 minutes)")
+        step(2, "building the engine (momoe-cuda: only what changed is compiled; the first build takes 10-20 minutes)")
         pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES, "Python packages (cmake, the server's)")
         exe = ROOT / "build-cuda" / "momoe-cuda"
         archs = ";".join(sorted({g["arch"] for g in found}))

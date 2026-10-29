@@ -7,6 +7,9 @@ set -e
 cd "$(dirname "$0")"
 export PATH="$PWD/../../.venv/bin:$PATH"             # cmake from .venv (requirements.txt)
 NVCC="${NVCC:-$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)}"
+# the compiler's real path: CMake throws its whole cache away (and every object is compiled again) when the path
+# changes, and /usr/local/cuda/bin/nvcc and /usr/local/cuda-13.0/bin/nvcc are the same compiler through a symlink
+NVCC="$(readlink -f "$NVCC" 2>/dev/null || echo "$NVCC")"
 B=../../build-cuda/cmake
 mkdir -p ../../build-cuda
 cmake -S . -B $B -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CUDA_COMPILER="$NVCC" \
