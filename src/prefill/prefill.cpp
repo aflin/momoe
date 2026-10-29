@@ -2559,6 +2559,16 @@ int64_t Prefill::chain_experts_streamed() const {
     return sum;
 }
 
+Prefill::ExpertCounts Prefill::chain_expert_counts() const {
+    ExpertCounts c;
+    for (const Prefill* p = this; p != nullptr; p = p->next_) {
+        c.resident += p->stats_.experts_resident;
+        c.streamed += p->stats_.experts_streamed;
+        c.cpu += p->stats_.experts_cpu;
+    }
+    return c;
+}
+
 uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk, bool src) {
     return bytes_needed_impl(g, ss, chunk, false, src);
 }

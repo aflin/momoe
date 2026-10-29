@@ -1276,6 +1276,27 @@ void drive_pool_multi_impl(void* user, const float* x_f, const int32_t* ids, int
     }
 }
 
+/// Momoe: the expert counts of the serve log's "experts" lines (docs/EXPERT_STATS.md): the share of the experts the
+/// prompt path or the decode needed that were on the card, in the wording of Momoe's ggml engine.
+static std::string expert_share(int64_t on, int64_t needed, const std::string& rest) {
+    if (needed <= 0) return "none needed";
+    char b[96];
+    std::snprintf(b, sizeof b, "%.1f%% on the card (%lld of %lld", 100.0 * (double) on / (double) needed, (long long) on,
+                  (long long) needed);
+    return std::string(b) + (rest.empty() ? "" : "; " + rest) + ")";
+}
+static std::string prompt_experts(int64_t on, int64_t ram, int64_t cpu) {
+    char b[96];
+    std::snprintf(b, sizeof b, "%lld copied in from RAM, %lld computed on the CPU", (long long) ram, (long long) cpu);
+    return expert_share(on, on + ram + cpu, b);
+}
+static std::string decode_experts(int64_t hits, int64_t look, int64_t offload) {
+    char b[96];
+    std::snprintf(b, sizeof b, "%lld not on it, %lld of those read by the GPU over PCIe", (long long) (look - hits + offload),
+                  (long long) offload);
+    return expert_share(hits, look + offload, b);
+}
+
 /// The verify window's pool as every decode has always run it (Default arithmetic), and the same with the window-invariant native
 /// arithmetic that a probabilistic (STRATA_SPEC_PROB) decode uses, so a row's target distribution does not depend on the window.
 void drive_pool_multi(void* u, const float* x, const int32_t* ids, int64_t n, int64_t k, float* out, int64_t l) {
@@ -13642,6 +13663,44 @@ int main(int argc, char** argv) {
                 if (!pump(false)) return false;
             return pmtp_settle();
         };
+        // Momoe: every MOMOE_HIT_LOG_S seconds (default 60, 0: off) while requests run, the experts the prompt path and
+        // the decode needed since the last such line and where they were (docs/EXPERT_STATS.md).  A thread of its own
+        // reads the counters (for the log only), so the serve loop and the prompt path are not touched
+        struct HitLog {
+            std::atomic<bool> stop{false};
+            std::thread t;
+            ~HitLog() { stop = true; if (t.joinable()) t.join(); }
+        } hit_log;
+        if (const double every = std::getenv("MOMOE_HIT_LOG_S") ? std::atof(std::getenv("MOMOE_HIT_LOG_S")) : 60.0; every > 0)
+            hit_log.t = std::thread([&hit_log, &sp, &drive, every] {
+                struct Snap { strata::prefill::Prefill::ExpertCounts pf; int64_t hits = 0, look = 0, off = 0; };
+                auto snap = [&] {
+                    Snap n;
+                    n.pf = sp.chain_expert_counts();
+                    n.hits = drive.d.cache_hits;
+                    n.look = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
+                    n.off = drive.d.offload_entries;
+                    return n;
+                };
+                Snap last = snap();
+                Clock::time_point since = Clock::now();
+                while (!hit_log.stop.load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    const double s_ = std::chrono::duration<double>(Clock::now() - since).count();
+                    if (s_ < every) continue;
+                    const Snap n = snap();
+                    const int64_t pr = (n.pf.resident - last.pf.resident) + (n.pf.streamed - last.pf.streamed) +
+                                       (n.pf.cpu - last.pf.cpu);
+                    const int64_t dl = (n.look - last.look) + (n.off - last.off);
+                    if (pr > 0 || dl > 0)
+                        std::fprintf(stderr, "momoe serve: experts, the last %.0f s: prompt %s; writing %s\n", s_,
+                                     prompt_experts(n.pf.resident - last.pf.resident, n.pf.streamed - last.pf.streamed,
+                                                    n.pf.cpu - last.pf.cpu).c_str(),
+                                     decode_experts(n.hits - last.hits, n.look - last.look, n.off - last.off).c_str());
+                    last = n;
+                    since = Clock::now();
+                }
+            });
         for (;;) {
             line_drain_ms = 0.0;
             if (batch_on() || (piped && pipe_inflight())) {
@@ -14242,6 +14301,7 @@ int main(int argc, char** argv) {
             tr("r0");
             strata::core::conversation_checkpoint_join(nullptr);   // STRATA_CKPT_ASYNC: the last save's copy has landed
             const int64_t streamed0 = sp.chain_experts_streamed();   // the DONE line's experts_streamed= is the difference
+            const strata::prefill::Prefill::ExpertCounts pf0 = sp.chain_expert_counts();   // Momoe: the experts line
             // ---- where this request starts reading: the live session, or a checkpoint, whose tokens AND pictures are
             // exactly the start of this prompt - at most n - 1 of them, the last token is always the first window
             auto starts_with = [&](const std::vector<int32_t>& pre, const std::vector<ImgKey>& pre_imgs) -> bool {
@@ -17486,6 +17546,12 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "momoe serve: decode expert cache hit rate: %.1f%% (%lld hits / %lld lookups)%s\n",
                              100.0 * (double) req_hits / (double) req_look,
                              (long long) req_hits, (long long) req_look, off);
+            }
+            {   // Momoe: the same in the format of Momoe's ggml engine, with the prompt path's (docs/EXPERT_STATS.md)
+                const strata::prefill::Prefill::ExpertCounts pc = sp.chain_expert_counts();
+                std::fprintf(stderr, "momoe serve: experts: prompt %s; writing %s\n",
+                             prompt_experts(pc.resident - pf0.resident, pc.streamed - pf0.streamed, pc.cpu - pf0.cpu).c_str(),
+                             decode_experts(req_hits, req_look, req_offload).c_str());
             }
             if (drive.d.tail_experts > 0)   // STRATA_ROUTE_TAIL_SKIP, cumulative
                 std::fprintf(stderr, "momoe serve: route tail skip: %lld missed experts skipped (%lld entries) since the "

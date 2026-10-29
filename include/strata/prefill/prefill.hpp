@@ -126,6 +126,10 @@ public:
     static void log_plan(int64_t n, int64_t chunk, int stages);
     /// The expert blobs this stage and the later ones copied host -> device so far (PrefillStats::experts_streamed).
     int64_t chain_experts_streamed() const;
+    /// Momoe: the expert-layer groups the prompt path needed, summed over the stages: served from the VRAM tier,
+    /// copied in from RAM, computed on the CPU (the serve log's expert line; read from another thread there).
+    struct ExpertCounts { int64_t resident = 0, streamed = 0, cpu = 0; };
+    ExpertCounts chain_expert_counts() const;
     /// #340: the streamed ring's slot count for chunks that stream every expert, instead of the pinned-share rule
     /// (0 = that rule). Set before any `bytes_needed`/`init` (both count the ring); STRATA_PREFILL_RING still wins.
     static void set_ring_override(int slots);
