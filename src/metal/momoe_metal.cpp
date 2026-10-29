@@ -303,11 +303,50 @@ struct Pool {
     uint64_t hits = 0, misses = 0, bytes_read = 0, calls = 0;
     uint64_t prefetched = 0, prefetch_hits = 0, late = 0;    // late: a prefetched expert not read yet when needed
     uint64_t stage_from_pool = 0;                            // momoe-cuda: staged experts copied from the pool, not read
+    uint64_t stage_read = 0;                                 // staged experts read from the file (a big batch's)
     double read_s = 0, cb_s = 0;
     bool lfu = true;                                         // the least used (counts halved every
     std::vector<uint32_t> freq;                              // 64 tokens) is replaced, recency breaks ties
     uint64_t uses = 0;
 };
+
+// the pool's counters at one moment, and the difference of two (the serve loop's logging)
+struct PoolTally {
+    // an expert a token needs in a layer: found in the pool (hits), or not (misses, read in); a big prompt batch reads
+    // each layer's experts into a staging copy instead, once per batch: copied from the pool, or read from the file
+    uint64_t hits = 0, misses = 0, staged_pool = 0, staged_read = 0, bytes = 0;
+    double read_s = 0;
+    PoolTally operator-(const PoolTally & o) const {   // (a counter reset in between: from zero)
+        auto sub = [](uint64_t a, uint64_t b) { return a >= b ? a - b : a; };
+        PoolTally d;
+        d.hits = sub(hits, o.hits);
+        d.misses = sub(misses, o.misses);
+        d.staged_pool = sub(staged_pool, o.staged_pool);
+        d.staged_read = sub(staged_read, o.staged_read);
+        d.bytes = sub(bytes, o.bytes);
+        d.read_s = read_s >= o.read_s ? read_s - o.read_s : read_s;
+        return d;
+    }
+    uint64_t needed() const { return hits + misses + staged_pool + staged_read; }
+    std::string str() const {
+        char b[400];
+        const uint64_t in = hits + staged_pool, n = needed();
+        int k = snprintf(b, sizeof b, "%.1f%% in the pool (%llu of %llu", 100.0 * in / (n ? n : 1),
+                         (unsigned long long) in, (unsigned long long) n);
+        if (staged_pool + staged_read)
+            k += snprintf(b + k, sizeof b - k, "; %llu of them in prompt batches",
+                          (unsigned long long) (staged_pool + staged_read));
+        snprintf(b + k, sizeof b - k, "); %.0f MiB read in all (misses, read-ahead, pool refills), %.1f s waited for reads",
+                 bytes / 1048576.0, read_s);
+        return b;
+    }
+};
+static PoolTally pool_tally(const Pool & P) {
+    PoolTally t;
+    t.hits = P.hits; t.misses = P.misses; t.staged_pool = P.stage_from_pool; t.staged_read = P.stage_read;
+    t.bytes = P.bytes_read; t.read_s = P.read_s;
+    return t;
+}
 
 static void read_at(int fd, void * dst, size_t size, size_t off);
 
@@ -2415,6 +2454,7 @@ static void make_resident(Engine & e, int il, const int32_t * ids, int n_tok) {
                 continue;
             }
 #endif
+            ++P.stage_read;
             for (int w = m.part0(); w < 3; ++w) {
                 const size_t off = L.exp_off[w] + (size_t) x * L.exp_bytes[w], t_off = (size_t) x * G.stage[w]->nb[2];
                 jobs.push_back({L.exp_fd[w], nullptr, L.exp_bytes[w], off, &left, L.exp_map[w] + off, G.stage[w], t_off});
@@ -7056,6 +7096,9 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
     struct Ckpt { std::vector<int32_t> toks; Saved st; std::vector<float> h; };
     std::vector<Ckpt> cks;                                  // oldest first
     const size_t max_cks = 4;
+    const double hit_log_s = [] { const char * v = getenv("MOMOE_HIT_LOG_S"); return v ? atof(v) : 60.0; }();
+    double hit_t = 0;                                       // the periodic expert line: when it was last written,
+    PoolTally hit_last;                                     // and the counters then
     const int32_t im_start = m.im_start;                    // <|im_start|> (Qwen3.5/3.6, Ornith, Flash-Next: 248045)
     // a conversation set aside while another request overwrites its positions (Claude Code's short side requests,
     // the session's title): its checkpoint and its caches' positions [from, toks.size()) copied aside; those before
@@ -7253,6 +7296,21 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
             }
         }
         out_line("RESUME %d", reused);
+        // the expert pool's counters: this request's part (the line after its "prompt ... tokens" line) and, every
+        // MOMOE_HIT_LOG_S seconds of work (default 60, 0: never), the share found in the pool since the last such line
+        const PoolTally req0 = pool_tally(e.pool);
+        PoolTally prompt_end = req0;
+        auto hit_tick = [&]() {
+            if (hit_log_s <= 0) return;
+            const double now = now_s();
+            if (now - hit_t < hit_log_s) return;
+            const PoolTally t = pool_tally(e.pool), d = t - hit_last;
+            if (d.needed() > 0)
+                fprintf(stderr, "momoe serve: experts, the last %.0f s: %s\n", now - hit_t, d.str().c_str());
+            hit_last = t;
+            hit_t = now;
+        };
+        if (now_s() - hit_t >= hit_log_s) { hit_last = req0; hit_t = now_s(); }   // (an idle spell is not counted)
         // the n-gram models' token history (Flash-Next's PLE, DeepSeek's Engram) is the prompt's own up to `reused`: a
         // conversation put back from the cache left the history of the one that ran in between
         e.tok_at.assign(ptoks.begin(), ptoks.begin() + reused);
@@ -7296,8 +7354,10 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
             }
             const double ms = 1000 * (now_s() - t0);
             out_line("PP %d %zu %.0f %.1f", p - reused, prompt.size() - reused, ms, (p - reused) / (ms / 1000));
+            hit_tick();
         }
         const double prompt_ms = 1000 * (now_s() - t0);
+        prompt_end = pool_tally(e.pool);
         int generated = 0, accepted = 0, offered = 0;
         const char * finish = "cancel";
         if (!cancelled) {
@@ -7308,6 +7368,7 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
             const double td0 = now_s();
             auto emit = [&](int t) -> bool {                // false: stop
                 out_line("T %d", t);
+                hit_tick();
                 ++generated;
                 if (std::find(eos.begin(), eos.end(), t) != eos.end()) { finish = "stop"; return false; }
                 if (generated >= max_new) { finish = "length"; return false; }
@@ -7410,6 +7471,12 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                     "ms (%.1f tok/s), drafts accepted %d of %d\n", prompt.size(), reused, prompt.size() - reused,
                     prompt_ms, (prompt.size() - reused) / (prompt_ms / 1000 + 1e-9), generated, decode_ms,
                     generated / (decode_ms / 1000 + 1e-9), accepted, offered);
+            {
+                const PoolTally pr = prompt_end - req0, wr = pool_tally(e.pool) - prompt_end;
+                fprintf(stderr, "momoe serve: experts: prompt %s; writing %s\n",
+                        pr.needed() ? pr.str().c_str() : "none needed",
+                        wr.needed() ? wr.str().c_str() : "none needed");
+            }
             out_line("DONE %d %zu %.0f %.0f %s %d %d %d", generated, prompt.size(), prompt_ms, decode_ms, finish, accepted,
                      offered, reused);
             kv = live;
@@ -7429,6 +7496,11 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                 if (cks.size() > max_cks) cks.erase(cks.begin());
                 fprintf(stderr, "momoe serve: cancelled while reading the prompt: the %d tokens read so far are kept for "
                         "the next request that starts with them\n", p);
+            }
+            {
+                const PoolTally pr = prompt_end - req0;
+                if (pr.needed())
+                    fprintf(stderr, "momoe serve: experts (cancelled while reading the prompt): %s\n", pr.str().c_str());
             }
             live.clear();                                    // part of the prompt was read: the state is not a prefix
             kv.assign(prompt.begin(), prompt.begin() + p);   // (its positions are: its checkpoint stays usable)
