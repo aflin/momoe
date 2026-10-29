@@ -282,7 +282,8 @@ momoe remove ornith-8gb               # delete a model: its GGUF, its pack, the 
 
 Every log is in `logs/`:
 - **`logs/<config>.log`** is the engine's: loading, the expert cache, one block of numbers per request. The engine
-  logs keep growing.
+  logs keep growing. Its `experts` lines say how often the experts a request needed were already in GPU memory:
+  [docs/EXPERT_STATS.md](docs/EXPERT_STATS.md).
 - **`logs/server.log`** is the server's, started again with each `momoe start`. It writes a line a second while it
   answers, and a `done:` line per answer with its speed and the expert cache's hit rate.
 
