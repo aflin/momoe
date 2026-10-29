@@ -7414,6 +7414,22 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                      offered, reused);
             kv = live;
         } else {
+            // a prompt cancelled while it was read (Claude Code's auto-mode classifier gives up after 75 s): what was
+            // read is kept as a checkpoint, so the next request that starts with it - the same caller asking again -
+            // continues from there instead of reading it all again; the conversation cache swaps it with the other
+            // conversation like any checkpoint
+            if ((size_t) (p - reused) >= park_min && p > 0 && (size_t) p < prompt.size()) {
+                Ckpt c;
+                c.toks.assign(prompt.begin(), prompt.begin() + p);
+                save_state(e, c.st);
+                if (m.has_mtp && H.size() >= (size_t) ne) c.h.assign(H.end() - ne, H.end());
+                cks.erase(std::remove_if(cks.begin(), cks.end(), [&](const Ckpt & o) { return o.toks == c.toks; }),
+                          cks.end());
+                cks.push_back(std::move(c));
+                if (cks.size() > max_cks) cks.erase(cks.begin());
+                fprintf(stderr, "momoe serve: cancelled while reading the prompt: the %d tokens read so far are kept for "
+                        "the next request that starts with them\n", p);
+            }
             live.clear();                                    // part of the prompt was read: the state is not a prefix
             kv.assign(prompt.begin(), prompt.begin() + p);   // (its positions are: its checkpoint stays usable)
             out_line("DONE 0 %zu %.0f 0 cancel 0 0 %d", prompt.size(), prompt_ms, reused);
