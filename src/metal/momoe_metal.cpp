@@ -2541,11 +2541,11 @@ static void make_resident(Engine & e, int il, const int32_t * ids, int n_tok) {
             continue;
         }
         if (slot >= 0) {
-            ++P.hits;
-            if (G.by_prefetch[slot]) { ++P.prefetch_hits; G.by_prefetch[slot] = 0; }
+            ++(stage ? P.stage_from_pool : P.hits);          // (a big batch's: counted as momoe-cuda's staging counts
+            if (G.by_prefetch[slot]) { ++P.prefetch_hits; G.by_prefetch[slot] = 0; }   // them, once per batch)
             if (G.left[slot].load(std::memory_order_acquire)) { ++P.late; wait.push_back(slot); }
         } else {
-            ++P.misses;
+            ++(stage ? P.stage_read : P.misses);
             slot = take_slot(P, G, pin);
             while (slot < 0 && !stage) {                     // every slot this layer's or being read: wait for a read
                 bool reading = false;
@@ -7815,7 +7815,7 @@ int main(int argc, char ** argv) {
         fflush(stderr);
         _exit(0);                                            // (the readers' threads are still running)
     }
-    const uint64_t pm = e.pool.misses, ph = e.pool.hits;
+    const uint64_t pm = e.pool.misses, ph = e.pool.hits, ps = e.pool.stage_read;
     const uint64_t pb = e.pool.bytes_read;
     const double pr = e.pool.read_s;
     std::vector<int32_t> out;
@@ -8001,7 +8001,7 @@ int main(int argc, char ** argv) {
     for (auto t : out) printf(" %d", t);
     printf("\n");
     fprintf(stderr, "momoe-metal: prompt %zu tokens in %.2f s (%.1f tok/s): %llu expert misses, %.0f MiB read in %.2f s\n",
-            prompt.size(), t_prompt, prompt.size() / t_prompt, (unsigned long long) pm, pb / 1048576.0, pr);
+            prompt.size(), t_prompt, prompt.size() / t_prompt, (unsigned long long) (pm + ps), pb / 1048576.0, pr);
     if (e.pool.stage_from_pool)
         fprintf(stderr, "momoe-cuda: %llu staged experts copied from the pool instead of read\n",
                 (unsigned long long) e.pool.stage_from_pool);
