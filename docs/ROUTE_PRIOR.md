@@ -1,8 +1,10 @@
 # Residency-biased routing (STRATA_ROUTE_PRIOR): off in MoMoE
 
-Strata 0.2.7 turns on, by default, a routing change for NVIDIA cards of 13 GiB or less: the router prefers experts
-that are already on the card. MoMoE takes Strata 0.2.7's engine but leaves this off. This page is why: on a 12 GB card
-it makes Qwen3.8-Flash-Next write 41-78% faster, and it makes the answers clearly worse, tool use most of all.
+Strata 0.2.7 turned on, by default, a routing change for NVIDIA cards of 13 GiB or less: the router prefers experts
+that are already on the card. MoMoE took Strata 0.2.7's engine but left this off, and Strata 0.2.8 turned it off
+again too (#4402: repetition loops and weaker results in long agent sessions). This page is the measurement behind
+MoMoE's choice: on a 12 GB card it makes Qwen3.8-Flash-Next write 41-78% faster, and it makes the answers clearly worse,
+tool use most of all.
 
 ## What it does
 
@@ -17,12 +19,13 @@ This is not what Strata's adaptive expert tier or MoMoE's `--hybrid` do. Those c
 (on the card, by the CPU, or read over PCIe) and change only where it is computed and what the cache holds next; the
 answer stays the router's, apart from rounding.
 
-Strata's default (0.2.7): λ = 1.5 on a discrete NVIDIA card of 13 GiB or less, off elsewhere. Strata checked it on an
+Strata 0.2.7's default: λ = 1.5 on a discrete NVIDIA card of 13 GiB or less, off elsewhere. Strata checked it on an
 RTX 3060 12 GB with 80 tasks: no copy or code errors; agent tasks passed 4.5 of 10 on average over 4 runs at 1.5
-against 5.6 of 10 over 7 runs with it off, which they put within the run-to-run spread.
+against 5.6 of 10 over 7 runs with it off, which they put within the run-to-run spread. Strata 0.2.8 (2026-10-29)
+took the default back after reports of repetition loops in long agent sessions; with nothing set it routes as 0.2.6.
 
-MoMoE: off on every card. `STRATA_ROUTE_PRIOR=<λ>` turns it on, `STRATA_ROUTE_PRIOR=auto` takes Strata's rule
-(`src/core/verify.cpp`, `g_route_prior`). It only acts on Flash-Next's shape (512 experts, 10 a token).
+MoMoE: off on every card, as Strata 0.2.8. `STRATA_ROUTE_PRIOR=<λ>` turns it on (1.5 is Strata's value;
+`src/core/verify.cpp`, `g_route_prior`). It only acts on Flash-Next's shape (512 experts, 10 a token).
 
 ## Measured
 
@@ -112,7 +115,7 @@ Each against the same engine with the setting off, on the 4070 Ti PC above unles
 
 | Setting | Strata's default | Speed | Next-token KL | Graded tasks | MoMoE |
 | --- | --- | --- | ---: | --- | --- |
-| Residency-biased routing (`STRATA_ROUTE_PRIOR=1.5`) | on, cards of 13 GiB or less | decode +41-78% | 0.251 | 84.3% against 95.7% | **off** |
+| Residency-biased routing (`STRATA_ROUTE_PRIOR=1.5`) | 0.2.7: on, cards of 13 GiB or less; 0.2.8: off | decode +41-78% | 0.251 | 84.3% against 95.7% | **off** |
 | Route tail skip (`STRATA_ROUTE_TAIL_SKIP=7`) | on, CUDA | decode +27-35% | 0.064 | 95.6% against 91.9% | kept |
 | DeepSeek's five experts (`--experts 5`) | on, 16 GiB of cards or less | decode +11-31% | 0.030 | not run | kept |
 | Int8 prompt attention (`STRATA_PROMPT_ATTN_IMMA`) | on, sm_80 and newer | prompt +0.4% on sm_89 | 0.014 (prompt path) | not run | **off on sm_89** |
