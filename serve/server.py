@@ -3076,6 +3076,37 @@ def hip_env_guard(env: dict, cfg: dict) -> list[str]:
     return said
 
 
+def engine_arch_note(cfg: dict, cards: dict[int, int] | None = None, built: dict | None = None) -> str | None:
+    """#4662: a compiled engine holds code for the architectures it was built for (BUILD.json "archs"); on a card of another one a long prompt
+    ends in "unspecified launch failure" (the kernels it needs are a trap there).  One plain line when a card this run uses is not covered
+    (NVIDIA; a build with PTX also covers newer cards).  Said, never refused: the engine is started as asked.  `cards`: {nvidia-smi number:
+    compute capability x 10}; `built`: the BUILD.json dict - both read here when not given.  None when everything is covered or unknown."""
+    try:
+        if cfg.get("backend") == "hip":
+            return None
+        if built is None:
+            exe = cfg.get("exe")
+            if not isinstance(exe, str):
+                return None
+            built = json.loads((Path(exe).parent / "BUILD.json").read_text(encoding="utf-8-sig"))
+        archs = sorted({int(re.sub(r"\D", "", str(a))) for a in built.get("archs") or [] if re.sub(r"\D", "", str(a))})
+        if not archs:
+            return None
+        if cards is None:
+            r = subprocess.run(["nvidia-smi", "--query-gpu=index,compute_cap", "--format=csv,noheader"], capture_output=True, text=True,
+                               errors="replace", timeout=10)
+            cards = {int(i): int(round(float(c) * 10)) for i, c in (ln.split(",") for ln in (r.stdout or "").strip().splitlines())}
+        used = gpu_list(cfg) or sorted(cards)
+        miss = sorted({cards[i] for i in used if i in cards and cards[i] not in archs and not (built.get("ptx") and cards[i] > max(archs))})
+        if not miss:
+            return None
+        names = ", ".join(f"sm_{m}" for m in miss)
+        return (f"[momoe] this engine was built for {', '.join(f'sm_{a}' for a in archs)}, but a graphics card in use is {names}: long prompts "
+                "can stop with \"unspecified launch failure\". Run ./update.sh so the engine is built for every card in this PC.")
+    except Exception:
+        return None
+
+
 def vision_env(cfg: dict, env: dict) -> dict:
     """The image encoder's environment: the engine's, unless the config's vision section names its own "cuda_device"
     (numbered like nvidia-smi) - then the encoder runs on that card alone, so a spare GPU can hold it while the engine
@@ -7351,6 +7382,9 @@ def main() -> int:
         print("model unloaded; the first request loads it ..." if lazy else
               "loading the model (the first start takes a minute or two) ...", flush=True)
         warn_budget_over_ram(engine_args(cfg) if "args" in cfg else [])      # #1080
+        arch_line = engine_arch_note(cfg)                                   # #4662
+        if arch_line:
+            print(arch_line, flush=True)
         if layer_split_of(cfg):
             try:
                 split = layer_split_value(cfg)          # #644: before the (minutes-long) start
