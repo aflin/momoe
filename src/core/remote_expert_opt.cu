@@ -5,6 +5,7 @@
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/elementwise.hpp"
 #include "strata/kernels/verify_kernels.hpp"
+#include "strata/kernels/window_limits.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -15,7 +16,7 @@ namespace {
 // the largest shape (Flash-Next: 10 experts a token, 2560 wide) sizes the buffers; set_shape gives the model's own
 // (Qwen3.6: 8, 2048), which every row stride and count below uses
 constexpr int64_t H = strata::kernels::cpu::H;
-constexpr int K = 10, MAXT = strata::kernels::cpu::MAXT, CAP = MAXT * K;
+constexpr int K = 10, MAXT = strata::kernels::kWindowMaxT, CAP = MAXT * K;   // (a window's rows)
 struct ReduceMeta { int32_t row[CAP]; float weight[CAP]; };
 
 bool check(cudaError_t status, std::string& err) {
