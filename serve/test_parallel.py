@@ -891,10 +891,7 @@ class ParallelStackDefaults(unittest.TestCase):
         hip = self.env_for({"parallel": 8, "args": [], "backend": "hip"})
         for k, v in server.PARALLEL_STACK_ENV.items():
             self.assertEqual(env.get(k), v, k)
-            if k in server.PARALLEL_STACK_NOT_HIP:
-                self.assertNotIn(k, hip)       # HIP: the stack as it was run (seven switches)
-            else:
-                self.assertEqual(hip.get(k), v, k)
+            self.assertNotIn(k, hip)           # HIP: nothing (no measurement without replicas)
         self.assertEqual(self.env_for({"args": ["--batch", "4"]}).get("STRATA_BATCH_SELF_COMMIT"), "1")
 
     def test_off_on_windows_and_mac(self):
