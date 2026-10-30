@@ -1,0 +1,36 @@
+round 0 TS7: ready in 54 s
+  chat0  decode 68.4 tok/s  prompt 64.9 tok/s (34)  n 256
+  chat1  decode 62.9 tok/s  prompt 58.6 tok/s (27)  n 235
+  chat2  decode 63.9 tok/s  prompt 51.6 tok/s (29)  n 199
+  long   decode 57.2 tok/s  prompt 1557.5 tok/s (6345)  n 119
+round 0 TS0: ready in 58 s
+  chat0  decode 50.8 tok/s  prompt 52.8 tok/s (34)  n 256
+  chat1  decode 51.3 tok/s  prompt 47.5 tok/s (27)  n 252
+  chat2  decode 49.4 tok/s  prompt 46.6 tok/s (29)  n 197
+  long   decode 49.2 tok/s  prompt 1564.4 tok/s (6345)  n 138
+round 1 TS0: ready in 55 s
+  chat0  decode 52.1 tok/s  prompt 51.4 tok/s (34)  n 256
+  chat1  decode 49.7 tok/s  prompt 48.8 tok/s (27)  n 239
+  chat2  decode 48.8 tok/s  prompt 45.4 tok/s (29)  n 189
+  long   decode 49.5 tok/s  prompt 1565.4 tok/s (6345)  n 142
+round 1 TS7: ready in 57 s
+  chat0  decode 69.0 tok/s  prompt 66.3 tok/s (34)  n 256
+  chat1  decode 64.6 tok/s  prompt 60.5 tok/s (27)  n 235
+  chat2  decode 61.6 tok/s  prompt 54.8 tok/s (29)  n 199
+  long   decode 64.6 tok/s  prompt 1575.6 tok/s (6345)  n 153
+round 2 TS7: ready in 55 s
+  chat0  decode 68.7 tok/s  prompt 59.9 tok/s (34)  n 256
+  chat1  decode 63.9 tok/s  prompt 55.8 tok/s (27)  n 235
+  chat2  decode 62.7 tok/s  prompt 58.0 tok/s (29)  n 199
+  long   decode 63.3 tok/s  prompt 1586.1 tok/s (6345)  n 153
+round 2 TS0: ready in 55 s
+  chat0  decode 50.5 tok/s  prompt 54.5 tok/s (34)  n 256
+  chat1  decode 49.1 tok/s  prompt 49.7 tok/s (27)  n 256
+  chat2  decode 50.6 tok/s  prompt 44.8 tok/s (29)  n 196
+  long   decode 47.5 tok/s  prompt 1555.2 tok/s (6345)  n 138
+
+medians over rounds:
+  chat0  | TS7: decode   68.7  prompt    64.9 | TS0: decode   50.8  prompt    52.8
+  chat1  | TS7: decode   63.9  prompt    58.6 | TS0: decode   49.7  prompt    48.8
+  chat2  | TS7: decode   62.7  prompt    54.8 | TS0: decode   49.4  prompt    45.4
+  long   | TS7: decode   63.3  prompt  1575.6 | TS0: decode   49.2  prompt  1564.4

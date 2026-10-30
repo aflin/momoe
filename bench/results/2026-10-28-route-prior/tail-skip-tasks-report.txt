@@ -1,0 +1,6 @@
+arm                  code           math           copy           tool            all   samples
+TS0           0/0     0.0%    0/0     0.0%   72/80   90.0%   75/80   93.8%  147/160  91.9%   [0, 1, 2, 3]
+TS7           0/0     0.0%    0/0     0.0%   77/80   96.2%   76/80   95.0%  153/160  95.6%   [0, 1, 2, 3]
+
+paired (task, sample): 160; TS0 only passes 5, TS7 only passes 11; sign test p = 0.21
+tokens/s per task (median): TS0 45.5, TS7 53.7

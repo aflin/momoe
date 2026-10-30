@@ -1,0 +1,15 @@
+# quant_quality.py compare, Flash-Next IQ3_XXS, RTX 4070 Ti, 2897 expert slots: tail skip off (ref), off again, 7
+reference: /tmp/claude-1000/-usr3-local-src-Strata/0b446e8f-0de0-4650-b892-6f030f7bd444/scratchpad/kl/c2897_rp0.tsv
+run                                      segment         pos    top1       KL   KL p99     PPL PPL ref
+c2897_tail0.tsv                          code            999 100.00%  0.00000      nan   2.089   2.089
+c2897_tail0.tsv                          docs            999 100.00%  0.00000      nan  10.323  10.323
+c2897_tail0.tsv                          english         999 100.00%  0.00000      nan   4.320   4.320
+c2897_tail0.tsv                          multilingual    999 100.00%  0.00000      nan   2.704   2.704
+c2897_tail0.tsv                          agent           999 100.00%  0.00000      nan   4.815   4.815
+c2897_tail0.tsv                          all            4995 100.00%  0.00000   0.0000   4.138   4.138
+c2897_tail7.tsv                          code            999  95.30%  0.02732      nan   2.093   2.089
+c2897_tail7.tsv                          docs            999  86.09%  0.07378      nan  10.240  10.323
+c2897_tail7.tsv                          english         999  90.69%  0.04133      nan   4.379   4.320
+c2897_tail7.tsv                          multilingual    999  95.60%  0.02111      nan   2.711   2.704
+c2897_tail7.tsv                          agent           999  89.99%  0.15425      nan   4.619   4.815
+c2897_tail7.tsv                          all            4995  91.53%  0.06356   0.8159   4.112   4.138

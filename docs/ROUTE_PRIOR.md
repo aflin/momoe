@@ -106,7 +106,19 @@ that is not on the card, and in tool use, the work MoMoE is mostly for, they fai
 off. If you want the speed for plain chat and can check the answers, `STRATA_ROUTE_PRIOR=1.0` loses less than 1.5
 (KL 0.14 against 0.25), but that setting has no task check here.
 
-## Also not a default here
+## Strata's other defaults measured here
+
+Each against the same engine with the setting off, on the 4070 Ti PC above unless said:
+
+| Setting | Strata's default | Speed | Next-token KL | Graded tasks | MoMoE |
+| --- | --- | --- | ---: | --- | --- |
+| Residency-biased routing (`STRATA_ROUTE_PRIOR=1.5`) | on, cards of 13 GiB or less | decode +41-78% | 0.251 | 84.3% against 95.7% | **off** |
+| Route tail skip (`STRATA_ROUTE_TAIL_SKIP=7`) | on, CUDA | decode +27-35% | 0.064 | 95.6% against 91.9% | kept |
+| DeepSeek's five experts (`--experts 5`) | on, 16 GiB of cards or less | decode +11-31% | 0.030 | not run | kept |
+| Int8 prompt attention (`STRATA_PROMPT_ATTN_IMMA`) | on, sm_80 and newer | prompt +0.4% on sm_89 | 0.014 (prompt path) | not run | **off on sm_89** |
+
+For scale: two quants a level apart (IQ3_XXS against Q2_0) differ by KL 0.094.
+
 
 **The int8 prompt attention on sm_89.** Strata 0.2.7 also makes `STRATA_PROMPT_ATTN_IMMA` a default on every NVIDIA card
 from sm_80 (measured on sm_120 and sm_86: +1.1-1.8% prompt). It reads the prompt's int8 K/V on the int8 tensor cores
@@ -150,3 +162,28 @@ KL 0.030 is an eighth of the route prior's 0.25 at λ = 1.5 and about a third of
 harder for it to predict (perplexity -0.4% over the set, the agent transcript least changed). MoMoE keeps Strata's
 default: on a 12 GB card it writes 11-31% faster for a change the size of a rounding change. Not measured: graded tasks
 (DeepSeek writes 3-5 tok/s here: the task check above would take days), long prompts, the 2.25 and 1.75 bpw sets.
+
+**Kept: the route tail skip.** Strata's engine skips, in a verify window, an expert that is not on the card when every
+token of the window ranks it 7th or lower of its 10 (`STRATA_ROUTE_TAIL_SKIP=7`, on by default on CUDA since Strata
+0.1.42, `src/core/expert_source.cpp`; `0` turns it off): it is neither copied in nor computed, and the other experts
+keep their weights. Like DeepSeek's five experts it drops the router's weakest choices rather than choosing others.
+Setup turns it off itself for Unsloth's Flash-Next files when every expert is in RAM (Strata 0.1.44: a missed expert
+is cheap to fetch there, and the skip still changes the answers); everywhere else it stays on.
+
+Measured: Qwen3.8-Flash-Next IQ3_XXS, the 4070 Ti PC above, its own 2,897-expert cache, 2026-10-29.
+
+| | Tail skip on (7) | Off |
+| --- | ---: | ---: |
+| Decode, three chats (`tools/ab_engine.py`, 3 rounds, medians) | 68.7 / 63.9 / 62.7 tok/s | 50.8 / 49.7 / 49.4 |
+| Decode after a 6,345-token prompt | 63.3 | 49.2 (on: +27-35%) |
+| Copy tasks (`tools/task_check.py`, 20 tasks x 4) | 77/80 (96.2%) | 72/80 (90.0%) |
+| Tool use tasks (20 x 4) | 76/80 (95.0%) | 75/80 (93.8%) |
+
+The prompt's own read did not change (1,564-1,576 tok/s). Paired by task, 11 pass only with the skip on and 5 only
+with it off (a sign test gives p = 0.21: no difference shown, and none against it). Next-token predictions against the
+skip off (the same text set as above): the same top token 91.5%, KL 0.064 (code 0.027, docs 0.074, English 0.041,
+other languages 0.021, the agent transcript 0.154), perplexity 4.112 against 4.138 (the agent transcript 4.619
+against 4.815). So it changes the wording about once every twelve tokens without making the text harder for the model
+to predict, unlike the route prior (perplexity +12%, the agent transcript +25%). MoMoE keeps Strata's default. The
+graded task check of the route prior above ran with the tail skip on, as Strata's default: both of its arms had it.
+Not measured: math and code tasks with the skip off, other quants, other cards.
