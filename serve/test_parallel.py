@@ -877,10 +877,10 @@ class ParallelService(unittest.TestCase):
 
 class ParallelStackDefaults(unittest.TestCase):
     """The exact parallel stack is the default with batch slots; an explicit value wins."""
-    def env_for(self, cfg, base=None):
+    def env_for(self, cfg, base=None, linux=True):
         import os
         from unittest import mock
-        with mock.patch.dict(os.environ, base or {}, clear=False):
+        with mock.patch.dict(os.environ, base or {}, clear=False), mock.patch.object(server, "parallel_stack_platform", return_value=linux):
             for k in list(os.environ):
                 if k in server.PARALLEL_STACK_ENV and not (base and k in base):
                     del os.environ[k]
@@ -888,9 +888,18 @@ class ParallelStackDefaults(unittest.TestCase):
 
     def test_on_with_parallel(self):
         env = self.env_for({"parallel": 8, "args": []})
+        hip = self.env_for({"parallel": 8, "args": [], "backend": "hip"})
         for k, v in server.PARALLEL_STACK_ENV.items():
             self.assertEqual(env.get(k), v, k)
+            if k in server.PARALLEL_STACK_NOT_HIP:
+                self.assertNotIn(k, hip)       # HIP: the stack as it was run (seven switches)
+            else:
+                self.assertEqual(hip.get(k), v, k)
         self.assertEqual(self.env_for({"args": ["--batch", "4"]}).get("STRATA_BATCH_SELF_COMMIT"), "1")
+
+    def test_off_on_windows_and_mac(self):
+        self.assertNotIn("STRATA_CKPT_POOL", self.env_for({"parallel": 8, "args": []}, linux=False))
+        self.assertTrue(server.parallel_stack_platform.__doc__)
 
     def test_off_without_slots(self):
         self.assertNotIn("STRATA_CKPT_POOL", self.env_for({"args": []}))
