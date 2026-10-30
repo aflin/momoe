@@ -3360,6 +3360,10 @@ class Service:
                                             + (("<turn|>", "<eos>", "<|tool_response>") if "<|channel>" in source else ())
                                             + (("<|role_end|>",) if "<|role_end|>" in source else ()))
                          if len(ids) == 1}
+        if not self.stop_ids:   # #4576: a tokenizer with none of them as one token (DeepSeek-V4.1's) ends on its own eos
+            eos = (getattr(tokenizer, "special_ids", None) or {}).get("eos")
+            if eos is not None:
+                self.stop_ids = {int(eos)}
         # GLM-5's tool-call format (<tool_call>NAME<arg_key>..): the parser rewrites it into its own (GlmCallRewriter)
         self.glm = "<arg_key>" in getattr(template, "source", "")
         # LFM2's (<|tool_call_start|>[name(k=v)]<|tool_call_end|>, a Python list): rewritten too (LfmCallRewriter)

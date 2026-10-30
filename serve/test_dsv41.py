@@ -776,13 +776,14 @@ class ArchFromTokenizer(unittest.TestCase):
         self.assertIsNone(server.arch_from_tokenizer(None, "qwen35"))
         self.assertIsNone(server.arch_from_tokenizer(None, None))
 
-    def test_without_the_family_the_end_token_is_not_a_stop_id_and_pieces_of_im_end_are(self):
-        # what the reporter's config got: the DeepSeek tokenizer splits <|im_end|> into pieces, so "|" and ">" stopped a reply (a table's first
-        # cell), and the end token (id 1) did not stop it at all
+    def test_without_the_family_the_pieces_of_im_end_are_not_stop_ids_and_the_end_token_is(self):
+        # what the reporter's config got upstream (#4137, #4576): the DeepSeek tokenizer splits <|im_end|> into pieces, so "|", ">" and
+        # "im" (Nerazim) stopped a reply, and the end token (id 1) did not stop it at all.  Momoe kept single-token markers only
+        # already; the tokenizer's own eos is the stop id when none of them is one token
         tok = mini_tokenizer()
         wrong = Service(DsEngine(tok, "x"), tok, ChatTemplate(TEMPLATE))
-        self.assertNotIn(EOS, wrong.stop_ids)
-        self.assertTrue(wrong.stop_ids & set(tok.encode("|", parse_special=True)))
+        self.assertIn(EOS, wrong.stop_ids)
+        self.assertFalse(wrong.stop_ids & set(tok.encode("|", parse_special=True)))
         right = Service(DsEngine(tok, "x"), tok, ChatTemplate(TEMPLATE))
         right.set_family("deepseek41")
         self.addCleanup(frontend.use_family, None)
