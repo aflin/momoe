@@ -4521,7 +4521,7 @@ class Service:
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
         # (Gemma 4 writes an empty thought block of its own after a tool result, thinking or not: the reply's start says)
-        parser = self.parser_cls(thinking=thinking or self.gemma, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
+        parser = self.parser_cls(thinking=thinking or self.gemma, tools=with_history_tools(tools, sampling), stream_tools=True, recover=self.tool_call_recovery,
                               glm=self.glm, lfm=self.lfm, gemma=self.gemma, opened=opened is not None,
                               declared_only=declared_only)
         if self.gemma and not thinking:
@@ -7187,6 +7187,33 @@ def arch_from_tokenizer(arch, pre) -> str | None:
 def default_model_name(cfg: dict) -> str:
     """The config's "model_name", else its family's name ("arch": qwen4exp, qwen35moe), else Flash-Next's."""
     return cfg.get("model_name") or FAMILY_MODEL_NAMES.get(cfg.get("arch") or "qwen4exp", "qwen3.8-flash-next")
+
+
+def with_history_tools(tools, req) -> list:
+    """#4663: an agent's tool set changes between turns (deferred tools, MCP servers, a compacted history), and the model calls a tool it used
+    earlier in this conversation that this turn's `tools` no longer lists.  That call came back as raw text with finish_reason "stop", and the
+    client took it for prose and stopped.  A name the conversation's own assistant messages called is a tool the client has, so it counts as
+    declared (the call comes back as a tool call; the client says what it does with it).  Nothing is added when the request declared no
+    tools at all, or for a name that is already declared."""
+    if not tools or not isinstance(req, dict):
+        return tools
+    try:
+        have = {t.get("name") for t in tools if isinstance(t, dict)}
+        extra = []
+        for message in req.get("messages") or []:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            calls = [(call.get("function") or {}).get("name") for call in message.get("tool_calls") or [] if isinstance(call, dict)]
+            content = message.get("content")      # (MoMoE: the Anthropic API's history - Claude Code - has tool_use blocks instead)
+            if isinstance(content, list):
+                calls += [b.get("name") for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+            for name in calls:
+                if isinstance(name, str) and name and name not in have:
+                    have.add(name)
+                    extra.append({"name": name, "parameters": {"type": "object", "properties": {}}})
+        return [*tools, *extra] if extra else tools
+    except Exception:
+        return tools
 
 
 def tool_call_recovery_setting(cfg: dict) -> bool:
