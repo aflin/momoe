@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from serve.frontend import ChatTemplate
+from serve import server
 from serve.server import ByteTokenizer, Service, StrataEngine, engine_args, parallel_args, serve
 
 # The fake engine: one token every STEP seconds per active slot (a "window" serves every active slot at once);
@@ -872,6 +873,38 @@ class ParallelService(unittest.TestCase):
         self.assertEqual(res["r"]["choices"][0]["message"]["content"], "ok, done.")
         self.assertEqual(self.get("/metrics")["live"]["queued"], 0)
 
+
+
+class ParallelStackDefaults(unittest.TestCase):
+    """The exact parallel stack is the default with batch slots; an explicit value wins."""
+    def env_for(self, cfg, base=None):
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, base or {}, clear=False):
+            for k in list(os.environ):
+                if k in server.PARALLEL_STACK_ENV and not (base and k in base):
+                    del os.environ[k]
+            return server.child_env(cfg)
+
+    def test_on_with_parallel(self):
+        env = self.env_for({"parallel": 8, "args": []})
+        for k, v in server.PARALLEL_STACK_ENV.items():
+            self.assertEqual(env.get(k), v, k)
+        self.assertEqual(self.env_for({"args": ["--batch", "4"]}).get("STRATA_BATCH_SELF_COMMIT"), "1")
+
+    def test_off_without_slots(self):
+        self.assertNotIn("STRATA_CKPT_POOL", self.env_for({"args": []}))
+        self.assertNotIn("STRATA_CKPT_POOL", self.env_for({"parallel": 1, "args": []}))
+
+    def test_explicit_wins(self):
+        env = self.env_for({"parallel": 8, "args": [], "env": {"STRATA_BATCH_GDN_GROUPS": "0"}}, {"STRATA_CKPT_POOL": "0"})
+        self.assertEqual(env["STRATA_BATCH_GDN_GROUPS"], "0")
+        self.assertEqual(env["STRATA_CKPT_POOL"], "0")
+        self.assertEqual(env["STRATA_QSA_SLOTS"], "1")
+
+    def test_other_engines_untouched(self):
+        self.assertNotIn("STRATA_CKPT_POOL", self.env_for({"parallel": 8, "args": [], "arch": "deepseek41"}))
+        self.assertNotIn("STRATA_CKPT_POOL", self.env_for({"parallel": 8, "args": [], "backend": "sycl"}))
 
 if __name__ == "__main__":
     unittest.main()
