@@ -3347,7 +3347,7 @@ class Service:
         self.parser_cls = OutputParser                   # reads the model's output (reasoning, content, tool calls)
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
-        self.tool_call_recovery = False                   # opt-in: tool calls in forms next to the template's
+        self.tool_call_recovery = True                    # default on (0.2.8): tool calls in forms next to the template's; config "tool_call_recovery": false turns it off
         self.images = None                                # serve/images.py's ImageGen when the config has "images"
         self.restore_after_load = None                    # a session file an image job saved before it unloaded
         # the end-of-turn tokens; a name the vocabulary has no single token for (Nemotron 3.5 Bolt has no
@@ -3360,6 +3360,10 @@ class Service:
                                             + (("<turn|>", "<eos>", "<|tool_response>") if "<|channel>" in source else ())
                                             + (("<|role_end|>",) if "<|role_end|>" in source else ()))
                          if len(ids) == 1}
+        if not self.stop_ids:   # #4576: a tokenizer with none of them as one token (DeepSeek-V4.1's) ends on its own eos
+            eos = (getattr(tokenizer, "special_ids", None) or {}).get("eos")
+            if eos is not None:
+                self.stop_ids = {int(eos)}
         # GLM-5's tool-call format (<tool_call>NAME<arg_key>..): the parser rewrites it into its own (GlmCallRewriter)
         self.glm = "<arg_key>" in getattr(template, "source", "")
         # LFM2's (<|tool_call_start|>[name(k=v)]<|tool_call_end|>, a Python list): rewritten too (LfmCallRewriter)
@@ -4042,6 +4046,8 @@ class Service:
             ("strata:drafts_accepted_total", "counter", "Speculative draft tokens accepted", t["drafts_accepted"]),
             ("strata:tool_calls_unread_total", "counter", "<tool_call> blocks returned as text (an undeclared name or a form the template does not use)",
              t.get("tool_calls_unread", 0)),
+            ("strata:tool_args_repaired_total", "counter", "Tool call arguments (a JSON array or object) that were damaged and read as written",
+             t.get("tool_args_repaired", 0)),
             ("strata:model_loaded", "gauge", "1 while the model is loaded", int(self.loaded())),
         ]
         return "".join(f"# HELP {name} {help_}\n# TYPE {name} {kind}\n{name} {value}\n"
@@ -4953,6 +4959,14 @@ class Service:
             self.totals["tool_calls_from_reasoning"] = self.totals.get("tool_calls_from_reasoning", 0) + parser.rescued
             print(f"[momoe] tool calls inside the thinking: {parser.rescued} read as calls, {parser.refused} kept as "
                   f"reasoning (quoted, or the turn did not end on a stop)", flush=True)
+        if getattr(parser, "stray_think", 0):
+            # #4077: the model wrote a closing think tag while thinking; the reasoning after it was sent as the answer
+            self.totals["stray_think_closers"] = self.totals.get("stray_think_closers", 0) + parser.stray_think
+            print(f"[strata] {parser.stray_think} extra closing think tag(s) in the answer were dropped (the model wrote one "
+                  "while thinking, so the rest of its reasoning went out as the answer; a call after it still counts)", flush=True)
+        if getattr(parser, "notes", None):
+            self.totals["tool_args_repaired"] = self.totals.get("tool_args_repaired", 0) + len(parser.notes)
+            print(f"[strata] {len(parser.notes)} tool call argument(s) repaired: {'; '.join(sorted(set(parser.notes)))}", flush=True)
         rejected = []
         if parser.unread:
             named = getattr(parser, "unread_names", None)
@@ -7160,9 +7174,28 @@ def model_card_sampling(arch, thinking) -> dict:
     return dict(sets["thinking" if thinking else "instruct"]) if sets else {}
 
 
+def arch_from_tokenizer(arch, pre) -> str | None:
+    """#4137: the model family a config that names none is served as.  A hand-written config (serve/server.py run on its own, a gateway) often leaves
+    "arch" out; for DeepSeek-V4.1 that meant the Qwen defaults: the stop ids of <|im_end|> (the DeepSeek tokenizer splits that into pieces, so a "|" or a
+    ">" in the reply ended it: `finish_reason: stop` at token 19 in front of a table), no end token (the raw <｜end▁of▁sentence｜> came out as text)
+    and no DSML tool calls.  The pack's tokenizer says what it is (its pre-tokenizer is "deepseek3"); an arch the config names is never changed."""
+    if arch:
+        return arch
+    return "deepseek41" if str(pre or "").startswith("deepseek") else None
+
+
 def default_model_name(cfg: dict) -> str:
     """The config's "model_name", else its family's name ("arch": qwen4exp, qwen35moe), else Flash-Next's."""
     return cfg.get("model_name") or FAMILY_MODEL_NAMES.get(cfg.get("arch") or "qwen4exp", "qwen3.8-flash-next")
+
+
+def tool_call_recovery_setting(cfg: dict) -> bool:
+    """The config's "tool_call_recovery" (see OutputParser's recover): ON when the config does not name it (since 0.2.8; 0.2.7 and before: off),
+    "tool_call_recovery": false turns it off. Anything but true or false stops the start."""
+    recovery = cfg.get("tool_call_recovery", True)
+    if not isinstance(recovery, bool):
+        raise SystemExit(f"[momoe] config \"tool_call_recovery\" must be true or false, not {recovery!r}")
+    return recovery
 
 
 def main() -> int:
@@ -7237,6 +7270,7 @@ def main() -> int:
     if cfg.get("tokenizer"):
         a.tokenizer = cfg["tokenizer"]
     tok = ByteTokenizer()
+    tcfg = {}
     tpath = Path(a.tokenizer)
     if a.engine == "strata" and not (tpath / "vocab.json").exists():
         ap.error(f"the model's tokenizer is missing ({tpath / 'vocab.json'}); run setup again")
@@ -7255,6 +7289,10 @@ def main() -> int:
             pre = tcfg.get("pre") or pre
             special = tcfg.get("special_ids") or None   # (DeepSeek-V4.1's pack: its eos and the other special ids)
         tok = ST.Tokenizer(tokens, merges, types, pre=pre, special_ids=special)
+    if a.engine == "strata" and not cfg.get("arch") and arch_from_tokenizer(None, pre):
+        cfg["arch"] = arch_from_tokenizer(None, pre)
+        print(f"[momoe] the config names no \"arch\" and this tokenizer is DeepSeek's: serving it as {cfg['arch']} (its end token, DSML tool "
+              f"calls and effort words); add \"arch\": \"{cfg['arch']}\" to the config to say it outright", flush=True)
     hub = hub_from_config(cfg, a.mcp_config)            # before the minutes of loading: a bad entry stops here
     if a.engine == "strata":
         if not cfg:
@@ -7442,10 +7480,7 @@ def main() -> int:
     if mode not in ("model", "on_request"):
         raise SystemExit(f"[momoe] config anthropic_thinking must be \"model\" or \"on_request\", not {mode!r}")
     svc.anthropic_think_unasked = mode == "model"
-    recovery = cfg.get("tool_call_recovery", False)     # opt-in: see OutputParser's recover
-    if not isinstance(recovery, bool):
-        raise SystemExit(f"[momoe] config \"tool_call_recovery\" must be true or false, not {recovery!r}")
-    svc.tool_call_recovery = recovery
+    svc.tool_call_recovery = tool_call_recovery_setting(cfg)
     etu = cfg.get("env_to_user", False)                # opt-in: see frontend._env_to_user
     if not isinstance(etu, bool):
         raise SystemExit(f"[momoe] config \"env_to_user\" must be true or false, not {etu!r}")
