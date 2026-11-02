@@ -28,6 +28,12 @@ original model, upstream's measurement (4,995 positions): perplexity +15.5% at 2
 ./setup.sh --family deepseek41 --model IST-DAS-2.00bpw
 ```
 
+Files you already have: `--gguf-dir DIR`. On 2026-10-27 ISTA-DASLab re-split the sets on the Hub into five shards
+each (`...-00001-of-00006.gguf` to `-00005-of-00006.gguf`), with the n-gram table as the sixth. Setup downloads the
+pinned four-shard files; with `--gguf-dir` it also takes the six-shard files, checked by size and SHA-256 (the same
+weights; from Strata 0.2.9). This applies to `strata-dsv41` on a PC. `momoe-metal` / `momoe-cuda` still take the
+four-shard files.
+
 ## Measured
 
 | Machine | Engine, config | Chat, writing | 4K prompt | 16K prompt |
