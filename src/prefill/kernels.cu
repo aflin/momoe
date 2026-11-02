@@ -2908,7 +2908,7 @@ void gdn_conv_t(float* history, const float* qkv, const float* conv_w, float* h,
     } else {
         static const int fused_mode = [] { const char* v = std::getenv("STRATA_GDN_CONVL2"); return v ? std::atoi(v) : 0; }();
         const bool fused = fused_mode != 0;
-        if (fused_mode >= 2) {
+        if (fused_mode >= 2 && HV == 48 && C == 10240) {   // (Flash-Next's shapes only: Qwen3.6 takes the kernels below)
             gdn_conv_w_kernel<<<dim3(C / 128, (unsigned) ((T + 4 * CONVW_TOK - 1) / (4 * CONVW_TOK))), 128, 0,
                                 (cudaStream_t) stream>>>(history, qkv, conv_w, h, T, eps);
             gdn_conv_hist_kernel<<<C / 128, 128, 0, (cudaStream_t) stream>>>(history, qkv, T);
