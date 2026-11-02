@@ -3176,13 +3176,15 @@ def _hash_file(s: Path, size: int) -> str:
     return h.hexdigest()
 
 
-def verify_sha256(s: Path, size: int, sha: str, own: bool = False, repair=None) -> None:
+def verify_sha256(s: Path, size: int, sha: str, own: bool = False, repair=None, also: tuple = ()) -> None:
     """A shard's size and SHA-256 against the pinned values (the Unsloth file); the result is kept in its finish mark,
     so the ~5 minutes of hashing 111 GB happen once.  A wrong file is deleted, so the next run downloads it again.
     `repair` (a downloaded file's own re-reader, see repair_download): the wrong file is first compared with the server
-    piece by piece and only the damaged pieces are written again, then it is checked a second time."""
+    piece by piece and only the damaged pieces are written again, then it is checked a second time.
+    `also`: other SHA-256 values that are the same file for our purposes (the Engram ISTA-DASLab converted in place on 2026-10-27,
+    DSV41_SHA_ALSO)."""
     m = s.with_name(s.name + ".done")
-    if m.exists() and f"sha256 {sha}" in m.read_text(encoding="utf-8", errors="replace"):
+    if m.exists() and any(f"sha256 {x}" in m.read_text(encoding="utf-8", errors="replace") for x in (sha, *also)):
         return
     have = s.stat().st_size if s.exists() else -1
     if have != size:
@@ -3200,6 +3202,10 @@ def verify_sha256(s: Path, size: int, sha: str, own: bool = False, repair=None) 
             digest = _hash_file(s, size)
         else:
             say("  The damaged parts could not be found this way.")
+    if digest != sha and digest in also:
+        say(f"  {s.name} is the converted version ISTA-DASLab published on 2026-10-27 (the same tables in one tensor); it is used as it is")
+        mark(s, f"sha256 {digest}")
+        return
     if digest != sha:
         if own:
             fail(f"{s.name} does not match the published file (SHA-256 {digest}, expected {sha})",
@@ -7970,7 +7976,35 @@ DSV41_ISTA_FILES = {
     "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00004-of-00004.gguf": (20527837312, "9b790a2297ed3cdede379fc984f4a52bb95f3b23724c797af11d1fa6a69db059"),
     "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf": (110595290816, "eb19f30d368d393784e1fc54fdfaffc427ebb2110bf3762fdf5a8fbb9a2d740a"),
 }
-DSV41_ALL_FILES = {**DSV41_FILES, **DSV41_ISTA_FILES}
+# The SIX-shard layout (Strata 0.2.9).  On 2026-10-27 (Hub commit a419d74c, llama.cpp b11870 and newer) ISTA-DASLab re-split the three sets: five
+# shards per set (shard 1 is 5.8 MB of metadata and the tokenizer, no tensors) and the Engram as the sixth shard of the split.  setup still downloads
+# the pinned four-shard files; this layout is taken from files already here (--gguf-dir) by size and SHA-256.  Same model: the experts and dense
+# weights have the same types, shapes and sizes in both layouts; the converter folded the Engram gate, merged the two Engram tables into one tensor
+# and added the image tokens' routing bias.  strata-dsv41 reads both (ds4_model.cu); tools/dsv41/pack_gguf.py takes the Engram as the sixth shard.
+DSV41_ISTA6_SHARD = "DeepSeek-V4.1-Flash-1017-GSQ-RCO-{quant}-{i:05d}-of-00006.gguf"
+DSV41_ISTA6_SHARDS = 5            # the files of a set itself; the sixth shard of its split is the Engram
+DSV41_ISTA6_FILES = {
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00001-of-00006.gguf": (5780704, "3e8ddd11441edd4bc19bacaef5dbe38818af2cbdf0820fb70f1d2d851fcc192a"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00002-of-00006.gguf": (39340012896, "be4ceb1caf1bed28e886860cf6a52adc8f5ca9eb0d2098ade39bb4179d48b323"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00003-of-00006.gguf": (38698805888, "758c66ba65236e8ce0820c21a7b6f9b2947681df8cc509f672a77722e8191b9a"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00004-of-00006.gguf": (39707055008, "04a5bea2b38eb576f49efc19c0a677768d6e2a8ea5772d72fb6cb79e1733a212"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ1_M-00005-of-00006.gguf": (2969539840, "7c8dbee99890f05dbc420eba6f44393f5228d06248fe61e1ae8ed002449c7549"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00001-of-00006.gguf": (5780704, "0182a2a1f42d319a0dbc6e34aa82a063880c069fe3aafbbea86018f386e64e5f"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00002-of-00006.gguf": (39581533600, "5c88039fa640460a9fc3465a6dfcd162a4083dd738d55e5b52e025be14555a08"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00003-of-00006.gguf": (39417972640, "0fddebfd05f0a36cfd107ba5dfd2547e64df61adbab39560a5a5f5521ca099a5"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00004-of-00006.gguf": (39079187648, "c577a43c6e6e615838a1655a0b162541edeac6f36542f08c4a9593a70dcaf500"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00005-of-00006.gguf": (37141423776, "851d8605bf504962054d17ea8a0d9e2e0a228d085d396bd865a4de9f16d90fbd"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00006.gguf": (5780704, "f356f198561f56df36f7ab92d7238a926646d76de992c34f15bcb939a5f529b9"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00002-of-00006.gguf": (39535781184, "25af3785ccf925f54137e1ead4c481a8952315dc0b1af6519a99407f67bce8f3"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00003-of-00006.gguf": (39736712000, "8168d0998fc494def2e1952d83c131425a108660aae9d29190f5a8670ab62b48"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00004-of-00006.gguf": (39036908384, "9eb9b4de1968f150dfc207eb31c27be9cd9b5666a9a6246bde8a22b184b4bee0"),
+    "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00005-of-00006.gguf": (19923784832, "7e35f6b4e6fc46f6c4b152b593d84d683c5ece695ae6ad734f556198c041bec1"),
+}
+# The Engram of that commit: the same name and size as the pinned one, converted in place (one tensor, split 6 of 6), so a new SHA-256.  Either file is
+# the Engram of either layout (the pack reads the tables from both); the pin stays the old one, this hash is accepted beside it.
+DSV41_ENGRAM_CONVERTED = (110595290816, "3dac4c54893ad7aa89103c0028500eadc78e74112cef3a2930a97e67dc9fb4f3")
+DSV41_SHA_ALSO = {DSV41_ISTA_ENGRAM: (DSV41_ENGRAM_CONVERTED[1],)}
+DSV41_ALL_FILES = {**DSV41_FILES, **DSV41_ISTA_FILES, **DSV41_ISTA6_FILES}
 # ISTA re-published the first shard of each set on 2026-10-26 with a larger chat template (images in tool results; their PATCHING.md, and what their
 # patch_chat_template.py makes of a shard 1 already downloaded).  setup downloads the pinned revision, so DSV41_ISTA_FILES stays the older file; a
 # newer shard 1 "already here" (--gguf-dir) is the same weights with the newer template and is accepted by its own size and SHA-256, never fetched.
@@ -7999,6 +8033,7 @@ DSV41_SOURCES = ("CMakeLists.txt", "cmake", "src/dsv41", "include/strata/dsv41",
 def _dsv41_set(label, about, ram_gb, quant, profile):
     return {"label": label, "about": about, "ram_gb": ram_gb, "recipe": "ista", "profile": profile,
             "shards": [DSV41_ISTA_SHARD.format(quant=quant, i=i) for i in range(1, 5)],
+            "shards6": [DSV41_ISTA6_SHARD.format(quant=quant, i=i) for i in range(1, DSV41_ISTA6_SHARDS + 1)],
             "shared": [DSV41_ISTA_ENGRAM, DSV41_SHARD.format(i=1), DSV41_DSPARK]}
 
 
@@ -8078,10 +8113,38 @@ def dsv41_folder(a, fam: dict, model: str) -> Path:
     models folder's own."""
     if a.gguf_dir:
         folder = Path(a.gguf_dir).resolve()
-        if not any((folder / n).exists() for n in fam["models"][model]["shards"]) and (folder / model).is_dir():
+        d = fam["models"][model]
+        if not any((folder / n).exists() for n in [*d["shards"], *(d.get("shards6") or [])]) and (folder / model).is_dir():
             return folder / model
         return folder
     return Path(a.models_dir) / (fam["tag"] + model)
+
+
+def dsv41_layout_of(md: dict, present) -> str:
+    """Which layout of a set the files are: "four" (the pinned files) or "six" (ISTA-DASLab's 2026-10-27 re-split, DSV41_ISTA6_FILES).
+    `present(name)` says whether a file is there.  Six only when its files are there and the four-shard ones are not (or are not whole
+    while the six are): a folder holding both whole sets is used as the pinned four-shard one."""
+    four = [bool(present(n)) for n in md["shards"]]
+    six = [bool(present(n)) for n in md.get("shards6") or []]
+    return "six" if six and any(six) and (not any(four) or (all(six) and not all(four))) else "four"
+
+
+def dsv41_pack_layout(pack: Path) -> str | None:
+    """"four" or "six" when the pack names the files of that layout (tensors.txt's `file N <name>` lines), else None.  The pack folder is
+    the same for both layouts of a set, and a pack points into the files it was made from: one made from the other layout's files must be
+    built again."""
+    try:
+        with (Path(pack) / "tensors.txt").open(encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not line.startswith("file "):
+                    break
+                if "-of-00006" in line:
+                    return "six"
+                if "-of-00004" in line:
+                    return "four"
+    except OSError:
+        pass
+    return None
 
 
 def dsv41_shared_dir(a, fam: dict) -> Path:
@@ -8223,7 +8286,10 @@ def install_dsv41(a, data: Path, family, gpu, hip, cards, port, ram) -> int:
     tag = fam["tag"] + model
     ctx = a.context or DSV41_CONTEXT
     folder = dsv41_folder(a, fam, model)
-    shards = [folder / n for n in md["shards"]]
+    layout = dsv41_layout_of(md, lambda n: (folder / n).exists()) if (ista and a.gguf_dir) else "four"
+    shards = [folder / n for n in (md["shards6"] if layout == "six" else md["shards"])]
+    if layout == "six":
+        say(f"  {folder} holds ISTA-DASLab's six-shard files of 2026-10-27 ({len(shards)} files and the Engram as the sixth): they are used where they are.")
     shared_dir = dsv41_shared_dir(a, fam)
     shared = [dsv41_find_shared(a, n, folder, shared_dir) for n in md["shared"]]
     own_files = {f: bool(a.gguf_dir) or f.parent != shared_dir for f in shared}   # found outside setup's folder: the person's
@@ -8285,12 +8351,17 @@ def install_dsv41(a, data: Path, family, gpu, hip, cards, port, ram) -> int:
             ok(f"{f.name} already here ({f.parent})")
         else:
             download(dsv41_hf(f.name) + f.name, f)
-        verify_sha256(f, *fam["sha256"][f.name], own=own_files[f])
+        verify_sha256(f, *fam["sha256"][f.name], own=own_files[f], also=DSV41_SHA_ALSO.get(f.name, ()))
     ok(f"model files: {folder}")
 
     step(6, "preparing the model for Momoe")
     pack = data / "packs" / tag.lower()            # the engine's map of the shards, the tokenizer: a few MB
     have_pack = (pack / "tokenizer" / "vocab.json").exists() and (pack / "tensors.txt").exists()
+    if have_pack and ista and dsv41_pack_layout(pack) not in (None, layout):
+        warn(f"the pack from an earlier run was made from the {'four' if layout == 'six' else 'six'}-shard files of this set; these are the "
+             f"{layout}-shard files: building it again")
+        shutil.rmtree(pack, ignore_errors=True)
+        have_pack = False
     if have_pack and ista and not dsv41_pack_info(exe, pack, lib_dirs)[0]:
         warn("the pack from an earlier run is incomplete; building it again")
         shutil.rmtree(pack, ignore_errors=True)

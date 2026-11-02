@@ -3013,6 +3013,70 @@ def deepseek_slot_env(env: dict, cfg: dict) -> None:
         env["STRATA_DS4_SLOT_DIR"] = str(Path(log).parent / "ds4-slots")
 
 
+# 0.2.9: the exact parallel-request stack, on whenever the engine runs batch slots (--batch / "parallel" 2 or more).  Every item
+# was qualified bit-exact against the plain slots (QUAL-PAR: greedy identity at c=1, first-token KL 0): the checkpoint pool and the
+# slot copies keep a request's running state without a stall, and the BATCH_* / QSA_* switches run all slots of a window in one
+# launch.  Together +16% sustained throughput at c=8 on two A6000 and +40..65% on one big card, no solo cost.  An explicit
+# environment variable (or the config's "env") still wins: =0 turns one off.
+PARALLEL_STACK_ENV = {
+    "STRATA_CKPT_POOL": "1", "STRATA_CKPT_POOL_READY": "4", "STRATA_SLOT_CKPT_MOVE": "1", "STRATA_SLOT_COPY_DIRECT": "1",
+    "STRATA_SLOT_COPY_BATCHSYNC": "1", "STRATA_BATCH_GDN_GROUPS": "1", "STRATA_BATCH_ATTN_ROWS": "1",
+    "STRATA_BATCH_SELF_COMMIT": "1", "STRATA_QSA_SLOTS": "1",
+}
+# Only where the stack was run alone: Linux CUDA, all nine.  HIP got no measurement without replicas (its only run was inside the
+# replica config), Windows none at all (its host-arena / pinned-memory path differs): nothing there.
+
+
+def parallel_slots(cfg: dict) -> int:
+    """How many batch slots the config asks for (0 = none): the args' own --batch/--slots, else "parallel"."""
+    args = list(cfg.get("args") or [])
+    for k in ("--batch", "--slots"):
+        if k in args:
+            try:
+                return int(args[args.index(k) + 1])
+            except (IndexError, ValueError):
+                return 0
+    n = cfg.get("parallel")
+    return n if isinstance(n, int) and not isinstance(n, bool) and n > 1 else 0
+
+
+def parallel_stack_platform() -> bool:
+    """Linux only: the stack was run on Linux CUDA; Windows (own host-arena path) and macOS were not."""
+    return sys.platform.startswith("linux")
+
+
+def parallel_stack_env(env: dict, cfg: dict) -> None:
+    """Switch the exact parallel stack on (setdefault: a value the user or the config set stays) when the config runs batch
+    slots on a CUDA or HIP Qwen engine.  Other engines (DeepSeek, SYCL, Metal) do not read these.  (MoMoE: Flash-Next only - the stack
+    was qualified on it, not on Qwen3.6's shapes)"""
+    if parallel_slots(cfg) < 2 or (cfg.get("arch") or "qwen4exp") != "qwen4exp" or cfg.get("backend") in ("sycl", "metal", "vulkan"):
+        return
+    if not parallel_stack_platform():
+        return
+    if cfg.get("backend") == "hip":
+        return
+    for k, v in PARALLEL_STACK_ENV.items():
+        env.setdefault(k, v)
+
+
+# Strata 0.2.9's GDN prompt speedups (bee469c4: on by default there for Qwen3.8 on Linux).  Upstream's numbers (QUAL-GDN, Qwen3.8 IQ3_S):
+#   CUDA: STRATA_GDN_TC=1 (the recurrence scan on the tensor cores) + STRATA_GDN_CONVL2=2 (conv, SiLU and q/k norm in one pass):
+#         KL mean 0.0019 / max 0.0125, 61-task suite 55 vs 54, prompt +4.4% at 4K, +5.5% at 16K, +5.7% at 32K.  Not bit-exact.  The engine
+#         gates TC at run time (compute capability 8 or more, one SM per value head, shared memory) and falls back to the old kernels.
+# MoMoE: opt-in until measured on our cards - the config's "gdn_stack": true (Flash-Next on Linux CUDA only; upstream's AMD gfx12 half,
+# STRATA_GDN_CHUNKED, is not taken).  An explicit variable (or the config's env) wins.
+GDN_STACK_CUDA = {"STRATA_GDN_TC": "1", "STRATA_GDN_CONVL2": "2"}
+
+
+def gdn_stack_env(env: dict, cfg: dict) -> None:
+    if cfg.get("gdn_stack") is not True or not parallel_stack_platform():   # opt-in; Linux only (same rule as the parallel stack)
+        return
+    if (cfg.get("arch") or "qwen4exp") != "qwen4exp" or cfg.get("backend") in ("hip", "sycl", "metal", "vulkan"):
+        return                                                          # only the model and backend the numbers are from
+    for k, v in GDN_STACK_CUDA.items():
+        env.setdefault(k, v)
+
+
 def child_env(cfg: dict) -> dict:
     """The engine's environment: the CUDA libraries setup installed (pip's nvidia packages, or the toolkit that
     compiled it) first on the library search path."""
@@ -3026,6 +3090,8 @@ def child_env(cfg: dict) -> dict:
         env[str(k)] = str(v)
     if (cfg.get("arch") or "") == "deepseek41":      # (only this engine reads these; the others' environment is untouched)
         deepseek_slot_env(env, cfg)
+    parallel_stack_env(env, cfg)
+    gdn_stack_env(env, cfg)
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -3074,6 +3140,37 @@ def hip_env_guard(env: dict, cfg: dict) -> list[str]:
     for line in said:
         print(f"momoe serve: AMD: {line}", file=sys.stderr, flush=True)
     return said
+
+
+def engine_arch_note(cfg: dict, cards: dict[int, int] | None = None, built: dict | None = None) -> str | None:
+    """#4662: a compiled engine holds code for the architectures it was built for (BUILD.json "archs"); on a card of another one a long prompt
+    ends in "unspecified launch failure" (the kernels it needs are a trap there).  One plain line when a card this run uses is not covered
+    (NVIDIA; a build with PTX also covers newer cards).  Said, never refused: the engine is started as asked.  `cards`: {nvidia-smi number:
+    compute capability x 10}; `built`: the BUILD.json dict - both read here when not given.  None when everything is covered or unknown."""
+    try:
+        if cfg.get("backend") == "hip":
+            return None
+        if built is None:
+            exe = cfg.get("exe")
+            if not isinstance(exe, str):
+                return None
+            built = json.loads((Path(exe).parent / "BUILD.json").read_text(encoding="utf-8-sig"))
+        archs = sorted({int(re.sub(r"\D", "", str(a))) for a in built.get("archs") or [] if re.sub(r"\D", "", str(a))})
+        if not archs:
+            return None
+        if cards is None:
+            r = subprocess.run(["nvidia-smi", "--query-gpu=index,compute_cap", "--format=csv,noheader"], capture_output=True, text=True,
+                               errors="replace", timeout=10)
+            cards = {int(i): int(round(float(c) * 10)) for i, c in (ln.split(",") for ln in (r.stdout or "").strip().splitlines())}
+        used = gpu_list(cfg) or sorted(cards)
+        miss = sorted({cards[i] for i in used if i in cards and cards[i] not in archs and not (built.get("ptx") and cards[i] > max(archs))})
+        if not miss:
+            return None
+        names = ", ".join(f"sm_{m}" for m in miss)
+        return (f"[momoe] this engine was built for {', '.join(f'sm_{a}' for a in archs)}, but a graphics card in use is {names}: long prompts "
+                "can stop with \"unspecified launch failure\". Run ./update.sh so the engine is built for every card in this PC.")
+    except Exception:
+        return None
 
 
 def vision_env(cfg: dict, env: dict) -> dict:
@@ -4521,7 +4618,7 @@ class Service:
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
         # (Gemma 4 writes an empty thought block of its own after a tool result, thinking or not: the reply's start says)
-        parser = self.parser_cls(thinking=thinking or self.gemma, tools=tools, stream_tools=True, recover=self.tool_call_recovery,
+        parser = self.parser_cls(thinking=thinking or self.gemma, tools=with_history_tools(tools, sampling), stream_tools=True, recover=self.tool_call_recovery,
                               glm=self.glm, lfm=self.lfm, gemma=self.gemma, opened=opened is not None,
                               declared_only=declared_only)
         if self.gemma and not thinking:
@@ -7189,6 +7286,33 @@ def default_model_name(cfg: dict) -> str:
     return cfg.get("model_name") or FAMILY_MODEL_NAMES.get(cfg.get("arch") or "qwen4exp", "qwen3.8-flash-next")
 
 
+def with_history_tools(tools, req) -> list:
+    """#4663: an agent's tool set changes between turns (deferred tools, MCP servers, a compacted history), and the model calls a tool it used
+    earlier in this conversation that this turn's `tools` no longer lists.  That call came back as raw text with finish_reason "stop", and the
+    client took it for prose and stopped.  A name the conversation's own assistant messages called is a tool the client has, so it counts as
+    declared (the call comes back as a tool call; the client says what it does with it).  Nothing is added when the request declared no
+    tools at all, or for a name that is already declared."""
+    if not tools or not isinstance(req, dict):
+        return tools
+    try:
+        have = {t.get("name") for t in tools if isinstance(t, dict)}
+        extra = []
+        for message in req.get("messages") or []:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            calls = [(call.get("function") or {}).get("name") for call in message.get("tool_calls") or [] if isinstance(call, dict)]
+            content = message.get("content")      # (MoMoE: the Anthropic API's history - Claude Code - has tool_use blocks instead)
+            if isinstance(content, list):
+                calls += [b.get("name") for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+            for name in calls:
+                if isinstance(name, str) and name and name not in have:
+                    have.add(name)
+                    extra.append({"name": name, "parameters": {"type": "object", "properties": {}}})
+        return [*tools, *extra] if extra else tools
+    except Exception:
+        return tools
+
+
 def tool_call_recovery_setting(cfg: dict) -> bool:
     """The config's "tool_call_recovery" (see OutputParser's recover): ON when the config does not name it (since 0.2.8; 0.2.7 and before: off),
     "tool_call_recovery": false turns it off. Anything but true or false stops the start."""
@@ -7324,6 +7448,9 @@ def main() -> int:
         print("model unloaded; the first request loads it ..." if lazy else
               "loading the model (the first start takes a minute or two) ...", flush=True)
         warn_budget_over_ram(engine_args(cfg) if "args" in cfg else [])      # #1080
+        arch_line = engine_arch_note(cfg)                                   # #4662
+        if arch_line:
+            print(arch_line, flush=True)
         if layer_split_of(cfg):
             try:
                 split = layer_split_value(cfg)          # #644: before the (minutes-long) start

@@ -137,6 +137,76 @@ class Install(unittest.TestCase):
             self.run_setup(hip=True)
 
 
+class SixShard(unittest.TestCase):
+    """ISTA-DASLab's six-shard layout of 2026-10-27 (Strata 0.2.9), taken from files already here (--gguf-dir)."""
+    def test_tables(self):
+        for m in ("IST-DAS-2.00bpw", "IST-DAS-2.25bpw", "IST-DAS-1.75bpw"):
+            md = FAM["models"][m]
+            self.assertEqual(len(md["shards6"]), 5)
+            for f in md["shards6"]:
+                self.assertTrue(f.endswith("-of-00006.gguf"), f)
+                self.assertEqual(len(FAM["sha256"][f][1]), 64, f)
+        self.assertEqual(setup.DSV41_ENGRAM_CONVERTED[0], FAM["sha256"][setup.DSV41_ISTA_ENGRAM][0])   # same size, another hash
+
+    def test_layout_of(self):
+        md = FAM["models"]["IST-DAS-2.00bpw"]
+        four, six = set(md["shards"]), set(md["shards6"])
+        self.assertEqual(setup.dsv41_layout_of(md, lambda n: n in six), "six")
+        self.assertEqual(setup.dsv41_layout_of(md, lambda n: n in four), "four")
+        self.assertEqual(setup.dsv41_layout_of(md, lambda n: n in four | six), "four")          # both whole: the pinned one
+        part4 = set(list(four)[:2])
+        self.assertEqual(setup.dsv41_layout_of(md, lambda n: n in six | part4), "six")          # six whole, four not
+        self.assertEqual(setup.dsv41_layout_of(md, lambda n: False), "four")
+
+    def test_pack_layout(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(setup.dsv41_pack_layout(Path(d)))
+            (Path(d) / "tensors.txt").write_text("file 0 X-00001-of-00006.gguf\nfile 1 E.gguf\ntensor a\n")
+            self.assertEqual(setup.dsv41_pack_layout(Path(d)), "six")
+            (Path(d) / "tensors.txt").write_text("file 0 X-00001-of-00004.gguf\ntensor a\n")
+            self.assertEqual(setup.dsv41_pack_layout(Path(d)), "four")
+
+    def test_the_converted_engram_is_accepted(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / setup.DSV41_ISTA_ENGRAM
+            f.write_bytes(b"x")
+            f.with_name(f.name + ".done").write_text(f"sha256 {setup.DSV41_ENGRAM_CONVERTED[1]}")
+            with mock.patch.object(setup, "fail", side_effect=AssertionError("refused")):
+                setup.verify_sha256(f, *FAM["sha256"][f.name], own=True, also=setup.DSV41_SHA_ALSO[f.name])
+                with self.assertRaises(AssertionError):
+                    setup.verify_sha256(f, *FAM["sha256"][f.name], own=True)
+
+    def test_install_packs_the_six_files(self):
+        md = FAM["models"]["IST-DAS-2.00bpw"]
+        here = set(md["shards6"]) | set(md["shared"])
+        runs = []
+        a = mock.Mock(model="IST-DAS-2.00bpw", context=None, gguf_dir="/mine", models_dir="/d/models", vision=None,
+                      check=False, yes=True, config_name=None, host=None, api_key=None, no_start=True)
+        with mock.patch.object(setup, "say"), mock.patch.object(setup, "ok"), mock.patch.object(setup, "warn"), \
+                mock.patch.object(setup, "step"), mock.patch.object(setup, "pip_install"), \
+                mock.patch.object(setup, "get_llama_cpp", return_value=Path("/llama")), \
+                mock.patch.object(setup, "build_dsv41_engine", return_value=(Path("/e/strata-dsv41"), [])), \
+                mock.patch.object(setup, "free_gb", return_value=1000.0), mock.patch.object(setup, "done", return_value=True), \
+                mock.patch.object(setup.Path, "exists", autospec=True, side_effect=lambda p: p.name in here), \
+                mock.patch.object(setup.Path, "is_file", autospec=True, side_effect=lambda p: p.name in here), \
+                mock.patch.object(setup.Path, "stat", autospec=True,
+                                  side_effect=lambda p: mock.Mock(st_size=FAM["sha256"].get(p.name, (0,))[0])), \
+                mock.patch.object(setup, "download", side_effect=AssertionError("downloaded")), \
+                mock.patch.object(setup, "verify_sha256"), mock.patch.object(setup, "run", side_effect=runs.append), \
+                mock.patch.object(setup.shutil, "copyfile"), \
+                mock.patch.object(setup, "dsv41_pack_info", return_value=(True, "all present")), \
+                mock.patch.object(setup, "dsv41_smoke", return_value=(True, "Paris")), \
+                mock.patch.object(setup, "name_config", side_effect=lambda p, a: p), \
+                mock.patch.object(setup, "write_setup_config"):
+            setup.install_dsv41(a, Path("/d"), "deepseek41", {**CARD, "archs": ["89"]}, False, [CARD], 8080, 63.0)
+        cmd = runs[0]
+        names = cmd[cmd.index("--shards") + 1:cmd.index("--engram")]
+        self.assertEqual(names, md["shards6"])
+        self.assertTrue(cmd[cmd.index("--engram") + 1].endswith(setup.DSV41_ISTA_ENGRAM))
+
+
 class Update(unittest.TestCase):
     """--update compiles strata-dsv41 again (when its sources changed) for the cards it was built for, only when an
     installed model runs it."""

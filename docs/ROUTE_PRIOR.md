@@ -119,6 +119,7 @@ Each against the same engine with the setting off, on the 4070 Ti PC above unles
 | Route tail skip (`STRATA_ROUTE_TAIL_SKIP=7`) | on, CUDA | decode +27-35% | 0.064 | 95.6% against 91.9% | kept |
 | DeepSeek's five experts (`--experts 5`) | on, 16 GiB of cards or less | decode +11-31% | 0.030 | not run | kept |
 | Int8 prompt attention (`STRATA_PROMPT_ATTN_IMMA`) | on, sm_80 and newer | prompt +0.4% on sm_89 | 0.014 (prompt path) | not run | **off on sm_89** |
+| GDN tensor-core scan + one-pass conv (`STRATA_GDN_TC=1`, `STRATA_GDN_CONVL2=2`) | 0.2.9: on from the server, Qwen3.8 on Linux CUDA | prompt +0.5% (6,345 tokens) | 0.015 (prompt path) | not run | **off** (`"gdn_stack": true` turns it on) |
 
 For scale: two quants a level apart (IQ3_XXS against Q2_0) differ by KL 0.094.
 
@@ -131,6 +132,14 @@ the prompt path's predictions differ from the old kernel by KL 0.014 (20 prompts
 of a change of summation order alone (the old kernel's own other order, `STRATA_PROMPT_ATTN_V1=1`: 0.010). Not
 faster, so MoMoE leaves sm_89 on the old kernel (`strata::prompt_attn_imma_default`); `STRATA_PROMPT_ATTN_IMMA=1` turns
 it on. Other cards keep Strata's default.
+
+**The GDN prompt speedups.** Strata 0.2.9's server turns on two prompt-path kernels for Qwen3.8 on Linux CUDA: the
+GatedDeltaNet recurrence scanned on the tensor cores (`STRATA_GDN_TC=1`) and the convolution, SiLU and q/k norm in one
+pass (`STRATA_GDN_CONVL2=2`). Upstream measured KL 0.0019 mean / 0.0125 max and prompts +4.4-5.7% (4K-32K) on its card.
+On the 4070 Ti (a 99 KB shared-memory card, which takes the scan's split plan) the 6,345-token prompt was +0.5% (1,581
+against 1,574 tok/s, one A/B of 3 rounds) and the prompt path's predictions moved by KL 0.015 mean / 0.158 max, with the
+top token different on 2 of 20 prompts (main against itself: 0). Not faster here and less exact than upstream's
+numbers, so MoMoE leaves it off; a config's `"gdn_stack": true` turns it on (`serve/server.py` `gdn_stack_env`).
 
 **Kept: DeepSeek's five experts.** Strata's DeepSeek engine runs 5 of the model's 6 experts a token on cards of 16 GiB
 or less, on a GPU that shares the PC's memory (Strix Halo), and on two or more RDNA4 cards that hold half the experts
