@@ -912,5 +912,41 @@ class ParallelStackDefaults(unittest.TestCase):
         self.assertNotIn("STRATA_CKPT_POOL", self.env_for({"parallel": 8, "args": [], "arch": "deepseek41"}))
         self.assertNotIn("STRATA_CKPT_POOL", self.env_for({"parallel": 8, "args": [], "backend": "sycl"}))
 
+
+class GdnStackOptIn(unittest.TestCase):
+    """MoMoE: Strata 0.2.9's GDN speedups are opt-in ("gdn_stack": true; Flash-Next on Linux CUDA); an explicit value wins."""
+    def env_for(self, cfg, linux=True, base=None):
+        from unittest import mock
+        env = {k: v for k, v in (base or {}).items()}
+        with mock.patch.object(server, "parallel_stack_platform", return_value=linux):
+            server.gdn_stack_env(env, cfg)
+        return env
+
+    def test_off_by_default(self):
+        for cfg in ({"backend": "cuda"}, {}, {"arch": "qwen4exp"}, {"gdn_stack": "yes"}):
+            self.assertEqual(self.env_for(cfg), {}, cfg)
+
+    def test_cuda_on_when_asked(self):
+        for cfg in ({"backend": "cuda"}, {}, {"arch": "qwen4exp"}):
+            env = self.env_for({**cfg, "gdn_stack": True})
+            self.assertEqual(env, {"STRATA_GDN_TC": "1", "STRATA_GDN_CONVL2": "2"})
+
+    def test_explicit_wins(self):
+        env = self.env_for({"gdn_stack": True}, base={"STRATA_GDN_TC": "0"})
+        self.assertEqual(env["STRATA_GDN_TC"], "0")
+        self.assertEqual(env["STRATA_GDN_CONVL2"], "2")
+
+    def test_other_models_backends_and_platforms_off(self):
+        for cfg in ({"arch": "qwen35moe"}, {"arch": "deepseek41"}, {"backend": "hip"}, {"backend": "sycl"}, {"backend": "metal"},
+                    {"backend": "vulkan"}):
+            self.assertEqual(self.env_for({**cfg, "gdn_stack": True}), {}, cfg)
+        self.assertEqual(self.env_for({"gdn_stack": True}, linux=False), {})
+
+    def test_child_env_wiring(self):
+        from unittest import mock
+        with mock.patch.object(server, "parallel_stack_platform", return_value=True):
+            self.assertEqual(server.child_env({"args": [], "gdn_stack": True}).get("STRATA_GDN_TC"), "1")
+            self.assertIsNone(server.child_env({"args": []}).get("STRATA_GDN_TC"))
+
 if __name__ == "__main__":
     unittest.main()

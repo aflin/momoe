@@ -3059,6 +3059,24 @@ def parallel_stack_env(env: dict, cfg: dict) -> None:
         env.setdefault(k, v)
 
 
+# Strata 0.2.9's GDN prompt speedups (bee469c4: on by default there for Qwen3.8 on Linux).  Upstream's numbers (QUAL-GDN, Qwen3.8 IQ3_S):
+#   CUDA: STRATA_GDN_TC=1 (the recurrence scan on the tensor cores) + STRATA_GDN_CONVL2=2 (conv, SiLU and q/k norm in one pass):
+#         KL mean 0.0019 / max 0.0125, 61-task suite 55 vs 54, prompt +4.4% at 4K, +5.5% at 16K, +5.7% at 32K.  Not bit-exact.  The engine
+#         gates TC at run time (compute capability 8 or more, one SM per value head, shared memory) and falls back to the old kernels.
+# MoMoE: opt-in until measured on our cards - the config's "gdn_stack": true (Flash-Next on Linux CUDA only; upstream's AMD gfx12 half,
+# STRATA_GDN_CHUNKED, is not taken).  An explicit variable (or the config's env) wins.
+GDN_STACK_CUDA = {"STRATA_GDN_TC": "1", "STRATA_GDN_CONVL2": "2"}
+
+
+def gdn_stack_env(env: dict, cfg: dict) -> None:
+    if cfg.get("gdn_stack") is not True or not parallel_stack_platform():   # opt-in; Linux only (same rule as the parallel stack)
+        return
+    if (cfg.get("arch") or "qwen4exp") != "qwen4exp" or cfg.get("backend") in ("hip", "sycl", "metal", "vulkan"):
+        return                                                          # only the model and backend the numbers are from
+    for k, v in GDN_STACK_CUDA.items():
+        env.setdefault(k, v)
+
+
 def child_env(cfg: dict) -> dict:
     """The engine's environment: the CUDA libraries setup installed (pip's nvidia packages, or the toolkit that
     compiled it) first on the library search path."""
@@ -3073,6 +3091,7 @@ def child_env(cfg: dict) -> dict:
     if (cfg.get("arch") or "") == "deepseek41":      # (only this engine reads these; the others' environment is untouched)
         deepseek_slot_env(env, cfg)
     parallel_stack_env(env, cfg)
+    gdn_stack_env(env, cfg)
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
