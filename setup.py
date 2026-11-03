@@ -80,6 +80,7 @@ HF_REVISIONS = {
     "unsloth/gemma-4-26B-A4B-it-GGUF": "c099eb48e663fd284577b04978a94ffccb261841",                     # 2026-10-21
     "bartowski/Ling-3.0-flash-GGUF": "7e1a1243566501d52af98e9aa7a7a61986279c6d",                       # 2026-08-18
     "bartowski/Ling-3.0-flash-Sante-GGUF": "d59f495f375857452f47ee56b1b0a37f4491f93c",                 # 2026-10-25
+    "unsloth/MiMo-V2.5-GGUF": "f7aff7868d5f79da58b505f84626d7a807393c37",                              # 2026-11-02
     "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF": "5c2410d71524f4f72b023ce8daf7a80528226d5f",   # its mmproj (images)
     "Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF": "e4ae9970325413d582ba2c294122fc5567ec1dd7",
     "unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF": "34841e360524d421c564cc3ed247aa04a865473b",   # 2026-10-16
@@ -672,6 +673,17 @@ GEMMA4_FILES = {
     "gemma-4-26B-A4B-it-UD-IQ3_XXS.gguf": (11416548832, "3b7aec683e176e1d957d007e0fb590611d82aec4db358d99b7f9714b6bc7bfc2"),
     "gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf": (17010980576, "ef728c8e0c337fd1067b947af006e38a9ef2419e56feced4fd29b4bf0636e30c"),
 }
+# MiMo-V2.5 (Xiaomi, 310B-A15B; Unsloth's GGUFs): GQA attention (8 full blocks, 40 sliding-window, sinks) + 256 experts,
+# 15B active.  Momoe's ggml engine runs it as a flint variant (src/metal: mimo)
+MIMO25_FILES = {
+    "UD-IQ2_XXS": [
+        ("UD-IQ2_XXS/MiMo-V2.5-UD-IQ2_XXS-00001-of-00003.gguf", 5953760,
+         "361f5fbffbff4b5273a3984f1a488ba8160adc4a0879420a2495b66f17d59f84"),
+        ("UD-IQ2_XXS/MiMo-V2.5-UD-IQ2_XXS-00002-of-00003.gguf", 49525684032,
+         "e67f0ccf61539d5ba21a9c60fd8c37cff9e58eda129d97a9f2ac53d99872ecf4"),
+        ("UD-IQ2_XXS/MiMo-V2.5-UD-IQ2_XXS-00003-of-00003.gguf", 46948527360,
+         "35a32af82acc03ef94c0baf9e8c1f21c2eb9a1ba13f2991162e9fb134acaba3b")],
+}
 GGML_FAMILIES = {
     "bolt": {"title": "Nemotron 3.5 Bolt 74B-A9B", "by": "NVIDIA; Unsloth's GGUFs",
              "about": "Mamba-2 + attention + latent MoE, 9B active; a 32 GB download, ~56 GB of RAM",
@@ -751,6 +763,22 @@ GGML_FAMILIES = {
                    # spread over 2.8 tokens a window); on a 12 GB card it is slower (36.7 -> 28.0): not there
                    "mac_args": ["--mtp", "3"],
                    "license": "MIT: https://huggingface.co/inclusionAI/Ling-3.0-flash-Sante"},
+    "mimo25": {"title": "MiMo-V2.5 310B-A15B", "by": "Xiaomi; Unsloth's GGUFs",
+               "about": "sliding-window + full attention, 256 experts, 15B active, a model that thinks; a 97 GB "
+                        "download, ~110 GB of RAM to hold it",
+               "hf": hf("unsloth/MiMo-V2.5-GGUF"), "tag": "mimo25-", "name": "mimo-v2.5",
+               "parts": MIMO25_FILES,
+               # ram_gb: the file and the rest of the system in memory.  With less, its experts are read from the SSD
+               # (measured: an RTX 4070 Ti, 63 GB of RAM, the file on NVMe: 5.9 tok/s writing, ~35 tok/s reading a prompt
+               # at 1024-token chunks)
+               "models": {"UD-IQ2_XXS": {"about": "2-bit (Unsloth Dynamic); measured on a 12 GB card with 63 GB of RAM "
+                                                  "(slow there: read from the SSD)", "ram_gb": 110}},
+               "default": "UD-IQ2_XXS",
+               # its prompt chunks: each one reads most of a block's 256 experts from the SSD when the file is not in
+               # memory (the engine alone, a 5,419-token prompt on the RTX 4070 Ti: 34.1 / 65.8 tok/s at 1024 / 2048;
+               # 4096 does not fit the 12 GB card at 32K context)
+               "context": 32768, "min_vram_gb": 11, "chunk": 2048,
+               "license": "MIT: https://huggingface.co/XiaomiMiMo/MiMo-V2.5"},
     "flint": {"title": "Flint 40B-A2.5B", "by": "Recursive's coding-agent model; Unsloth's GGUFs",
               "about": "a coding-agent MoE, 2.5B active; 14.5-25 GB",
               "hf": hf("unsloth/flint-GGUF"), "file": "flint-{q}.gguf", "tag": "flint-", "name": "flint-40b-a2.5b",
@@ -5641,6 +5669,7 @@ SAMPLING_GLM53 = {"temperature": 1.0, "top_p": 0.95}                     # GLM-5
 SAMPLING_FLINT = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}       # Flint: its card's (and the file's)
 SAMPLING_GEMMA4 = {"temperature": 1.0, "top_p": 0.95, "top_k": 64}      # Gemma 4: its card's (and the file's)
 SAMPLING_LING3 = {"temperature": 0.6, "top_p": 0.95, "top_k": 20}       # Ling-3.0-flash: its card's (Sante's too)
+SAMPLING_MIMO25 = {"temperature": 1.0, "top_p": 0.95}                    # MiMo-V2.5: its card's (and the file's)
 SAMPLING_LFM25 = {"temperature": 0.1, "top_k": 50}                       # LFM2.5: the card's (and its repetition
                                                                           # penalty 1.05, which momoe-cuda does not apply)
 SAMPLING_LFM25_8B = {"temperature": 0.2, "top_k": 64}                    # LFM2.5-8B-A1B: its card's (top_k 80 there: the
@@ -5663,6 +5692,8 @@ def recommended_sampling(model_name) -> dict | None:
         return dict(SAMPLING_GEMMA4)
     if name.startswith("ling-3.0-"):
         return dict(SAMPLING_LING3)
+    if name.startswith("mimo-v2.5"):
+        return dict(SAMPLING_MIMO25)
     if name.startswith("lfm2.5-8b-"):
         return dict(SAMPLING_LFM25_8B)
     if name.startswith("lfm2.5-"):
@@ -6894,7 +6925,7 @@ def momoe_title(family: str) -> str:
 
 # the families momoe_setup offers, in its menu's order (NVFP4's packs are Strata's own format: its engine only)
 MOMOE_MENU = ("ornith", "qwen36", "qwen36-bartowski", "kat-coder", "qwen", "swift", "coder", "unsloth", "bolt",
-              "ornith122", "glm53", "ling3", "ling3sante", "flint", "lightning", "gemma4", "lfm25", "lfm25-8b",
+              "ornith122", "glm53", "ling3", "ling3sante", "mimo25", "flint", "lightning", "gemma4", "lfm25", "lfm25-8b",
               "deepseek41")
 
 
