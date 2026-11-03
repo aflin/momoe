@@ -1,4 +1,5 @@
-"""tools/test_setup_mimo25.py - Momoe: MiMo-V2.5 on the ggml engine (GGML_FAMILIES["mimo25"], momoe_setup): its size
+"""tools/test_setup_mimo25.py - Momoe: MiMo-V2.5 and V2.6-Flash-MOPD on the ggml engine (GGML_FAMILIES["mimo25"],
+["mimo26"], momoe_setup): its size
 pinned with each shard's size and SHA-256 at the pinned revision, the card's sampling, the family in the menu, the
 config on a 12 GB card (2048-token prompt chunks, no draft vocabulary), and its `qwen2` pre-tokenizer."""
 from __future__ import annotations
@@ -42,10 +43,10 @@ class Mimo25Family(unittest.TestCase):
     def test_no_draft_vocabulary(self):
         self.assertFalse(FAM.get("own_mtp"))
 
-    def run_setup(self, **extra):
+    def run_setup(self, family="mimo25", **extra):
         """momoe_setup up to the config on a 12 GB card (no build, no download): the config it would write."""
         written = {}
-        a = mock.Mock(gpu=None, gpus=None, family="mimo25", model=None, context=None, host=None, api_key=None,
+        a = mock.Mock(gpu=None, gpus=None, family=family, model=None, context=None, host=None, api_key=None,
                       check=False, vision_tokens=None, gguf_dir=None, config_name=None, no_start=True, yes=True,
                       draft_vocab=None, models_dir="/m", helper_tier=False, layer_split=None, backend=None, vision=None,
                       kv=None)
@@ -68,7 +69,7 @@ class Mimo25Family(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
-            setup.momoe_setup(a, Path("/d"), 8080, "mimo25")
+            setup.momoe_setup(a, Path("/d"), 8080, family)
         return written
 
     def test_the_config(self):
@@ -80,6 +81,41 @@ class Mimo25Family(unittest.TestCase):
         self.assertNotIn("--draft-vocab", a)
         self.assertNotIn("--mtp", a)                    # (its MTP blocks are not run)
         self.assertEqual(cfg["model_name"], "mimo-v2.5-ud-iq2_xxs")
+
+
+class Mimo26Family(Mimo25Family):
+    """MiMo-V2.6-Flash-MOPD (AesSedai's BPW2.5): pinned, the same engine settings as V2.5's, its own Mac pool."""
+    def test_the_size_pinned(self):
+        f = setup.GGML_FAMILIES["mimo26"]
+        self.assertTrue(f["hf"].endswith("/resolve/" + setup.HF_REVISIONS["AesSedai/MiMo-V2.6-Flash-MOPD-GGUF"] + "/"))
+        parts = setup.ggml_parts(f, "BPW2.5")
+        self.assertEqual([p[1] for p in parts], ["MiMo-V2.6-Flash-MOPD-BPW2.5-0000%d-of-00003.gguf" % i for i in (1, 2, 3)])
+        self.assertTrue(all(p[0] == "BPW2.5/" + p[1] for p in parts))
+        self.assertEqual(sum(p[2] for p in parts), 5948960 + 49505244992 + 47228677376)
+        self.assertTrue(all(len(p[3]) == 64 for p in parts))
+        for k in ("context", "chunk", "min_vram_gb", "mac_margin_gib"):
+            self.assertEqual(f[k], FAM[k], k)
+
+    def test_the_cards_sampling(self):
+        self.assertEqual(setup.recommended_sampling("mimo-v2.6-flash-mopd-bpw2.5"), {"temperature": 1.0, "top_p": 0.95})
+
+    def test_in_the_menu(self):
+        m = setup.MOMOE_MENU
+        self.assertLess(m.index("mimo26"), m.index("mimo25"))            # the newer one first
+
+    def test_the_mac_pool_leaves_room(self):
+        # its file as momoe_setup reads it (other weights 5.78 GiB + the ring, KV at 32K): 25 GiB on a 64 GB Mac
+        pool = setup.mac_pool_gib(64, 84.31, 5.78 + 0.49, 0.0, 27648 * 32768 / 2**30) - setup.GGML_FAMILIES["mimo26"]["mac_margin_gib"]
+        self.assertEqual(pool, 25)
+
+    def test_the_config(self):
+        cfg = self.run_setup("mimo26")
+        a = cfg["args"]
+        self.assertEqual(a[a.index("-m") + 1], "/m/mimo26-BPW2.5/MiMo-V2.6-Flash-MOPD-BPW2.5-00001-of-00003.gguf")
+        self.assertEqual(a[a.index("--ctx") + 1], "32768")
+        self.assertEqual(a[a.index("--chunk") + 1], "1024")
+        self.assertNotIn("--mtp", a)
+        self.assertEqual(cfg["model_name"], "mimo-v2.6-flash-mopd-bpw2.5")
 
 
 class Mimo25Tokenizer(unittest.TestCase):

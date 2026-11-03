@@ -81,6 +81,7 @@ HF_REVISIONS = {
     "bartowski/Ling-3.0-flash-GGUF": "7e1a1243566501d52af98e9aa7a7a61986279c6d",                       # 2026-08-18
     "bartowski/Ling-3.0-flash-Sante-GGUF": "d59f495f375857452f47ee56b1b0a37f4491f93c",                 # 2026-10-25
     "unsloth/MiMo-V2.5-GGUF": "f7aff7868d5f79da58b505f84626d7a807393c37",                              # 2026-11-02
+    "AesSedai/MiMo-V2.6-Flash-MOPD-GGUF": "b6e95d58c343b59b48a1dcbe98815d19abcae001",                  # 2026-09-29
     "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF": "5c2410d71524f4f72b023ce8daf7a80528226d5f",   # its mmproj (images)
     "Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF": "e4ae9970325413d582ba2c294122fc5567ec1dd7",
     "unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF": "34841e360524d421c564cc3ed247aa04a865473b",   # 2026-10-16
@@ -684,6 +685,18 @@ MIMO25_FILES = {
         ("UD-IQ2_XXS/MiMo-V2.5-UD-IQ2_XXS-00003-of-00003.gguf", 46948527360,
          "35a32af82acc03ef94c0baf9e8c1f21c2eb9a1ba13f2991162e9fb134acaba3b")],
 }
+# MiMo-V2.6-Flash-MOPD (Xiaomi, September 2026: V2.5's architecture and shapes, trained further; MOPD is its last stage,
+# which also stops repeated tool calls), AesSedai's MoE quants (the experts per layer from IQ1_M to IQ3_XXS, the rest Q6_K /
+# Q8_0; their measured perplexity against the MXFP4 original: BPW2.5 +10.5%, BPW3.0 +5.5%, BPW2.0 +27%)
+MIMO26_FILES = {
+    "BPW2.5": [
+        ("BPW2.5/MiMo-V2.6-Flash-MOPD-BPW2.5-00001-of-00003.gguf", 5948960,
+         "6df053289eda85149e675c9fea9ba4af686cc65d222c7aed32908b34ce046b07"),
+        ("BPW2.5/MiMo-V2.6-Flash-MOPD-BPW2.5-00002-of-00003.gguf", 49505244992,
+         "d9f0aaa92061139854a8b2d08efa1a02f468ba19aae11a762487f4111679d9c5"),
+        ("BPW2.5/MiMo-V2.6-Flash-MOPD-BPW2.5-00003-of-00003.gguf", 47228677376,
+         "b85b2fc09303ad08fb48137da832700f0bcf8e557fb8d09c0504fa1c167eb10b")],
+}
 GGML_FAMILIES = {
     "bolt": {"title": "Nemotron 3.5 Bolt 74B-A9B", "by": "NVIDIA; Unsloth's GGUFs",
              "about": "Mamba-2 + attention + latent MoE, 9B active; a 32 GB download, ~56 GB of RAM",
@@ -763,6 +776,21 @@ GGML_FAMILIES = {
                    # spread over 2.8 tokens a window); on a 12 GB card it is slower (36.7 -> 28.0): not there
                    "mac_args": ["--mtp", "3"],
                    "license": "MIT: https://huggingface.co/inclusionAI/Ling-3.0-flash-Sante"},
+    "mimo26": {"title": "MiMo-V2.6-Flash-MOPD 310B-A15B", "by": "Xiaomi; AesSedai's GGUFs",
+               "about": "MiMo-V2.5's architecture trained further (September 2026), a model that thinks; a 97 GB download, "
+                        "~110 GB of RAM to hold it",
+               "hf": hf("AesSedai/MiMo-V2.6-Flash-MOPD-GGUF"), "tag": "mimo26-", "name": "mimo-v2.6-flash-mopd",
+               "parts": MIMO26_FILES,
+               # ram_gb: the file and the rest of the system in memory; with less, its experts are read from the SSD
+               # (measured: an RTX 4070 Ti, 63 GB of RAM, the file on NVMe: 5.9 tok/s writing, 32.8 tok/s reading a
+               # 5,402-token prompt; its first 200 greedy tokens = llama.cpp's on the code prompt)
+               "models": {"BPW2.5": {"about": "2.5 bits a weight (AesSedai's MoE mix); measured on a 12 GB card with 63 GB "
+                                              "of RAM (slow there: read from the SSD)", "ram_gb": 110}},
+               "default": "BPW2.5",
+               # the engine's settings as MiMo-V2.5's (the same blocks and shapes): see there.  Its other weights are
+               # larger (5.8 GiB, Q6_K / Q8_0), so the same Mac margin leaves a 64 GB Mac a 25 GiB pool
+               "context": 32768, "min_vram_gb": 11, "chunk": 1024, "mac_margin_gib": 12,
+               "license": "MIT: https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-MOPD"},
     "mimo25": {"title": "MiMo-V2.5 310B-A15B", "by": "Xiaomi; Unsloth's GGUFs",
                "about": "sliding-window + full attention, 256 experts, 15B active, a model that thinks; a 97 GB "
                         "download, ~110 GB of RAM to hold it",
@@ -5697,7 +5725,7 @@ def recommended_sampling(model_name) -> dict | None:
         return dict(SAMPLING_GEMMA4)
     if name.startswith("ling-3.0-"):
         return dict(SAMPLING_LING3)
-    if name.startswith("mimo-v2.5"):
+    if name.startswith(("mimo-v2.5", "mimo-v2.6")):     # (V2.6-Flash-MOPD: the same, its card's)
         return dict(SAMPLING_MIMO25)
     if name.startswith("lfm2.5-8b-"):
         return dict(SAMPLING_LFM25_8B)
@@ -6930,7 +6958,7 @@ def momoe_title(family: str) -> str:
 
 # the families momoe_setup offers, in its menu's order (NVFP4's packs are Strata's own format: its engine only)
 MOMOE_MENU = ("ornith", "qwen36", "qwen36-bartowski", "kat-coder", "qwen", "swift", "coder", "unsloth", "bolt",
-              "ornith122", "glm53", "ling3", "ling3sante", "mimo25", "flint", "lightning", "gemma4", "lfm25", "lfm25-8b",
+              "ornith122", "glm53", "ling3", "ling3sante", "mimo26", "mimo25", "flint", "lightning", "gemma4", "lfm25", "lfm25-8b",
               "deepseek41")
 
 
