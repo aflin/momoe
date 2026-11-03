@@ -43,16 +43,18 @@ and Strata is still its base. It has four engines:
 - **Strata's engine** is Strata's, with MoMoE's additions (the Qwen3.6 family's path began as
   [#1402](https://github.com/Niko1221/Strata/pull/1402)): experts spread over VRAM, RAM and the SSD, an expert cache
   filled by predictions, and a multi-token draft layer. How it works: Strata's [paper](docs/paper/Strata-Paper.pdf) and
-  [DETAILS.md](docs/DETAILS.md). The server and the installer grew from Strata's too. It is Strata 0.2.7's engine, with
-  two of 0.2.7's new defaults off here, the routing that prefers experts already on the card among them: measured in
+  [DETAILS.md](docs/DETAILS.md). The server and the installer grew from Strata's too. It is Strata 0.2.9's engine. Three of
+  Strata's newer defaults are off here, after measuring them on MoMoE's machines: the routing that prefers experts
+  already on the card (faster, but it hurt the answers; off in Strata too since 0.2.8), and the int8 prompt attention
+  on RTX 40 cards and 0.2.9's GDN prompt kernels (they changed the answers and were no faster here). Measured in
   [docs/ROUTE_PRIOR.md](docs/ROUTE_PRIOR.md).
 - **MoMoE's engines** ([src/metal](src/metal/README.md)) are written for MoMoE on
   [ggml](https://github.com/ggml-org/llama.cpp), llama.cpp's library. They read a model's GGUF as it is and keep the
   experts they can in a pool on the GPU. The rest are, per model and machine:
   - read from the SSD (on the Spark past the page cache, at 10-13 GB/s);
   - copied in from RAM;
-  - or computed by the CPU while the GPU computes its own (for Ornith-122B and Flint, a trial while the model runs
-    picks the faster way).
+  - or computed by the CPU while the GPU computes its own (for Ornith-122B, Flint, Ling-3.0-flash and MiMo, a trial
+    while the model runs picks the faster way).
 
   Their graphs are kept and replayed (as CUDA graphs on NVIDIA), and two cards can share a model (the layer split or
   the [helper tier](#two-cards)).
@@ -119,7 +121,7 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 | Ling-3.0-flash IQ3_XXS | 35.6 | - | - | - | - |
 | Ling-3.0-flash Sante IQ3_XXS | 33.5 | - | - | 27.0* | - |
 | MiMo-V2.6-Flash-MOPD BPW2.5 | 5.9 (the engine alone, from the SSD) | TBD | - | 7.0 (a 25 GiB pool) | - |
-| MiMo-V2.5 UD-IQ2_XXS | 5.9 (from the SSD) | TBD | - | TBD | - |
+| MiMo-V2.5 UD-IQ2_XXS | 5.9 (from the SSD) | TBD | - | 6-9 (single runs) | - |
 | Flint 40B-A2.5B | 89.9 (UD-IQ3_XXS) / 65.7 (UD-Q4_K_XL) | 73.2 (UD-Q4_K_XL) | - | 84.4 (UD-Q4_K_XL) | 42.2 (UD-IQ3_XXS) |
 | Nemotron 3.5 Lightning 30B-A3B | 71.1 (UD-IQ3_XXS) / 38.7 (UD-Q4_K_XL) | 66.9 (UD-Q4_K_XL) | - | 89.9 (UD-Q4_K_XL) | 25.9 (UD-IQ3_XXS) |
 | Gemma 4 26B-A4B | 92.4 (UD-IQ3_XXS) / 75.2 (UD-Q4_K_XL) | 59.3 (UD-Q4_K_XL) | - | 85.2 (UD-Q4_K_XL) | 28.8 (UD-IQ3_XXS) |
@@ -131,8 +133,9 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 - **Engines:** on the PC, Strata's engine runs the Flash-Next and Qwen3.6 families, and `momoe-cuda` runs the rest
   (Ornith-35B on `momoe-cuda` would be 63.9). Elsewhere it's `momoe-cuda` on the Spark and the Jetson, and
   `momoe-metal` on the Macs.
-- **Checked:** every model's greedy output against llama.cpp's, and the server's chat and tool calls (whole, streamed,
-  after the result).
+- **Checked:** every model's output against llama.cpp's, and the server's chat and tool calls (whole, streamed, after
+  the result). For the newer ports (Ling-3.0-flash, MiMo) the check is the KL of the next-token probabilities on
+  llama.cpp's own answer, in their [bench/results](bench/results) folders.
 - **Reading prompts on the PC** (Strata's engine, 4K / 16K tokens): Flash-Next IQ3_XXS 1,178 / 2,133 tok/s, the
   Coder 1,931 / 2,615, Swift 1,196 / 2,163, Unsloth's UD-IQ4_XS 213 / 265 (88 GB, more than the RAM: with ~52 GB
   free; 108 / 157, writing 14.2, with 36 GB free), the Qwen3.6 family 3,081-3,767 / 3,974-4,521.
@@ -212,6 +215,8 @@ In short:
 - **Where every expert fits in memory, the two are level.** That's Flint, Gemma 4 and Lightning on the Spark and the
   Macs, LFM2.5 on the Jetson, the M1 Ultra and the M4 Air, LFM2.5-8B on the PC, and Qwen3.6 on the M1 Ultra without
   drafting.
+- **Where the model is larger than the RAM too, the two are level.** MiMo on the PC (97 GB against 63 GB of RAM):
+  both wait for the SSD (MoMoE 5.9, llama.cpp 5.1-6.4).
 - **llama.cpp is ahead in a few places.** It computes some experts on the CPU from RAM while the GPU holds the rest,
   which wins for Flint IQ3_XXS and LFM2.5-24B on the PC and for LFM2.5-8B on the Mac mini. Its drafting gains more
   for Qwen3.6 on the M1 Ultra.
@@ -394,10 +399,10 @@ slower: 12.0-12.2 tok/s against 19-21 on the 4070 Ti alone. More in
     server logs a reply that ended after its thinking with no text and no tool call.
 - **[llama.cpp / ggml](https://github.com/ggml-org/llama.cpp)**, by the ggml authors: the ggml library under
   `momoe-cuda` and `momoe-metal` (in [src/metal/ggml](src/metal/ggml), with MoMoE's additions listed in its
-  `README.momoe`), the model code their graphs for Nemotron, GLM-5.3, LFM2.5, Flint and Gemma 4 follow, and the GGUF
-  format, the quantization kernels and the image encoder Strata builds on.
+  `README.momoe`), the model code their graphs for Nemotron, GLM-5.3, LFM2.5, Flint, Gemma 4, Ling-3.0-flash,
+  DeepSeek-V4.1 and MiMo follow, and the GGUF format, the quantization kernels and the image encoder Strata builds on.
 - The models' authors and quantizers listed above: the Qwen team, ISTA-DASLab, ukisai, Unsloth, bartowski, Ornith AI,
-  Myric, NVIDIA, Z.ai, Liquid AI, Recursive and Google.
+  Myric, NVIDIA, Z.ai, Liquid AI, Recursive, Google, inclusionAI, DeepSeek, Xiaomi and AesSedai.
 
 ## License
 
