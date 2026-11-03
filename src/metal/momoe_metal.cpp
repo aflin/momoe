@@ -8023,8 +8023,9 @@ int main(int argc, char ** argv) {
             for (size_t j = 0; j < V; ++j) h16[j] = ggml_fp32_to_fp16(std::max(lp[j], -60000.0f));
             fwrite(&fed, 4, 1, kl_dump);
             fwrite(h16.data(), 2, V, kl_dump);
-        } else {
-            h16.resize(V);
+        }
+        if (kl_ref) {                                        // (with MOMOE_KL_DUMP too: the reference's tokens fed and
+            h16.resize(V);                                   // ours dumped; its log-probabilities read in step)
             if (fread(h16.data(), 2, V, kl_ref) != V) die("the KL reference is short");
             double kl = 0;
             size_t ra = 0, oa = 0;
