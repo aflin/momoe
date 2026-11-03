@@ -33,6 +33,18 @@ warning; the pool 2.4 GiB). The engine alone on the code prompt: 5.9 tok/s writi
 experts it used in the card's pool, the rest computed by the CPU from the file cache and the SSD. llama.cpp's runs
 above: 5.1-5.8 tok/s.
 
+The server's benchmark (`tools/strata_bench.py`, 3 runs, `server-pc/`), the same config, ~40 GB of RAM available:
+
+| | median (range) |
+| --- | --- |
+| chat, writing | 5.4 tok/s (4.9-6.5) |
+| chat, first token | 9.0 s (8.0-10.6) |
+| the 4K / 16K prompt, reading | 151 / 230 tok/s (repetitive text: few experts) |
+| agent session, writing | 4.2 tok/s (3.3-4.5) |
+| agent turn, first token | 79.5 s (45.1-103.6; ~3,000 new tokens each) |
+
+MiMo-V2.5's the same way: 5.9 / 4.5 tok/s writing (chat / agent), 74 s to an agent turn's first token.
+
 ## The M1 Ultra (64 GB)
 
 The engine alone, setup's pool (25 GiB, 30% of the experts), the code prompt against llama.cpp's file: KL 0.0012, p99

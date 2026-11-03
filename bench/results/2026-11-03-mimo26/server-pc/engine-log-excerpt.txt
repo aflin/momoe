@@ -1,0 +1,2 @@
+[momoe] this engine was built for sm_6, sm_8, sm_9, but a graphics card in use is sm_89: long prompts can stop with "unspecified launch failure". Run ./update.sh so the engine is built for every card in this PC.
+ready: http://127.0.0.1:8093/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, context 32768 tokens)

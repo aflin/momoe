@@ -120,7 +120,7 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 | GLM-5.3-Flash UD-IQ3_XXS | does not fit a 12 GB card | 19.7* | - | 4.5* | 1.4 |
 | Ling-3.0-flash IQ3_XXS | 35.6 | - | - | - | - |
 | Ling-3.0-flash Sante IQ3_XXS | 33.5 | - | - | 27.0* | - |
-| MiMo-V2.6-Flash-MOPD BPW2.5 | 5.9 (the engine alone, from the SSD) | TBD | - | 7.0 (a 25 GiB pool) | - |
+| MiMo-V2.6-Flash-MOPD BPW2.5 | 5.4 (from the SSD) | TBD | - | 7.0 (a 25 GiB pool) | - |
 | MiMo-V2.5 UD-IQ2_XXS | 5.9 (from the SSD) | TBD | - | 6-9 (single runs) | - |
 | Flint 40B-A2.5B | 89.9 (UD-IQ3_XXS) / 65.7 (UD-Q4_K_XL) | 73.2 (UD-Q4_K_XL) | - | 84.4 (UD-Q4_K_XL) | 42.2 (UD-IQ3_XXS) |
 | Nemotron 3.5 Lightning 30B-A3B | 71.1 (UD-IQ3_XXS) / 38.7 (UD-Q4_K_XL) | 66.9 (UD-Q4_K_XL) | - | 89.9 (UD-Q4_K_XL) | 25.9 (UD-IQ3_XXS) |
@@ -145,7 +145,7 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
   setup drafts with its MTP layer (without drafting 16.7 tok/s); the plain model there is not measured yet.
 - **MiMo-V2.6-Flash-MOPD** (Xiaomi, September 2026; V2.5's architecture trained further) and **MiMo-V2.5**
   (310B-A15B, a 97 GB file each): on the PC, with 63 GB of RAM, most of the experts are read from the SSD as tokens
-  need them: ~6 tok/s writing and 33-35 tok/s reading real text (2048-token chunks read ~66, but leave a 12 GB card
+  need them: 5.4-5.9 tok/s writing and 33-35 tok/s reading real text (2048-token chunks read ~66, but leave a 12 GB card
   too little VRAM: setup keeps 1024). They want ~110 GB of memory to hold the file. Both checked against llama.cpp on
   the PC, V2.5 on the Spark and the M1 Ultra too, V2.6 on the M1 Ultra (7.0 tok/s writing there, the Spark TBD):
   [bench/results/2026-11-03-mimo25](bench/results/2026-11-03-mimo25),
@@ -172,7 +172,7 @@ the PC's Flash-Next wrote 65.5-76.7 here against 57.9 above).
 | Ornith-1.5-35B-A3B IQ4_XS | 131.6-153.5* | 77.8 (MoE cache 8 GiB; its default fit 57.2; drafting 63.5*) |
 | Ornith-1.5-122B-A10B UD-IQ3_XXS | 19.2 | 4.62 (48 on CPU) |
 | Ling-3.0-flash Sante IQ3_XXS | 33.5 | 27.4 (MoE cache 6 GiB; 38 on CPU 26.7) |
-| MiMo-V2.6-Flash-MOPD BPW2.5 | 5.9 (the engine alone) | 5.1-5.8 (every expert on CPU; other placements not tried) |
+| MiMo-V2.6-Flash-MOPD BPW2.5 | 5.4 | 5.1-5.8 (every expert on CPU; other placements not tried) |
 | MiMo-V2.5 UD-IQ2_XXS | 5.9 | 5.7-6.4 (every expert on CPU; other placements not tried) |
 | Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 (server 30.0, sampled 30.6) | 26.2 (26.1) |
 | Nemotron 3.5 Lightning UD-IQ3_XXS / UD-Q4_K_XL | 71.1 / 38.7 | 65.3 (24 on CPU) / 40.2 (36) |
@@ -216,7 +216,7 @@ In short:
   Macs, LFM2.5 on the Jetson, the M1 Ultra and the M4 Air, LFM2.5-8B on the PC, and Qwen3.6 on the M1 Ultra without
   drafting.
 - **Where the model is larger than the RAM too, the two are level.** MiMo on the PC (97 GB against 63 GB of RAM):
-  both wait for the SSD (MoMoE 5.9, llama.cpp 5.1-6.4).
+  both wait for the SSD (MoMoE 5.4-5.9, llama.cpp 5.1-6.4).
 - **llama.cpp is ahead in a few places.** It computes some experts on the CPU from RAM while the GPU holds the rest,
   which wins for Flint IQ3_XXS and LFM2.5-24B on the PC and for LFM2.5-8B on the Mac mini. Its drafting gains more
   for Qwen3.6 on the M1 Ultra.
