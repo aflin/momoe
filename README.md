@@ -118,7 +118,7 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 | GLM-5.3-Flash UD-IQ3_XXS | does not fit a 12 GB card | 19.7* | - | 4.5* | 1.4 |
 | Ling-3.0-flash IQ3_XXS | 35.6 | - | - | - | - |
 | Ling-3.0-flash Sante IQ3_XXS | 33.5 | - | - | 27.0* | - |
-| MiMo-V2.6-Flash-MOPD BPW2.5 | 5.9 (the engine alone, from the SSD) | TBD | - | TBD | - |
+| MiMo-V2.6-Flash-MOPD BPW2.5 | 5.9 (the engine alone, from the SSD) | TBD | - | 7.0 (a 25 GiB pool) | - |
 | MiMo-V2.5 UD-IQ2_XXS | 5.9 (from the SSD) | TBD | - | TBD | - |
 | Flint 40B-A2.5B | 89.9 (UD-IQ3_XXS) / 65.7 (UD-Q4_K_XL) | 73.2 (UD-Q4_K_XL) | - | 84.4 (UD-Q4_K_XL) | 42.2 (UD-IQ3_XXS) |
 | Nemotron 3.5 Lightning 30B-A3B | 71.1 (UD-IQ3_XXS) / 38.7 (UD-Q4_K_XL) | 66.9 (UD-Q4_K_XL) | - | 89.9 (UD-Q4_K_XL) | 25.9 (UD-IQ3_XXS) |
@@ -144,7 +144,7 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
   (310B-A15B, a 97 GB file each): on the PC, with 63 GB of RAM, most of the experts are read from the SSD as tokens
   need them: ~6 tok/s writing and 33-35 tok/s reading real text (2048-token chunks read ~66, but leave a 12 GB card
   too little VRAM: setup keeps 1024). They want ~110 GB of memory to hold the file. Both checked against llama.cpp on
-  the PC, V2.5 on the Spark and the M1 Ultra too; those two machines' speeds are not benchmarked yet:
+  the PC, V2.5 on the Spark and the M1 Ultra too, V2.6 on the M1 Ultra (7.0 tok/s writing there, the Spark TBD):
   [bench/results/2026-11-03-mimo25](bench/results/2026-11-03-mimo25),
   [bench/results/2026-11-03-mimo26](bench/results/2026-11-03-mimo26).
 - **DeepSeek-V4.1-Flash** (249 GB of files with its n-gram table): on a PC upstream Strata's DeepSeek engine, on the

@@ -32,3 +32,22 @@ Setup's config (`--ctx 32768 --chunk 1024`, firefly's installed engine): a short
 warning; the pool 2.4 GiB). The engine alone on the code prompt: 5.9 tok/s writing (6.2 the second half), 26% of the
 experts it used in the card's pool, the rest computed by the CPU from the file cache and the SSD. llama.cpp's runs
 above: 5.1-5.8 tok/s.
+
+## The M1 Ultra (64 GB)
+
+The engine alone, setup's pool (25 GiB, 30% of the experts), the code prompt against llama.cpp's file: KL 0.0012, p99
+0.0272, top-1 100%; 7.4-7.5 tok/s writing, 91.6% of the experts each token used in the pool, the rest read from the
+SSD.
+
+The server's benchmark (`tools/strata_bench.py`, 3 runs, `server-m1-ultra/`), setup's Mac config (`--ctx 32768
+--pool-gib 25 --nocache`), nothing else running:
+
+| | median (range) |
+| --- | --- |
+| chat, writing | 7.0 tok/s (5.7-7.8) |
+| chat, first token | 4.8 s (4.6-5.3) |
+| the 4K / 16K prompt, reading | 166 / 202 tok/s (repetitive text: few experts) |
+| agent session, writing | 5.6 tok/s (5.2-5.9) |
+| agent turn, first token | 63.6 s (32.0-75.1; ~3,000 new tokens each) |
+
+Writing is near DeepSeek-V4.1-Flash's 7.4 there; reading real text is the slow part, as on the PC.
