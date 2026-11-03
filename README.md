@@ -140,8 +140,8 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
   file cache: the first answer after another large model ran is slow (9-12 tok/s) until it is again. On the M1 Ultra
   setup drafts with its MTP layer (without drafting 16.7 tok/s); the plain model there is not measured yet.
 - **MiMo-V2.5** (Xiaomi, 310B-A15B, a 97 GB file): on the PC, with 63 GB of RAM, most of its experts are read from
-  the SSD as tokens need them: 5.9 tok/s writing and ~35 tok/s reading real text (~66 at setup's 2048-token chunks,
-  the engine alone). It wants ~110 GB of memory to hold the file; not measured on the Spark or a Mac yet:
+  the SSD as tokens need them: 5.9 tok/s writing and ~35 tok/s reading real text (2048-token chunks read ~66, but
+  leave a 12 GB card too little VRAM: setup keeps 1024). It wants ~110 GB of memory to hold the file; not measured on the Spark or a Mac yet:
   [bench/results/2026-11-03-mimo25](bench/results/2026-11-03-mimo25).
 - **DeepSeek-V4.1-Flash** (249 GB of files with its n-gram table): on a PC upstream Strata's DeepSeek engine, on the
   Spark and a Mac MoMoE's; checked against each other, the measurements and the memory it needs:

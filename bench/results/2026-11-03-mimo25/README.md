@@ -38,3 +38,10 @@ llama.cpp (the reference runs above): 5.7-6.4 tok/s writing.
 The prompt is read from the disk: each chunk touches most of a block's 256 experts. The engine alone on a 5,419-token
 document: chunks of 1024 34.1 tok/s (444 GiB read), 2048 65.8 tok/s (239 GiB read); 4096 does not fit the 12 GB card at
 32K context.
+
+But 2048 does not fit the 12 GB card in the server: its compute buffers leave 2.75 GiB for the expert pool, under the
+pool's floor (16 tokens' experts in each of the file's three formats: 3.12 GiB), and a 5,419-token prompt after a short
+chat and a tool call ran out of VRAM (reproduced twice; a 1 GiB VRAM margin did not help, CUDA graphs off did, with
+~20 MiB to spare). Setup keeps 1024 (the same sequence: 35.0 tok/s, ~400 MiB to spare) and the engine now warns when
+the floor is more than the room. Checked with setup's config on the installed engine (`./update.sh`'s build): chat, a
+tool call and the long prompt.

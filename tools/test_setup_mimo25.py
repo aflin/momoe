@@ -70,7 +70,7 @@ class Mimo25Family(unittest.TestCase):
         a = cfg["args"]
         self.assertEqual(a[a.index("-m") + 1], "/m/mimo25-UD-IQ2_XXS/MiMo-V2.5-UD-IQ2_XXS-00001-of-00003.gguf")
         self.assertEqual(a[a.index("--ctx") + 1], "32768")
-        self.assertEqual(a[a.index("--chunk") + 1], "2048")
+        self.assertEqual(a[a.index("--chunk") + 1], "1024")    # (2048 ran a 12 GB card out of VRAM)
         self.assertNotIn("--draft-vocab", a)
         self.assertNotIn("--mtp", a)                    # (its MTP blocks are not run)
         self.assertEqual(cfg["model_name"], "mimo-v2.5-ud-iq2_xxs")

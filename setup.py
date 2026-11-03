@@ -775,9 +775,10 @@ GGML_FAMILIES = {
                                                   "(slow there: read from the SSD)", "ram_gb": 110}},
                "default": "UD-IQ2_XXS",
                # its prompt chunks: each one reads most of a block's 256 experts from the SSD when the file is not in
-               # memory (the engine alone, a 5,419-token prompt on the RTX 4070 Ti: 34.1 / 65.8 tok/s at 1024 / 2048;
-               # 4096 does not fit the 12 GB card at 32K context)
-               "context": 32768, "min_vram_gb": 11, "chunk": 2048,
+               # memory (the engine alone, a 5,419-token prompt on the RTX 4070 Ti: 34.1 / 65.8 tok/s at 1024 / 2048).
+               # 1024: at 2048 the 12 GB card's compute buffers leave less room than the pool's floor (three formats:
+               # 3.1 GiB), and a long prompt after a few short requests ran out of VRAM (the server, 32K context)
+               "context": 32768, "min_vram_gb": 11, "chunk": 1024,
                "license": "MIT: https://huggingface.co/XiaomiMiMo/MiMo-V2.5"},
     "flint": {"title": "Flint 40B-A2.5B", "by": "Recursive's coding-agent model; Unsloth's GGUFs",
               "about": "a coding-agent MoE, 2.5B active; 14.5-25 GB",

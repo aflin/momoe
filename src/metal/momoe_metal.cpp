@@ -6505,6 +6505,10 @@ static void fit_pool(Engine & e) {
         return b;
     };
     double frac = std::max(0.0, want / (double) P.all_bytes);
+    if (bytes_at(0.0) > want)                                // (mimo2 UD-IQ2_XXS, --chunk 2048 on a 12 GB card: a long prompt
+        fprintf(stderr, "momoe-cuda: warning: the expert pool's floor (%.2f GiB: %d tokens' experts in each format group) is "   // after a
+                "more than the %.2f GiB left for it: the card may run out of memory; a smaller --chunk or --ctx leaves "      // few short
+                "more\n", bytes_at(0.0) / 1073741824.0, P.g.size() > 4 ? 4 : 16, std::max(0.0, want) / 1073741824.0);     // ones did)
     if (bytes_at(frac) > want) {
         double lo = 0, hi = frac;
         for (int i = 0; i < 40; ++i) (bytes_at((lo + hi) / 2) > want ? hi : lo) = (lo + hi) / 2;
