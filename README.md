@@ -37,7 +37,7 @@ and Strata is still its base. It has four engines:
 | --- | --- | --- |
 | **Strata's engine** (`momoe`) | Linux + NVIDIA | Qwen3.8-Flash-Next and its variants, the Qwen3.6 family |
 | **Strata's DeepSeek engine** (`strata-dsv41`) | Linux + NVIDIA | DeepSeek-V4.1-Flash on a PC ([docs/DEEPSEEK41.md](docs/DEEPSEEK41.md)) |
-| **`momoe-cuda`** (MoMoE's own) | Linux + NVIDIA, the DGX Spark, a Jetson | every family below (DeepSeek-V4.1-Flash on the Spark); on a PC: Nemotron 3.5 Bolt and Lightning, GLM-5.3-Flash, Ornith-1.5-122B, Ling-3.0-flash, Flint, Gemma 4, LFM2.5 |
+| **`momoe-cuda`** (MoMoE's own) | Linux + NVIDIA, the DGX Spark, a Jetson | every family below (DeepSeek-V4.1-Flash on the Spark); on a PC: Nemotron 3.5 Bolt and Lightning, GLM-5.3-Flash, Ornith-1.5-122B, Ling-3.0-flash, MiMo-V2.5, Flint, Gemma 4, LFM2.5 |
 | **`momoe-metal`** (MoMoE's own) | Apple Silicon Macs | every family below |
 
 - **Strata's engine** is Strata's, with MoMoE's additions (the Qwen3.6 family's path began as
@@ -118,6 +118,7 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 | GLM-5.3-Flash UD-IQ3_XXS | does not fit a 12 GB card | 19.7* | - | 4.5* | 1.4 |
 | Ling-3.0-flash IQ3_XXS | 35.6 | - | - | - | - |
 | Ling-3.0-flash Sante IQ3_XXS | 33.5 | - | - | 27.0* | - |
+| MiMo-V2.5 UD-IQ2_XXS | 5.9 (from the SSD) | - | - | - | - |
 | Flint 40B-A2.5B | 89.9 (UD-IQ3_XXS) / 65.7 (UD-Q4_K_XL) | 73.2 (UD-Q4_K_XL) | - | 84.4 (UD-Q4_K_XL) | 42.2 (UD-IQ3_XXS) |
 | Nemotron 3.5 Lightning 30B-A3B | 71.1 (UD-IQ3_XXS) / 38.7 (UD-Q4_K_XL) | 66.9 (UD-Q4_K_XL) | - | 89.9 (UD-Q4_K_XL) | 25.9 (UD-IQ3_XXS) |
 | Gemma 4 26B-A4B | 92.4 (UD-IQ3_XXS) / 75.2 (UD-Q4_K_XL) | 59.3 (UD-Q4_K_XL) | - | 85.2 (UD-Q4_K_XL) | 28.8 (UD-IQ3_XXS) |
@@ -138,6 +139,10 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
   does not hold, and prompts read at 1,189 / 1,494 tok/s (4K / 16K tokens). Its 54-56 GB file has to be in the RAM's
   file cache: the first answer after another large model ran is slow (9-12 tok/s) until it is again. On the M1 Ultra
   setup drafts with its MTP layer (without drafting 16.7 tok/s); the plain model there is not measured yet.
+- **MiMo-V2.5** (Xiaomi, 310B-A15B, a 97 GB file): on the PC, with 63 GB of RAM, most of its experts are read from
+  the SSD as tokens need them: 5.9 tok/s writing and ~35 tok/s reading real text (~66 at setup's 2048-token chunks,
+  the engine alone). It wants ~110 GB of memory to hold the file; not measured on the Spark or a Mac yet:
+  [bench/results/2026-11-03-mimo25](bench/results/2026-11-03-mimo25).
 - **DeepSeek-V4.1-Flash** (249 GB of files with its n-gram table): on a PC upstream Strata's DeepSeek engine, on the
   Spark and a Mac MoMoE's; checked against each other, the measurements and the memory it needs:
   [docs/DEEPSEEK41.md](docs/DEEPSEEK41.md).
@@ -160,6 +165,7 @@ the PC's Flash-Next wrote 65.5-76.7 here against 57.9 above).
 | Ornith-1.5-35B-A3B IQ4_XS | 131.6-153.5* | 77.8 (MoE cache 8 GiB; its default fit 57.2; drafting 63.5*) |
 | Ornith-1.5-122B-A10B UD-IQ3_XXS | 19.2 | 4.62 (48 on CPU) |
 | Ling-3.0-flash Sante IQ3_XXS | 33.5 | 27.4 (MoE cache 6 GiB; 38 on CPU 26.7) |
+| MiMo-V2.5 UD-IQ2_XXS | 5.9 | 5.7-6.4 (every expert on CPU; other placements not tried) |
 | Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 (server 30.0, sampled 30.6) | 26.2 (26.1) |
 | Nemotron 3.5 Lightning UD-IQ3_XXS / UD-Q4_K_XL | 71.1 / 38.7 | 65.3 (24 on CPU) / 40.2 (36) |
 | Gemma 4 26B-A4B UD-IQ3_XXS / UD-Q4_K_XL | 92.4 / 75.2 | 90.5 at 32K context (4 on CPU) / 54.8 (11) |
