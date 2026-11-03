@@ -45,3 +45,19 @@ chat and a tool call ran out of VRAM (reproduced twice; a 1 GiB VRAM margin did 
 ~20 MiB to spare). Setup keeps 1024 (the same sequence: 35.0 tok/s, ~400 MiB to spare) and the engine now warns when
 the floor is more than the room. Checked with setup's config on the installed engine (`./update.sh`'s build): chat, a
 tool call and the long prompt.
+
+## The DGX Spark and the M1 Ultra (correctness; speeds are not benchmarks)
+
+The same three prompts against the same llama.cpp files (fed llama.cpp's tokens, 199 steps), the same UD-IQ2_XXS file:
+
+| Prompt | Spark (`momoe-cuda`, every expert in its pool) KL mean / p99, top-1 | M1 Ultra (`momoe-metal`, a 28 GiB pool) |
+| --- | --- | --- |
+| code | 0.0006 / 0.0098, 99.0% | 0.0007 / 0.0155, 99.0% |
+| medical | 0.0045 / 0.0533, 97.0% | 0.0053 / 0.0583, 97.0% |
+| a document | 0.0051 / 0.0842, 98.0% | 0.0057 / 0.1232, 98.0% |
+
+The server with setup's config (Spark: `--ctx 32768 --chunk 1024`; the M1 Ultra: `--ctx 32768 --pool-gib 27 --nocache`,
+setup's pool there with the family's `mac_margin_gib` 12): chat, an OpenAI tool call and the 5,419-token document on
+each. Rough speeds from those runs (one request each; on the Spark another job was running): the Spark 27-28 tok/s
+writing, the document read at 597 tok/s, 99 GB of memory in use; the M1 Ultra 5.9-9.1 tok/s writing (91-94% of the
+experts each token used in the pool), the document read at 46-51 tok/s.

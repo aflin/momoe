@@ -33,6 +33,12 @@ class Mimo25Family(unittest.TestCase):
     def test_in_the_menu(self):
         self.assertIn("mimo25", setup.MOMOE_MENU)
 
+    def test_the_mac_pool_leaves_room(self):
+        # the file's experts and other weights (+ its sliding-window ring) and its KV cache at 32K, as momoe_setup reads
+        # them: 27 GiB on the 64 GB M1 Ultra (28 ran it, 94% of the experts it used in the pool)
+        pool = setup.mac_pool_gib(64, 85.30, 4.55 + 0.49, 0.0, 27648 * 32768 / 2**30) - FAM["mac_margin_gib"]
+        self.assertEqual(pool, 27)
+
     def test_no_draft_vocabulary(self):
         self.assertFalse(FAM.get("own_mtp"))
 

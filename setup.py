@@ -779,6 +779,10 @@ GGML_FAMILIES = {
                # 1024: at 2048 the 12 GB card's compute buffers leave less room than the pool's floor (three formats:
                # 3.1 GiB), and a long prompt after a few short requests ran out of VRAM (the server, 32K context)
                "context": 32768, "min_vram_gb": 11, "chunk": 1024,
+               # a Mac's pool this much smaller than mac_pool_gib's (39 GiB on a 64 GB Mac at 32K, ~46 GiB of Metal memory
+               # with the rest, the size that froze the M1 Ultra with DeepSeek): 27 there (28 ran it at 7.6 tok/s, 94% of
+               # the experts it used in the pool, 2026-11-03)
+               "mac_margin_gib": 12,
                "license": "MIT: https://huggingface.co/XiaomiMiMo/MiMo-V2.5"},
     "flint": {"title": "Flint 40B-A2.5B", "by": "Recursive's coding-agent model; Unsloth's GGUFs",
               "about": "a coding-agent MoE, 2.5B active; 14.5-25 GB",
