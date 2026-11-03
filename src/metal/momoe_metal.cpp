@@ -158,6 +158,7 @@ struct Layer {
     // around its dense FFN and MoE (the FFN's output, the MLP's, the experts' output and input); the router's input
     // scale, each expert's output scale and the block's output scale
     int hd = 0, n_kv = 0;
+    int hd_v = 0;                                            // mimo2: the values' head size (the keys': hd)
     ggml_tensor *post_ffw = nullptr, *post_ffw1 = nullptr, *post_ffw2 = nullptr, *pre_ffw2 = nullptr;
     ggml_tensor *gate_inp_s = nullptr, *down_s = nullptr, *out_scale = nullptr;
     // deepseek41 (DeepSeek-V4.1-Flash): one 512-wide KV row (the key is the value; RoPE on its last n_rot) in wkv_a /
@@ -219,6 +220,12 @@ struct Model {
     // and token by a power of two (llama.cpp's build_amax_src1_f16: the 8-bit activation blocks' f16 sums stay finite)
     bool flint = false;
     int n_swa = 0;
+    // mimo2 (Xiaomi MiMo-V2.5): flint's blocks (flint is set too) with q | k | v in one projection (keys hd wide, values
+    // hd_v), KV heads per block (the full blocks 4, the sliding-window ones 8), NEOX RoPE on the keys' first n_rot at
+    // rope_base (full) / rope_base_swa (window), no q / k norms, sinks on the window blocks, the attention's output
+    // scaled by v_scale; the dense lead blocks are the ones without a router.  Its MTP blocks are not run
+    bool mimo = false;
+    float v_scale = 0;
     // flint's sliding-window blocks keep only a ring of swa_rows positions (the window and the largest batch, as
     // llama.cpp's iswa cache): position p in row p % swa_rows; the full blocks keep every position
     int swa_rows = 0;
@@ -934,7 +941,11 @@ static std::vector<uint64_t> gguf_uarr(gguf_context * g, const std::string & key
 static std::vector<bool> gguf_barr(gguf_context * g, const std::string & key) {
     int64_t i = gguf_find_key(g, key.c_str());
     if (i < 0) die("GGUF key %s missing", key.c_str());
-    if (gguf_get_arr_type(g, i) != GGUF_TYPE_BOOL) die("GGUF key %s: not a bool array", key.c_str());
+    if (gguf_get_arr_type(g, i) != GGUF_TYPE_BOOL) {        // (mimo2: 0 / 1 as integers)
+        std::vector<bool> v;
+        for (uint64_t x : gguf_uarr(g, key)) v.push_back(x != 0);
+        return v;
+    }
     const size_t n = gguf_get_arr_n(g, i);
     const int8_t * d = (const int8_t *) gguf_get_arr_data(g, i);
     std::vector<bool> v(n);
@@ -1205,6 +1216,13 @@ static void free_card_buf(ggml_backend_buffer_t b) {
     ggml_backend_buffer_free(b);
 }
 
+// a group's slots at a share frac of its experts: at least min_tok tokens' worth (a file with many formats, Bolt: 17,
+// 4 tokens'), at most every expert
+static int group_slots(const Pool & P, const Model & m, const Group & G, double frac) {
+    const int min_tok = P.g.size() > 4 ? 4 : 16;
+    return std::min(std::max((int) (frac * G.n_all), min_tok * m.n_used), G.n_all);
+}
+
 static void make_pool(Engine & e, double frac) {
     Model & m = e.m;
     Pool & P = e.pool;
@@ -1218,11 +1236,9 @@ static void make_pool(Engine & e, double frac) {
     ggml_context * cp = cps[0];
     P.n_slots = 0;
     P.pool_bytes = 0;
-    const int min_tok = P.g.size() > 4 ? 4 : 16;             // a file with many formats (Bolt: 17): 4 tokens' worth
     for (auto & G : P.g) {
-        const int n_all = G.n_all;
         const double f = (int) P.frac.size() > G.dev ? P.frac[G.dev] : frac;   // (--layer-split: its card's share)
-        G.n_slots = std::min(std::max((int) (f * n_all), min_tok * m.n_used), n_all);
+        G.n_slots = group_slots(P, m, G, f);
         for (int w = m.part0(); w < 3; ++w)
             G.t[w] = ggml_new_tensor_3d(cps[G.dev], G.type[w], G.ne[w][0], G.ne[w][1], G.n_slots);
         if (G.t[0]) ggml_set_name(G.t[0], "pool_gate");
@@ -1367,13 +1383,14 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     if (!g) die("cannot read %s as GGUF", path);
     std::string arch = gguf_get_val_str(g, gguf_find_key(g, "general.architecture"));
     if (arch != "qwen35moe" && arch != "qwen4exp" && arch != "nemotron_h_moe" && arch != "glm5-next" && arch != "lfm2moe"
-        && arch != "flint" && arch != "gemma4" && arch != "bailingmoe3" && arch != "deepseek41")
-        die("%s: only qwen35moe, qwen4exp, nemotron_h_moe, glm5-next, lfm2moe, flint, gemma4, bailingmoe3 and deepseek41 "
+        && arch != "flint" && arch != "gemma4" && arch != "bailingmoe3" && arch != "deepseek41" && arch != "mimo2")
+        die("%s: only qwen35moe, qwen4exp, nemotron_h_moe, glm5-next, lfm2moe, flint, gemma4, bailingmoe3, deepseek41 and mimo2 "
             "models", arch.c_str());
     m.qwen4 = arch == "qwen4exp";
     m.nemo = arch == "nemotron_h_moe";
     m.glm5 = arch == "glm5-next";
-    m.flint = arch == "flint";
+    m.mimo = arch == "mimo2";
+    m.flint = arch == "flint" || m.mimo;
     m.lfm = arch == "lfm2moe" || m.flint;
     m.gemma4 = arch == "gemma4";
     m.ling = arch == "bailingmoe3";
@@ -1620,7 +1637,8 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
         std::vector<bool> swa, rope;
         if (m.flint) {                                       // llama.cpp's flint.cpp load_arch_hparams
             swa = gguf_barr(g, k("attention.sliding_window_pattern"));
-            rope = has("attention.rope_pattern") ? gguf_barr(g, k("attention.rope_pattern")) : swa;
+            rope = has("attention.rope_pattern") ? gguf_barr(g, k("attention.rope_pattern"))
+                 : m.mimo ? std::vector<bool>(swa.size(), true) : swa;   // (mimo2: every block ropes)
             if ((int) swa.size() < m.n_layer || (int) rope.size() < m.n_layer) die("the per-block arrays are shorter than the model");
             m.n_swa = gguf_int(g, k("attention.sliding_window"));
             if (m.n_swa < 1) die("flint: a sliding window of %s tokens", std::to_string(m.n_swa).c_str());
@@ -1635,12 +1653,22 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
                 L.rope = rope[il];
             }
             if (L.kind == 'a') {
-                if (m.n_head_kv && m.n_head_kv != (int) kv[il]) die("attention blocks with different KV head counts");
+                if (m.mimo) L.n_kv = (int) kv[il];          // (mimo2: per block)
+                else if (m.n_head_kv && m.n_head_kv != (int) kv[il]) die("attention blocks with different KV head counts");
                 m.n_head_kv = (int) kv[il];
             }
         }
         m.head_dim = has("attention.key_length") ? gguf_int(g, k("attention.key_length")) : m.n_embd / m.n_head;
         m.n_rot = m.head_dim;
+        if (m.mimo) {                                        // llama.cpp's mimo2.cpp load_arch_hparams
+            const int hd_v = gguf_int(g, k("attention.value_length"));
+            for (Layer & L : m.layers) {
+                L.hd = m.head_dim;
+                L.hd_v = hd_v;
+            }
+            m.n_rot = gguf_int(g, k("rope.dimension_count"));
+            m.v_scale = has("attention.value_scale") ? gguf_float(g, k("attention.value_scale")) : 0.0f;
+        }
         m.n_dense = has("leading_dense_block_count") ? gguf_int(g, k("leading_dense_block_count")) : 0;
         m.n_expert = gguf_int(g, k("expert_count"));
         m.n_used = gguf_int(g, k("expert_used_count"));
@@ -1657,6 +1685,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
             die("flint: only normalized expert weights");
         m.rms_eps = gguf_float(g, k("attention.layer_norm_rms_epsilon"));
         m.rope_base = gguf_float(g, k("rope.freq_base"));
+        m.rope_base_swa = m.mimo && has("rope.freq_base_swa") ? gguf_float(g, k("rope.freq_base_swa")) : m.rope_base;
         m.full_attn_interval = 0;
         for (int j = 0; j < 4; ++j) m.sections[j] = 0;
     } else if (m.gemma4) {                                   // llama.cpp's gemma4.cpp load_arch_hparams
@@ -1867,7 +1896,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
             int il = -1;
             char rest[128] = {0};
             if (sscanf(name, "blk.%d.%127s", &il, rest) == 2 && il > m.n_layer) continue;
-            if (il == m.n_layer && (!e.load_mtp || m.nemo)) continue;   // the MTP layer, loaded only for drafting
+            if (il == m.n_layer && (!e.load_mtp || m.nemo || m.mimo)) continue;   // the MTP layer, loaded only for drafting
             const size_t off = data_off + gguf_get_tensor_offset(g, i);
             std::string r = rest;
             if (!strcmp(name, "per_layer_token_embd.weight")) {   // the PLE table: rows read on the CPU
@@ -2016,6 +2045,8 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     }
     if (!m.output) m.output = m.tok_embd;
     m.n_vocab = (int) m.tok_embd->ne[1];
+    if (m.mimo)                                              // (mimo2: the lead blocks without a router are dense)
+        for (m.n_dense = 0; m.n_dense < m.n_layer && m.layers[m.n_dense].exp_fd[1] < 0; ++m.n_dense) {}
     for (size_t il = 0; il < m.layers.size(); ++il) {        // (glm5-next: the first n_dense blocks have a dense FFN)
         const Layer & L = m.layers[il];
         if (L.exp_fd[1] < 0 && (!m.nemo || L.kind == 'e') && !((m.glm5 || m.lfm || m.ling) && (int) il < m.n_dense))
@@ -2272,7 +2303,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
             }
             const int hd = L.hd ? L.hd : m.head_dim, nkv = L.n_kv ? L.n_kv : m.n_head_kv;   // (gemma4: per block)
             L.k_cache = ggml_new_tensor_3d(cs, GGML_TYPE_F16, hd, nkv, rows);
-            L.v_cache = ggml_new_tensor_3d(cs, GGML_TYPE_F16, hd, nkv, rows);
+            L.v_cache = ggml_new_tensor_3d(cs, GGML_TYPE_F16, L.hd_v ? L.hd_v : hd, nkv, rows);   // (mimo2: narrower)
         }
         if (L.idx_k && !m.glm5 && !m.ds41) {
             L.idx_raw = ggml_new_tensor_2d(cs, GGML_TYPE_F16, m.idx_dim, e.n_ctx);
@@ -4059,38 +4090,53 @@ static ggml_tensor * lfm_attn_layer(Engine & e, ggml_context * c, ggml_cgraph * 
                                     const Inputs & in, int p0, int T, int n_kv, ggml_tensor * kv_idx = nullptr) {
     Model & m = e.m;
     if (!kv_idx) kv_idx = in.kv_idx;
-    const int hd = m.head_dim;
-    ggml_tensor * q = norm(c, ggml_reshape_3d(c, ggml_mul_mat(c, L.wq, x), hd, m.n_head, T), L.q_norm, m.rms_eps);
-    ggml_tensor * k = norm(c, ggml_reshape_3d(c, ggml_mul_mat(c, L.wk, x), hd, m.n_head_kv, T), L.k_norm, m.rms_eps);
-    ggml_tensor * v = ggml_reshape_3d(c, ggml_mul_mat(c, L.wv, x), hd, m.n_head_kv, T);
+    // (mimo2: the block's own KV heads, keys hd wide and values hd_v)
+    const int hd = L.hd ? L.hd : m.head_dim, hdv = L.hd_v ? L.hd_v : hd, nkv = L.n_kv ? L.n_kv : m.n_head_kv;
+    ggml_tensor *q, *k, *v;
+    if (L.wqkv) {                                            // mimo2: q | k | v in one projection (llama.cpp's views)
+        ggml_tensor * qkv = ggml_mul_mat(c, L.wqkv, x);
+        const size_t es = ggml_element_size(qkv);
+        q = ggml_view_3d(c, qkv, hd, m.n_head, T, hd * es, qkv->nb[1], 0);
+        k = ggml_view_3d(c, qkv, hd, nkv, T, hd * es, qkv->nb[1], (size_t) hd * m.n_head * es);
+        v = ggml_cont(c, ggml_view_3d(c, qkv, hdv, nkv, T, hdv * es, qkv->nb[1], (size_t) hd * (m.n_head + nkv) * es));
+    } else {
+        q = ggml_reshape_3d(c, ggml_mul_mat(c, L.wq, x), hd, m.n_head, T);
+        k = ggml_reshape_3d(c, ggml_mul_mat(c, L.wk, x), hd, nkv, T);
+        v = ggml_reshape_3d(c, ggml_mul_mat(c, L.wv, x), hdv, nkv, T);
+    }
+    if (L.q_norm) q = norm(c, q, L.q_norm, m.rms_eps);
+    if (L.k_norm) k = norm(c, k, L.k_norm, m.rms_eps);
     if (L.rope) {                                            // (flint: no RoPE on its full-attention blocks)
         ggml_tensor * pos = ggml_view_1d(c, in.pos, T, 0);                                // (section 0: p0 + i)
-        q = ggml_rope_ext(c, q, pos, nullptr, m.n_rot, GGML_ROPE_TYPE_NEOX, 0, m.rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
-        k = ggml_rope_ext(c, k, pos, nullptr, m.n_rot, GGML_ROPE_TYPE_NEOX, 0, m.rope_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+        const float base = L.swa ? m.rope_base_swa : m.rope_base;   // (mimo2: its window blocks' own base)
+        q = ggml_rope_ext(c, q, pos, nullptr, m.n_rot, GGML_ROPE_TYPE_NEOX, 0, base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+        k = ggml_rope_ext(c, k, pos, nullptr, m.n_rot, GGML_ROPE_TYPE_NEOX, 0, base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+    } else if (!ggml_is_contiguous(k)) {
+        k = ggml_cont(c, k);
     }
-    const size_t row = ggml_row_size(GGML_TYPE_F16, (int64_t) hd * m.n_head_kv);
+    const int64_t wk = (int64_t) hd * nkv, wv = (int64_t) hdv * nkv;
+    const size_t row = ggml_row_size(GGML_TYPE_F16, wk), row_v = ggml_row_size(GGML_TYPE_F16, wv);
     if (L.swa) {                                             // flint's ring: written at p % swa_rows, read whole
-        const int64_t w = (int64_t) hd * m.n_head_kv;
-        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.k_cache, w, m.swa_rows), ggml_reshape_2d(c, k, w, T), in.kv_idx_swa));
-        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.v_cache, w, m.swa_rows), ggml_reshape_2d(c, v, w, T), in.kv_idx_swa));
+        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.k_cache, wk, m.swa_rows), ggml_reshape_2d(c, k, wk, T), in.kv_idx_swa));
+        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.v_cache, wv, m.swa_rows), ggml_reshape_2d(c, v, wv, T), in.kv_idx_swa));
         n_kv = std::min(n_kv, m.swa_rows);                   // (before it wraps: only the rows written so far)
     } else if (kv_idx) {                                            // the positions as an input (a graph reused token after token)
-        const int64_t w = (int64_t) hd * m.n_head_kv;
-        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.k_cache, w, e.n_ctx), ggml_reshape_2d(c, k, w, T), kv_idx));
-        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.v_cache, w, e.n_ctx), ggml_reshape_2d(c, v, w, T), kv_idx));
+        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.k_cache, wk, e.n_ctx), ggml_reshape_2d(c, k, wk, T), kv_idx));
+        ggml_build_forward_expand(gf, ggml_set_rows(c, ggml_reshape_2d(c, L.v_cache, wv, e.n_ctx), ggml_reshape_2d(c, v, wv, T), kv_idx));
     } else {
-        ggml_build_forward_expand(gf, ggml_cpy(c, k, ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, T, L.k_cache->nb[1], row, row * p0)));
-        ggml_build_forward_expand(gf, ggml_cpy(c, v, ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, T, L.v_cache->nb[1], row, row * p0)));
+        ggml_build_forward_expand(gf, ggml_cpy(c, k, ggml_view_3d(c, L.k_cache, hd, nkv, T, L.k_cache->nb[1], row, row * p0)));
+        ggml_build_forward_expand(gf, ggml_cpy(c, v, ggml_view_3d(c, L.v_cache, hdv, nkv, T, L.v_cache->nb[1], row_v, row_v * p0)));
     }
-    ggml_tensor * kv_k = ggml_view_3d(c, L.k_cache, hd, m.n_head_kv, n_kv, L.k_cache->nb[1], row, 0);
-    ggml_tensor * kv_v = ggml_view_3d(c, L.v_cache, hd, m.n_head_kv, n_kv, L.v_cache->nb[1], row, 0);
+    ggml_tensor * kv_k = ggml_view_3d(c, L.k_cache, hd, nkv, n_kv, L.k_cache->nb[1], row, 0);
+    ggml_tensor * kv_v = ggml_view_3d(c, L.v_cache, hdv, nkv, n_kv, L.v_cache->nb[1], row_v, 0);
     ggml_tensor * o = ggml_flash_attn_ext(c, ggml_permute(c, q, 0, 2, 1, 3), ggml_permute(c, kv_k, 0, 2, 1, 3),
                                           ggml_permute(c, kv_v, 0, 2, 1, 3), L.swa ? in.mask_swa : in.mask,
                                           1.0f / sqrtf((float) hd), 0.0f, 0.0f);
     if (L.sinks) ggml_flash_attn_ext_add_sinks(o, L.sinks);  // (flint: one learned logit per head beside the keys)
     ggml_prec_set_acc(o, GGML_PREC_F32);
-    o = ggml_reshape_2d(c, o, (int64_t) hd * m.n_head, T);
-    return ggml_mul_mat(c, L.wo, o);
+    o = ggml_reshape_2d(c, o, (int64_t) hdv * m.n_head, T);
+    o = ggml_mul_mat(c, L.wo, o);
+    return m.v_scale != 0.0f ? ggml_scale(c, o, m.v_scale) : o;   // (mimo2: after the output projection, as llama.cpp)
 }
 
 // flint: the down projection's input divided per expert and token by a power of two that brings its largest value
@@ -4218,7 +4264,7 @@ static ggml_tensor * lfm_moe_layer(Engine & e, ggml_context * c, ggml_cgraph * g
     // (momoe-metal, a few tokens: its matrix-vector kernels read the activations as f32, nothing to keep finite; the
     // power-of-two factor cancels exactly.  Its batched kernels take them as f16: scaled, as on CUDA, whose
     // matrix-vector kernels sum 8-bit blocks in f16.  M4 Air, UD-IQ3_XXS: 38.4 -> 42.9 tok/s, the same tokens)
-    if (m.flint && !no_scale && (!kHostMem || T > 8)) act = flint_down_scale(c, act, &dscale);
+    if (m.flint && !m.mimo && !no_scale && (!kHostMem || T > 8)) act = flint_down_scale(c, act, &dscale);
     ggml_tensor * dn = may_repeat(e, big, ggml_mul_mat_id(c, as[2], act, slots));                             // [n_embd, k, T]
     if (dscale) dn = ggml_mul(c, dn, dscale);                // (before the CPU's part: that one was not scaled)
     if (helper_on(e, L, big))
@@ -6450,7 +6496,21 @@ static void fit_pool(Engine & e) {
     }
     if (e.uma && want < std::min(4.0, uma_min_gib()) * 1073741824.0)   // (unified memory: what is left after the reserve cannot
         die("too little memory left for the expert pool: is another program holding it?");   // hold a useful pool)
-    make_pool(e, std::max(0.0, want / (double) e.pool.all_bytes));
+    // the share whose pool fits `want` with the groups' floors counted (mimo2 UD-IQ2_XXS: three formats, the two small
+    // groups' floors 2 GiB past the share's own size: the pool did not fit the 4070 Ti)
+    const Pool & P = e.pool;
+    auto bytes_at = [&](double f) {
+        double b = 0;
+        for (const auto & G : P.g) b += (double) G.bytes * group_slots(P, e.m, G, f);
+        return b;
+    };
+    double frac = std::max(0.0, want / (double) P.all_bytes);
+    if (bytes_at(frac) > want) {
+        double lo = 0, hi = frac;
+        for (int i = 0; i < 40; ++i) (bytes_at((lo + hi) / 2) > want ? hi : lo) = (lo + hi) / 2;
+        frac = lo;
+    }
+    make_pool(e, frac);
 #else
     (void) e;
 #endif
