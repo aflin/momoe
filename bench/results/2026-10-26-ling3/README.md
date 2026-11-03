@@ -13,19 +13,25 @@ tokens, and the greedy tokens. Speed: the engine as setup writes it, the server'
 
 ## Against llama.cpp
 
-| Prompt | Machine | KL mean / p99 | Same top token | Greedy tokens the same |
-| --- | --- | --- | ---: | ---: |
-| code (44 tokens, 299 steps) | PC, copies | 0.0005 / 0.0073 | 99.0% | 299 of 299 |
-| code | PC, the CPU's experts | 0.0005 / 0.0071 | 99.0% | 299 of 299 |
-| code | M1 Ultra (an 8 GiB pool) | 0.0004 / 0.0072 | 99.7% | 299 of 299 |
-| medical (55 tokens, 199 steps) | PC, copies / the CPU's experts | 0.0013 / 0.0144, 0.0013 / 0.0146 | 99.5% | 199 of 199 |
-| medical | M1 Ultra | 0.0013 / 0.0173 | 100% | 199 of 199 |
-| a document (1,589 tokens, 199 steps), chunks of 1024 / 300 | PC, copies | 0.0014 / 0.0249, 0.0013 / 0.0145 | 98.0%, 99.0% | 199 of 199 |
-| a document | PC, the CPU's experts | 0.0012 / 0.0099 | 98.5% | 199 of 199 |
-| a document | M1 Ultra | 0.0012 / 0.0130 | 99.0% | 199 of 199 |
+| Prompt | Machine | KL mean / p99 | Same top token |
+| --- | --- | --- | ---: |
+| code (44 tokens, 299 steps) | PC, copies | 0.0005 / 0.0073 | 99.0% |
+| code | PC, the CPU's experts | 0.0005 / 0.0071 | 99.0% |
+| code | M1 Ultra (an 8 GiB pool) | 0.0004 / 0.0072 | 99.7% |
+| medical (55 tokens, 199 steps) | PC, copies / the CPU's experts | 0.0013 / 0.0144, 0.0013 / 0.0146 | 99.5% |
+| medical | M1 Ultra | 0.0013 / 0.0173 | 100% |
+| a document (1,589 tokens, 199 steps), chunks of 1024 / 300 | PC, copies | 0.0014 / 0.0249, 0.0013 / 0.0145 | 98.0%, 99.0% |
+| a document | PC, the CPU's experts | 0.0012 / 0.0099 | 98.5% |
+| a document | M1 Ultra | 0.0012 / 0.0130 | 99.0% |
 
 MoMoE's tokenizer (the `bailingmoe2` pre-tokenizer) and the chat template gave llama.cpp's tokens for all three
 prompts. Verify windows of 4 gave the same next tokens as windows of 1.
+
+Correction (2026-11-03): this table first had a column "greedy tokens the same" that read 299 of 299, 199 of 199 on
+every row. It was measured wrong: with `MOMOE_KL_REF` the engine is fed llama.cpp's tokens, and the column compared
+those fed tokens with llama.cpp's. Run on its own picks (PC, the CPU's experts, rechecked with the same engine), MoMoE's
+greedy answer is llama.cpp's for the first 18 tokens of the code prompt and the first 93 of the medical one, then parts
+at a near-tie. The KL and top-token columns were measured on llama.cpp's tokens and stand.
 
 ## Speed on the PC (RTX 4070 Ti 12 GB, Ryzen 9 5950X, 63 GB of RAM; 64K context)
 
@@ -48,9 +54,8 @@ token without drafting) but slower on this card: 28.0 (3 drafts) and 29.9 (2) ag
 
 ## The plain model (Ling-3.0-flash IQ3_XXS, bartowski's GGUFs at 7e1a1243)
 
-Against llama.cpp (the code prompt, 299 steps): KL mean 0.0009, p99 0.0156, the same top token 99.7%, 299 of 299 greedy
-tokens the same. Speed with setup's arguments (64K context, chunk 4096): 35.3-35.6 tok/s (the second half), Sante
-33.5 the same way. The server's chat and tool calls checked.
+Against llama.cpp (the code prompt, 299 steps): KL mean 0.0009, p99 0.0156, the same top token 99.7%. Speed with setup's
+arguments (64K context, chunk 4096): 35.3-35.6 tok/s (the second half), Sante 33.5 the same way. The server's chat and tool calls checked.
 
 ## llama.cpp's best on the PC
 
