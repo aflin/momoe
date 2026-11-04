@@ -76,6 +76,18 @@ QWEN2_PATTERN = (
     r"|\s+"
 )
 
+# `minimax-m2` (MiniMax M2 / M3.1 Flash): the `tokenizer.json` original llama-vocab.cpp quotes for
+# LLAMA_VOCAB_PRE_TYPE_MINIMAX_M2 (llama.cpp rewrites its case classes for its own regex engine; Python's `regex` has them)
+MINIMAX_M2_PATTERN = (
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?"
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?"
+    r"|\p{N}{1,3}"
+    r"| ?[^\s\p{L}\p{N}]+[\r\n/]*"
+    r"|\s*[\r\n]+"
+    r"|\s+(?!\S)"
+    r"|\s+"
+)
+
 # The `tekken` pre-tokenizer (Mistral's; Nemotron 3.5 Bolt / Super): the `tokenizer.json` original that
 # llama-vocab.cpp quotes for LLAMA_VOCAB_PRE_TYPE_TEKKEN (llama.cpp rewrites the case classes for its own regex
 # engine; Python's `regex` has them, so the original is used as written).
@@ -132,7 +144,7 @@ GEMMA4_PATTERN = r"[^\n]+|[\n]+"
 # tokenizer.json pattern with its possessive quantifiers made greedy as llama.cpp does; one digit a piece; no ignore_merges
 BAILINGMOE_PATTERN = (r"'(?:[sSdDmMtT]|[lL][lL]|[vV][eE]|[rR][eE])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}"
                       r"| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+")
-PRE_PATTERNS = {"qwen35": QWEN35_PATTERN, "qwen2": QWEN2_PATTERN, "tekken": TEKKEN_PATTERN, "glm4": CHATGLM4_PATTERN, "glm5": CHATGLM4_PATTERN,
+PRE_PATTERNS = {"qwen35": QWEN35_PATTERN, "qwen2": QWEN2_PATTERN, "minimax-m2": MINIMAX_M2_PATTERN, "tekken": TEKKEN_PATTERN, "glm4": CHATGLM4_PATTERN, "glm5": CHATGLM4_PATTERN,
                 "lfm2": CHATGLM4_PATTERN, "flint": FLINT_PATTERNS[-1],
                 "pixtral": CHATGLM4_PATTERN,   # (Nemotron 3.5 Lightning: llama-vocab.cpp's LLAMA3 group, as lfm2)
                 "gemma4": GEMMA4_PATTERN, "bailingmoe2": BAILINGMOE_PATTERN, "bailingmoe": BAILINGMOE_PATTERN,
