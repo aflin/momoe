@@ -1482,6 +1482,145 @@ def glm_forced(force: str | None) -> str | None:
     return force
 
 
+MM_NS = "]<]minimax[>["                       # MiniMax M3's namespace token: before each of its call markup's tags
+MM_THINK, MM_THINK_END = "<mm:think>", "</mm:think>"
+MM_CALL_START, MM_CALL_END = MM_NS + "<tool_call>", MM_NS + "</tool_call>"
+_MM_TAG = re.compile(r'<(/?)([^\s<>/="]+)(?:\s+name="([^"]*)")?\s*>')
+
+
+def _mm_leaf(text: str):
+    """A nested value as MiniMax's template writes it ({{ val }}; booleans as JSON): a number or true / false when it
+    is exactly one, else the string."""
+    t = text.strip()
+    if t in ("true", "false"):
+        return t == "true"
+    if re.fullmatch(r"-?\d+", t):
+        return int(t)
+    if re.fullmatch(r"-?\d+\.\d*(?:[eE][-+]?\d+)?|-?\d+[eE][-+]?\d+", t):
+        return float(t)
+    return text
+
+
+def minimax_calls(body: str) -> str | None:
+    """The inside of MiniMax M3's `]<]minimax[>[<tool_call>` ... `]<]minimax[>[</tool_call>`: `<invoke name="NAME">`
+    blocks whose arguments are XML elements, every tag written after the namespace token (so a value's own `<` is
+    text); a nested object as elements, a list as `<item>` elements - in this parser's form, or None when it is not
+    that.  A top-level value is written as it came (parse_tool_call types it by the tool's schema); a nested one as
+    JSON."""
+    parts = body.split(MM_NS)
+    if parts[0].strip():
+        return None
+    calls, stack = [], []
+    for seg in parts[1:]:
+        m = _MM_TAG.match(seg)
+        if not m:
+            return None
+        close, tag, name = m.group(1) == "/", m.group(2), m.group(3)
+        rest = seg[m.end():]
+        if not close:
+            if not stack and (tag != "invoke" or name is None):
+                return None
+            node = {"tag": tag, "name": name, "text": rest, "kids": []}
+            (stack[-1]["kids"] if stack else calls).append(node)
+            stack.append(node)
+        else:
+            if not stack or stack[-1]["tag"] != tag:
+                return None
+            stack.pop()
+            if rest.strip() and stack:                       # text after a closing tag inside a value: not this form
+                return None
+    if stack or not calls:
+        return None
+
+    def value(node, top):
+        kids = node["kids"]
+        if not kids:
+            return node["text"] if top else _mm_leaf(node["text"])
+        if all(k["tag"] == "item" for k in kids):
+            return [value(k, False) for k in kids]
+        return {k["tag"]: value(k, False) for k in kids}
+
+    out = []
+    for call in calls:
+        params = []
+        for arg in call["kids"]:
+            v = value(arg, True)
+            params.append(PARAM_START + arg["tag"] + ">\n" + (v if isinstance(v, str) else json.dumps(v, ensure_ascii=False))
+                          + "\n</parameter>\n")
+        out.append(CALL_START + "\n<function=" + call["name"] + ">\n" + "".join(params) + "</function>\n</tool_call>")
+    return "\n".join(out)
+
+
+class MinimaxRewriter:
+    """MiniMax M3's markers rewritten into this parser's form as they arrive: its thinking (`<mm:think>` ...
+    `</mm:think>`; a reply that does not think starts with `</mm:think>` alone, read as an empty thought) as <think> ...
+    </think>, and its calls (minimax_calls) as <tool_call> blocks once complete (LfmCallRewriter's way: a block that is
+    not calls stays text, as written).  A marker split across deltas is held until whole."""
+
+    TAGS = (MM_THINK, MM_THINK_END, MM_CALL_START)
+
+    def __init__(self):
+        self.buf, self.inside, self.opened = "", False, False
+
+    def feed(self, delta: str) -> str:
+        self.buf += delta
+        out = []
+        while True:
+            b = self.buf
+            if not self.inside:
+                hits = [(b.find(t), t) for t in self.TAGS if b.find(t) >= 0]
+                if not hits:
+                    keep = GlmCallRewriter._held(b, self.TAGS)
+                    out.append(b[:len(b) - keep])
+                    self.buf = b[len(b) - keep:]
+                    break
+                i, tag = min(hits, key=lambda h: (h[0], -len(h[1])))
+                out.append(b[:i])
+                self.buf = b[i + len(tag):]
+                if tag == MM_CALL_START:
+                    self.inside = True
+                elif tag == MM_THINK:
+                    self.opened = True
+                    out.append(THINK_START)
+                else:                                        # (its no-thinking prefix: an empty thought)
+                    out.append(THINK_END if self.opened else THINK_START + THINK_END)
+                    self.opened = True
+            else:
+                j = b.find(MM_CALL_END)
+                if j < 0:
+                    if len(b) > RCALL_MAX:               # far too long for a call: text
+                        out.append(MM_CALL_START + b)
+                        self.buf, self.inside = "", False
+                    break
+                out.append(minimax_calls(b[:j]) or MM_CALL_START + b[:j] + MM_CALL_END)
+                self.buf, self.inside = b[j + len(MM_CALL_END):], False
+        return "".join(out)
+
+    def flush(self) -> str:
+        """The end of the output: a block whose end tag never came is still read as calls when it is complete;
+        anything else is text."""
+        rest, self.buf = self.buf, ""
+        if self.inside:
+            self.inside = False
+            return minimax_calls(rest) or MM_CALL_START + rest
+        return rest
+
+
+def minimax_forced(force: str | None) -> str | None:
+    """forced_call's opening in MiniMax M3's form (the model goes on from it)."""
+    if not force:
+        return force
+    head = CALL_START + "\n" + FUNC_START
+    if force == head:
+        return THINK_END_MM_PREFIX + MM_CALL_START + "\n" + MM_NS + '<invoke name="'
+    if force.startswith(head) and force.endswith(">\n"):
+        return THINK_END_MM_PREFIX + MM_CALL_START + "\n" + MM_NS + '<invoke name="' + force[len(head):-2] + '">'
+    return force
+
+
+THINK_END_MM_PREFIX = MM_THINK_END                  # (a forced call does not think: the template's no-thinking prefix)
+
+
 class NameCaseRewriter:
     """A call's `<function=NAME>` for a tool the request did not declare under that spelling but did under one that
     differs only in case, written with the declared one (Flint called Claude Code's `Bash` as `bash`: the call came back
@@ -1538,9 +1677,11 @@ class OutputParser:
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
                  recover: bool = False, glm: bool = False, lfm: bool = False, opened: bool = True,
-                 declared_only: bool = False, gemma: bool = False):
-        # GLM-5's, LFM2's or Gemma 4's call format (Gemma 4's thinking markers too), rewritten into this one as it arrives
-        self.glm = GlmCallRewriter() if glm else LfmCallRewriter() if lfm else GemmaRewriter() if gemma else None
+                 declared_only: bool = False, gemma: bool = False, minimax: bool = False):
+        # GLM-5's, LFM2's, Gemma 4's or MiniMax M3's call format (Gemma 4's and MiniMax's thinking markers too),
+        # rewritten into this one as it arrives
+        self.glm = (GlmCallRewriter() if glm else LfmCallRewriter() if lfm else GemmaRewriter() if gemma
+                    else MinimaxRewriter() if minimax else None)
         # opened: the prompt ends inside the thinking (its template wrote <think>); a template that leaves it to the
         # model (LFM2.5-8B-A1B) starts in "opening": the reply's own <think> opens the reasoning, anything else is the
         # answer

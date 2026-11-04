@@ -62,7 +62,7 @@ SHUTDOWN = threading.Event()                      # set by POST /shutdown (momoe
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (THINK_END, THINK_START, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
-                            forced_call, glm_forced, lfm_forced, gemma_forced, images_of, literal_tags, UnaskedThought, mark_think_literals,
+                            forced_call, glm_forced, lfm_forced, gemma_forced, minimax_forced, MM_NS, MM_THINK, images_of, literal_tags, UnaskedThought, mark_think_literals,
                             openai_to_messages, require_messages, tool_choice_of,
                             unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
@@ -3455,7 +3455,8 @@ class Service:
         self.stop_ids = {ids[0] for ids in (tokenizer.encode(s, parse_special=True)
                                             for s in (IM_END, "<|endoftext|>", "<|user|>", "<|observation|>")
                                             + (("<turn|>", "<eos>", "<|tool_response>") if "<|channel>" in source else ())
-                                            + (("<|role_end|>",) if "<|role_end|>" in source else ()))
+                                            + (("<|role_end|>",) if "<|role_end|>" in source else ())
+                                            + (("[e~[",) if MM_NS in source else ()))   # (MiniMax M3: its turn's end)
                          if len(ids) == 1}
         if not self.stop_ids:   # #4576: a tokenizer with none of them as one token (DeepSeek-V4.1's) ends on its own eos
             eos = (getattr(tokenizer, "special_ids", None) or {}).get("eos")
@@ -3469,10 +3470,14 @@ class Service:
         # rewritten too (GemmaRewriter)
         src = getattr(template, "source", "")
         self.gemma = not self.glm and not self.lfm and "<|tool_call>" in src and "<|channel>" in src
+        # MiniMax M3's (]<]minimax[>[<tool_call> <invoke name=..> with namespaced XML arguments, its thinking between
+        # <mm:think> and </mm:think>, left to the model): rewritten too (MinimaxRewriter)
+        self.minimax = not self.glm and not self.lfm and not self.gemma and MM_NS in src and MM_THINK in src   # (its template
+        # builds its markers at run time: `ns_token ~ '<tool_call>'`)
         # does the template's generation prompt open the thinking (Qwen, GLM-5, LFM2.5-24B: "<think>")?  One that does
         # not (LFM2.5-8B-A1B, Gemma 4) leaves it to the model, which may answer at once: the parser waits for the
         # reply's start
-        self.think_opened = template_opens_think(template) and not self.gemma
+        self.think_opened = template_opens_think(template) and not self.gemma and not self.minimax
         # #567: a prompt re-encodes only what follows the last special token it shares with a recent prompt (the
         # same ids as a full encode: tools/strata_tokenizer.py PromptEncoder).  Tokenizers without resume points
         # encode in full.
@@ -4207,7 +4212,7 @@ class Service:
                 kwargs.pop("reasoning_effort")
         if self.gemma and kwargs.get("reasoning_effort") and "enable_thinking" not in kwargs:
             kwargs = {**kwargs, "enable_thinking": True}   # (Gemma 4 thinks only when asked: an effort asks)
-        if self.gemma and tools:                       # (Gemma 4's template reads tool['function']: OpenAI's form)
+        if (self.gemma or self.minimax) and tools:     # (Gemma 4's and MiniMax's templates read tool['function']: OpenAI's form)
             tools = [t if isinstance(t, dict) and "function" in t else {"type": "function", "function": t} for t in tools]
         effort = kwargs.get("reasoning_effort")
         off = kwargs.get("enable_thinking") is False
@@ -4618,8 +4623,8 @@ class Service:
                       f"the answer (budget {budget})", flush=True)
                 budget = max(1, max_new - reserve)
         # (Gemma 4 writes an empty thought block of its own after a tool result, thinking or not: the reply's start says)
-        parser = self.parser_cls(thinking=thinking or self.gemma, tools=with_history_tools(tools, sampling), stream_tools=True, recover=self.tool_call_recovery,
-                              glm=self.glm, lfm=self.lfm, gemma=self.gemma, opened=opened is not None,
+        parser = self.parser_cls(thinking=thinking or self.gemma or self.minimax, tools=with_history_tools(tools, sampling), stream_tools=True, recover=self.tool_call_recovery,
+                              glm=self.glm, lfm=self.lfm, gemma=self.gemma, minimax=self.minimax, opened=opened is not None,
                               declared_only=declared_only)
         if self.gemma and not thinking:
             parser = UnaskedThought(parser)
@@ -6383,6 +6388,8 @@ def make_handler(svc: Service):
                 force = lfm_forced(force)
             elif svc.gemma:
                 force = gemma_forced(force)
+            elif svc.minimax:
+                force = minimax_forced(force)
             messages, validator = prepare_format(req.get("response_format"), messages)
             if validator is not None and (tools or req.get("strata_mcp")):
                 raise ValueError("structured response_format with tools/MCP is not supported")
@@ -6632,6 +6639,8 @@ def make_handler(svc: Service):
                 force = lfm_forced(force)
             elif svc.gemma:
                 force = gemma_forced(force)
+            elif svc.minimax:
+                force = minimax_forced(force)
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
