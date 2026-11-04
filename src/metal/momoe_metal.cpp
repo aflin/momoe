@@ -1234,7 +1234,10 @@ static void free_card_buf(ggml_backend_buffer_t b) {
 // a group's slots at a share frac of its experts: at least min_tok tokens' worth (a file with many formats, Bolt: 17,
 // 4 tokens'), at most every expert
 static int group_slots(const Pool & P, const Model & m, const Group & G, double frac) {
-    const int min_tok = P.g.size() > 4 ? 4 : 16;
+    // MOMOE_POOL_MIN_TOKENS=N: N tokens' worth instead (a model of large experts on small cards: MiniMax M3.1 Flash's
+    // 4 formats x 16 tokens x 4 experts are 4.5 GiB; a smaller pool only stages more batches)
+    static const int env_min = getenv("MOMOE_POOL_MIN_TOKENS") ? std::max(1, atoi(getenv("MOMOE_POOL_MIN_TOKENS"))) : 0;
+    const int min_tok = env_min ? env_min : P.g.size() > 4 ? 4 : 16;
     return std::min(std::max((int) (frac * G.n_all), min_tok * m.n_used), G.n_all);
 }
 
@@ -4200,6 +4203,15 @@ static ggml_tensor * lfm_attn_layer(Engine & e, ggml_context * c, ggml_cgraph * 
     return m.v_scale != 0.0f ? ggml_scale(c, o, m.v_scale) : o;   // (mimo2: after the output projection, as llama.cpp)
 }
 
+// does a minimax-m3 block attend sparsely?  Every block with an indexer: MiniMax-M3.1-Flash's config has
+// sparse_attention_freq 1 for all 60 and its file an indexer in each, the 3 dense lead blocks too (llama.cpp's
+// minimax-m3.cpp, written for M3, gives those full attention and does not load the file; the same below 16 blocks of
+// context, where every block is kept).  MOMOE_MM3_LEAD_FULL=1: as llama.cpp (a comparison)
+static bool mm3_sparse(const Model & m, const Layer & L, int il) {
+    static const bool lead_full = getenv("MOMOE_MM3_LEAD_FULL") != nullptr;
+    return m.mm3 && L.idx_k && !(lead_full && il < m.n_dense);
+}
+
 // minimax-m3's sparse blocks: llama.cpp's minimax-m3.cpp (its batch path, for one sequence) - the block's GQA attention
 // (q / k norms, NEOX RoPE on n_rot) and, beside it, the indexer: a query per KV group and one key per position (normed,
 // roped as the main ones; the keys in idx_raw).  The keys' scores, the max over each block of msa_blk positions, the
@@ -5653,13 +5665,13 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
     ggml_set_input(in.pos);
     in.mask = ggml_new_tensor_2d(c, GGML_TYPE_F16, n_kv, T);
     ggml_set_input(in.mask);
-    if (m.flint || m.gemma4 || m.ds41) {
+    if ((m.flint && !m.mm3) || m.gemma4 || m.ds41) {          // (minimax-m3: no sliding window)
         in.mask_swa = ggml_new_tensor_2d(c, GGML_TYPE_F16, std::min(n_kv, m.swa_rows), T);
         ggml_set_input(in.mask_swa);
         in.kv_idx_swa = ggml_new_tensor_1d(c, GGML_TYPE_I64, T);
         ggml_set_input(in.kv_idx_swa);
     }
-    if (m.mm3 && m.n_dense < m.n_layer) {                    // its sparse blocks' masks and each cell's block
+    if (m.mm3) {                                             // its sparse blocks' masks and each cell's block
         if (n_kv % m.msa_blk) die("minimax-m3: a context that is not whole blocks of %s positions", std::to_string(m.msa_blk).c_str());
         in.msa_mask = ggml_new_tensor_2d(c, GGML_TYPE_F32, n_kv, T);
         ggml_set_input(in.msa_mask);
@@ -5721,8 +5733,8 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
             ggml_tensor * h = norm(c, x, L.attn_norm, m.rms_eps);
             ggml_format_name(h, "operator_norm-%d", il);
             h = L.kind == 'c' ? lfm_conv_layer(e, c, gf, L, h, T)
-              : m.mm3 && il >= m.n_dense ? mm3_attn_layer(e, c, gf, L, h, in, p0, T, n_kv)    // (minimax-m3: the sparse blocks)
-                                         : lfm_attn_layer(e, c, gf, L, h, in, p0, T, n_kv);
+              : mm3_sparse(m, L, il) ? mm3_attn_layer(e, c, gf, L, h, in, p0, T, n_kv)    // (minimax-m3: the sparse blocks)
+                                     : lfm_attn_layer(e, c, gf, L, h, in, p0, T, n_kv);
             ggml_format_name(h, L.kind == 'c' ? "conv_out-%d" : "attn_out-%d", il);
             x = ggml_add(c, x, h);
             ggml_tensor * f = norm(c, x, L.ffn_norm, m.rms_eps);
