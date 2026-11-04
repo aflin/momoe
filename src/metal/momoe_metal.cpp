@@ -702,7 +702,7 @@ static void cpu_parts(const Model & m, const Layer & L, CpuExperts & C) {
     C.gate_row = C.gate ? ggml_row_size(C.gate_type, L.exp_ne[0][0]) : 0;
     C.gelu = m.gemma4;
     C.oai = m.mm3;
-    C.limit = m.ling ? m.clamp_exp[&L - m.layers.data()] : 0.0f;
+    C.limit = m.ling || m.glm5 ? m.clamp_exp[&L - m.layers.data()] : 0.0f;   // (glm5-next: as glm_swiglu)
     C.up_row0 = 0;
     if (m.gemma4) {                                          // gate | up in one tensor: GEGLU
         C.n_ff /= 2;
@@ -720,7 +720,7 @@ static void cpu_parts(const Model & m, const Layer & L, CpuExperts & C) {
 // Ornith-1.5-35B IQ4_XS (52%: 14.1 ms per token, the copies 15.6)
 static bool hybrid_model(const Model & m) {
     static const char * q = getenv("MOMOE_QWEN_HYBRID");
-    return m.nemo || (!(q && q[0] == '0') && !m.qwen4 && !m.glm5 && !m.ds41 && (!m.lfm || m.flint));   // (flint: SwiGLU experts as qwen35moe's)
+    return m.nemo || (!(q && q[0] == '0') && !m.qwen4 && !m.ds41 && (!m.lfm || m.flint));   // (flint: SwiGLU experts as qwen35moe's)
 }
 
 
@@ -7884,6 +7884,7 @@ int main(int argc, char ** argv) {
         mtp_k = e.ds.block;
     }
     if ((e.helper || !e.split.empty()) && e.m.nemo) e.hybrid = false;   // (Nemotron beside a layer split: not measured)
+    if (e.uma && e.m.glm5) e.hybrid = false;                 // (glm5-next on the DGX Spark: its pool, as measured there)
     if (mtp_k > 0 && e.m.nemo) die("--mtp: not yet for Nemotron models");
     if (!kHostMem && pool_gib <= 0 && slots <= 0) fit_pool(e);
     e.pool_asked = pool_gib > 0 || slots > 0;

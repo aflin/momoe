@@ -159,5 +159,8 @@ experts neither card holds, as on one card, and the 3060 keeps its share out of 
 19-21 on the 4070 Ti alone (each layer's hand-off between the cards costs ~27 ms a token), and against 8.7 with the
 helper and the experts copied in instead.
 
-The layer split runs neither with the CPU's experts nor with the mailboxes; setup splits GLM-5.3-Flash by itself
-across two cards under 16 GB each. Not yet measured for the tables.
+The layer split runs with the CPU's experts and the mailboxes since 2026-11-04 (one address for the mapped memory on
+every card); setup splits GLM-5.3-Flash and MiniMax M3.1 Flash by itself across two cards under 16 GB each. GLM-5.3-Flash
+UD-IQ2_XXS: 4.5 tok/s on both against 3.8 on the 4070 Ti alone; MiniMax: 2.9-3.8 against 1.4 with the copies
+([2026-11-04-glm53-pc](../bench/results/2026-11-04-glm53-pc/README.md),
+[2026-11-03-minimax31](../bench/results/2026-11-03-minimax31/README.md)).

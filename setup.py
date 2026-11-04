@@ -618,6 +618,11 @@ LFM25_8B_FILES = {
 # experts it cannot hold read from the SSD directly, --direct-io) or, on a separate card, from the file cache (the whole
 # file in RAM)
 GLM53_FILES = {
+    "UD-IQ2_XXS": [
+        ("UD-IQ2_XXS/GLM-5.3-Flash-UD-IQ2_XXS-00001-of-00004.gguf", 9429984, "337870cefce5fb34b2aa3ade54a0fbf61676697f7f9a906670c20edde74561f4"),
+        ("UD-IQ2_XXS/GLM-5.3-Flash-UD-IQ2_XXS-00002-of-00004.gguf", 49896298080, "d51a3d9ca05022d53e71753df75ee64ed5fd4e47655650ae023e9717b3ec158d"),
+        ("UD-IQ2_XXS/GLM-5.3-Flash-UD-IQ2_XXS-00003-of-00004.gguf", 49248507840, "89180f13784dc1128586b98adf1ca876279881a20bc4f01747703ce352563372"),
+        ("UD-IQ2_XXS/GLM-5.3-Flash-UD-IQ2_XXS-00004-of-00004.gguf", 2690716000, "9e0ef47daa1fdffce3cf2ac1594ce4634d176ad018be6e692729757f38d5fbf6")],
     "UD-IQ4_XS": [
         ("UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00001-of-00005.gguf", 9429984, "c2f3b6ab98d3df844f322ea376059202d2eaeedcee1f0eff455345b86a137dbd"),
         ("UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00002-of-00005.gguf", 49989334176, "7d64cf0395672c4322012841abec502ea7e20518299bb5e3069003f06f9e6de9"),
@@ -740,15 +745,22 @@ GGML_FAMILIES = {
                          # measured on the Spark (300 tokens, --mtp 3): 17.5 tok/s against UD-IQ4_XS's 11.6, the store
                          # holding ~98% of the experts it uses; its first 48 greedy tokens = llama.cpp's
                          "UD-IQ3_XXS": {"about": "3-bit, smaller and faster (Unsloth Dynamic), measured on the DGX Spark",
-                                        "ram_gb": 100}},
+                                        "ram_gb": 100},
+                         # a PC's size (glm53_size): its 5.9 GiB of other weights leave a 12 GB card room for the rest
+                         "UD-IQ2_XXS": {"about": "2-bit (Unsloth Dynamic), smallest; measured on an RTX 4070 Ti + RTX 3060",
+                                        "ram_gb": 100, "auto": False}},
               # the size setup installs: faster on the Spark than UD-IQ4_XS (server, 400-token chats, --mtp 3: 15.0 / 14.6
               # tok/s greedy / sampled against 11.7 / 10.4), its first 48 greedy tokens = llama.cpp's
               "default": "UD-IQ3_XXS",
               # its own MTP block drafts 3 tokens a window (measured on the Spark, UD-IQ4_XS, greedy: 9.1 -> 10.9 tok/s,
               # 85% of the drafts accepted)
               "engine_args": ["--mtp", "3"],
-              # a 12 GB card cannot start it alone (dense 7.2 GiB + pool + staging): two share its layers (setup)
+              # a 12 GB card cannot start UD-IQ3_XXS alone (dense 7.2 GiB + pool + staging): two share its layers
+              # (setup).  On separate cards (measured: an RTX 4070 Ti + RTX 3060, 63 GB of RAM, UD-IQ2_XXS from NVMe) the
+              # pool's floor at 4 tokens' experts (16: the staging copy did not fit) and no drafting (--mtp 3: 4.4 tok/s
+              # against 4.5 without, 76% of the drafts kept: a window of 4 cost 786 ms against 222 for one token)
               "context": 65536, "min_vram_gb": 16,
+              "card_env": {"MOMOE_POOL_MIN_TOKENS": "4"}, "card_no_draft": True,
               "mmproj": ("mmproj-BF16.gguf", 1164010176, "82b7adb44411dbb298b1c689567804e5ed0790d80f308ed8b5b6b8ac0527d2ac"),
               "license": "MIT: https://huggingface.co/zai-org/GLM-5.3-Flash"},
     "ornith122": {"title": "Ornith-1.5-122B-A10B", "by": "ornith-ai's agentic-coding model; Unsloth's GGUFs",
@@ -6868,11 +6880,12 @@ def ggml_size(fam: dict, size: str | None, ram: float) -> str:
             if q.upper() == size.upper():
                 return q
         fail(f"{fam['title']} has no size {size}", "sizes: " + ", ".join(fam["models"]))
-    fits = [q for q, d in fam["models"].items() if ram >= d["ram_gb"]]
+    auto = [q for q, d in fam["models"].items() if d.get("auto", True)]   # ("auto": False - only a rule or --model)
+    fits = [q for q in auto if ram >= fam["models"][q]["ram_gb"]]
     if fam.get("default") in fits:                       # a family's measured pick (GLM on the Spark: UD-IQ3_XXS)
         return fam["default"]
     size = lambda q: sum(p[2] for p in ggml_parts(fam, q))
-    return max(fits, key=size) if fits else min(fam["models"], key=size)
+    return max(fits, key=size) if fits else min(auto, key=size)
 
 
 MAC_AVAIL_MARGIN_GIB = 6                               # left of what macOS can hand out now (the engine's own ~1 GiB)
@@ -6970,6 +6983,14 @@ def flint_size(ram: float, shared: bool, vram_gb: float) -> str:
     return "UD-Q4_K_XL" if vram_gb >= 16 and ram >= 32 else "UD-IQ3_XXS"
 
 
+def glm53_size(ram: float, shared: bool, vram_gb: float) -> str:
+    """GLM-5.3-Flash's size for this machine.  Separate cards: UD-IQ2_XXS (measured: an RTX 4070 Ti + RTX 3060, 63 GB of
+    RAM, the CPU computing the experts the cards lack: 4.5-5.8 tok/s writing; the 4070 Ti alone 3.8; llama.cpp 4.0-5.4).
+    A GPU that shares the system's memory (the Spark, a Mac): the size its RAM picks among the others, as before
+    (UD-IQ3_XXS: measured on the Spark and the M1 Ultra; UD-IQ2_XXS not measured there)."""
+    return "UD-IQ2_XXS" if not shared else ggml_size(GGML_FAMILIES["glm53"], None, ram)
+
+
 def lightning_size(ram: float, shared: bool, vram_gb: float) -> str:
     """Nemotron 3.5 Lightning's size for this machine.  Measured: an RTX 4070 Ti (12 GB) + 63 GB, the CPU computing the
     experts the card does not hold: UD-IQ3_XXS 71 tok/s, UD-Q4_K_XL 38 (llama.cpp at its best --n-cpu-moe: 65.3,
@@ -6990,7 +7011,8 @@ def gemma4_size(ram: float, shared: bool, vram_gb: float) -> str:
     return "UD-Q4_K_XL" if vram_gb >= 20 and ram >= 32 else "UD-IQ3_XXS"
 
 
-SIZE_RULES = {"flint": "flint_size", "lightning": "lightning_size", "gemma4": "gemma4_size"}   # (by name: tests patch them)
+SIZE_RULES = {"flint": "flint_size", "lightning": "lightning_size", "gemma4": "gemma4_size",
+              "glm53": "glm53_size"}             # (by name: tests patch them)
 
 
 def momoe_title(family: str) -> str:
@@ -7617,7 +7639,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         # with the CPU computing the experts (a 12 GB card) it is slower: 4.1-4.5 -> 4.0, 19.1 -> 12.5
         args += fam["draft_args"]
     eargs = list(fam.get("engine_args", [])) + (list(fam.get("mac_args", [])) if mac else [])
-    if use_draft is False and "--mtp" in eargs:          # --draft off (or the answer): the family's own drafting left out
+    if (use_draft is False or use_draft is None and fam.get("card_no_draft") and not mac and not unified) and "--mtp" in eargs:
+        # --draft off (or the answer), or a family whose own drafting does not pay on separate cards: left out
         i = eargs.index("--mtp")
         del eargs[i:i + 2]
     if mac and pool is not None and "--mtp" in eargs and pool < 0.15 * w[0] and use_draft is None:

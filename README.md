@@ -118,6 +118,7 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 | Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 | 28.4 | - | 37.5 (UD-Q3_K_XL) | 8.6 |
 | Ornith-1.5-122B-A10B UD-IQ3_XXS | 19.2 | 33.2* | - | 19.8* | 4.5 |
 | GLM-5.3-Flash UD-IQ3_XXS | does not fit a 12 GB card | 19.7* | - | 4.5* | 1.4 |
+| GLM-5.3-Flash UD-IQ2_XXS | 4.7 (two cards, from the SSD) | - | - | - | - |
 | Ling-3.0-flash IQ3_XXS | 35.6 | - | - | - | - |
 | Ling-3.0-flash Sante IQ3_XXS | 33.5 | - | - | 27.0* | - |
 | MiMo-V2.6-Flash-MOPD BPW2.5 | 5.4 (from the SSD) | TBD | - | 7.0 (a 25 GiB pool) | - |
@@ -151,6 +152,10 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
   the PC, V2.5 on the Spark and the M1 Ultra too, V2.6 on the M1 Ultra (7.0 tok/s writing there, the Spark TBD):
   [bench/results/2026-11-03-mimo25](bench/results/2026-11-03-mimo25),
   [bench/results/2026-11-03-mimo26](bench/results/2026-11-03-mimo26).
+- **GLM-5.3-Flash UD-IQ2_XXS** (a 102 GB file) on the PC: its layers split across the two cards, the CPU computing the
+  experts they lack: 4.7 tok/s writing in the server (4.5-5.8 on its own; llama.cpp 4.0-5.4), prompts 82-122 tok/s.
+  Setup picks it on separate cards; the Spark and the Macs keep UD-IQ3_XXS. Its MTP drafting does not pay there (4.4
+  against 4.5): [bench/results/2026-11-04-glm53-pc](bench/results/2026-11-04-glm53-pc).
 - **MiniMax M3.1 Flash** (428B-A23B, a 135 GB file, sparse attention): its 9.2 GB of other weights do not fit one
   12 GB card, so on the PC setup splits the layers across two (the 4070 Ti and a 3060, a 16K context) and the CPU
   computes the experts the cards lack: 2.8 tok/s writing, as llama.cpp's 2.8-3.1 with every expert on the CPU. The
@@ -181,6 +186,7 @@ the PC's Flash-Next wrote 65.5-76.7 here against 57.9 above).
 | Ling-3.0-flash Sante IQ3_XXS | 33.5 | 27.4 (MoE cache 6 GiB; 38 on CPU 26.7) |
 | MiMo-V2.6-Flash-MOPD BPW2.5 | 5.4 | 5.1-5.8 (every expert on CPU; other placements not tried) |
 | MiMo-V2.5 UD-IQ2_XXS | 5.9 | 5.7-6.4 (every expert on CPU; other placements not tried) |
+| GLM-5.3-Flash UD-IQ2_XXS (+ RTX 3060) | 4.5-5.8 (the 4070 Ti alone: 3.8) | 4.0-5.4 (every expert on CPU, the 4070 Ti; other placements not tried) |
 | MiniMax M3.1 Flash UD-IQ2_XXS (+ RTX 3060) | 2.9-3.8 | 2.8-3.1 (every expert on CPU; other placements not tried) |
 | Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 (server 30.0, sampled 30.6) | 26.2 (26.1) |
 | Nemotron 3.5 Lightning UD-IQ3_XXS / UD-Q4_K_XL | 71.1 / 38.7 | 65.3 (24 on CPU) / 40.2 (36) |
@@ -324,8 +330,9 @@ Two NVIDIA cards can share a model in two ways. Setup writes either with `--gpus
 hand in the config: both cards in `"gpu"`, the main card first.
 
 - **The layer split** (`"gpu": [a, b]`, `"layer_split": "auto"` or the first layer of each later card): each card runs
-  its own layers. Setup splits GLM-5.3-Flash this way by itself across two cards under 16 GB each. Best for two equal
-  cards (not measured).
+  its own layers, the CPU computing the experts neither card holds. Setup splits GLM-5.3-Flash and MiniMax M3.1 Flash
+  this way by itself across two cards under 16 GB each (measured on an RTX 4070 Ti + RTX 3060: GLM-5.3-Flash
+  UD-IQ2_XXS 4.5 tok/s against 3.8 on the 4070 Ti alone).
 - **The helper tier** (`"args": [..., "--helper-tier"]`): the second card is a second level of expert cache under the
   first.
   1. The main card runs the model as it would alone.

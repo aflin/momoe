@@ -248,6 +248,10 @@ class Routing(unittest.TestCase):
         cfg = self.run_setup(self.TWO, {}, "glm53")
         self.assertEqual(cfg["gpu"], [0, 1])                 # (the server stages the faster card last under "auto")
         self.assertNotIn("--helper-tier", cfg["args"])
+        a = cfg["args"]                                      # (measured on an RTX 4070 Ti + RTX 3060: the 2-bit file,
+        self.assertIn("UD-IQ2_XXS", a[a.index("-m") + 1])    # the pool's floor at 4 tokens, no drafting)
+        self.assertEqual(cfg["env"]["MOMOE_POOL_MIN_TOKENS"], "4")
+        self.assertNotIn("--mtp", a)
 
     def test_one_card_stays_one(self):
         self.assertEqual(self.run_setup(self.TWO, {}, "lfm25")["gpu"], 1)    # the newer of two equal cards
