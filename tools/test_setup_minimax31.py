@@ -1,7 +1,7 @@
 """tools/test_setup_minimax31.py - Momoe: MiniMax M3.1 Flash on the ggml engine (GGML_FAMILIES["minimax31"], momoe_setup):
 its size pinned with each shard's size and SHA-256 at the pinned revision, the card's sampling, the family in the menu,
 its license said, the config on two 12 GB cards (their layers split, the engine's settings for them, 512-token
-chunks), and its `minimax-m2` pre-tokenizer."""
+chunks, a 16K context), the Mac's pool, and its `minimax-m2` pre-tokenizer."""
 from __future__ import annotations
 
 import contextlib
@@ -79,6 +79,7 @@ class Minimax31Family(unittest.TestCase):
         a = cfg["args"]
         self.assertEqual(a[a.index("-m") + 1], "/m/minimax31-UD-IQ2_XXS/MiniMax-M3.1-Flash-UD-IQ2_XXS-00001-of-00004.gguf")
         self.assertEqual(a[a.index("--chunk") + 1], "512")
+        self.assertEqual(a[a.index("--ctx") + 1], "16384")      # (card_context: 32K's KV cache did not fit them)
         self.assertEqual(sorted(cfg["gpu"]), [0, 1])
         self.assertEqual(cfg["env"]["MOMOE_POOL_MIN_TOKENS"], "4")
         self.assertEqual(cfg["env"]["MOMOE_VRAM_MARGIN_MIB"], "1536")

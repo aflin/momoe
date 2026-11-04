@@ -798,13 +798,14 @@ GGML_FAMILIES = {
                   "parts": MINIMAX31_FILES,
                   # ram_gb: the file and the rest of the system in memory; with less, its experts are read from the SSD
                   "models": {"UD-IQ2_XXS": {"about": "2-bit (Unsloth Dynamic); checked against llama.cpp on two 12 GB cards "
-                                                     "(slow there: 1.4 tok/s, the experts copied in)", "ram_gb": 140}},
+                                                     "(~3 tok/s there, most experts computed by the CPU)", "ram_gb": 140}},
                   "default": "UD-IQ2_XXS",
                   # its other weights are 9.2 GiB: a 12 GB card cannot start it alone; two share its layers (setup), with
                   # the pool's floor at 4 tokens' experts (16: 4.5 GiB of its large experts) and 1.5 GiB of VRAM kept for
                   # cuBLAS (a 512 MiB margin ran a card out of memory at the indexer's first F32 GEMM); 512-token chunks
-                  # (1024's compute buffers did not fit the second card, measured: an RTX 4070 Ti + RTX 3060)
-                  "context": 32768, "min_vram_gb": 24, "chunk": 512,
+                  # (1024's compute buffers did not fit the second card, measured: an RTX 4070 Ti + RTX 3060); a 16K
+                  # context on cards (card_context: at 32K the KV cache's 1.9 GiB more did not fit two 12 GB cards)
+                  "context": 32768, "card_context": 16384, "min_vram_gb": 24, "chunk": 512,
                   "card_env": {"MOMOE_POOL_MIN_TOKENS": "4", "MOMOE_VRAM_MARGIN_MIB": "1536"},
                   # a Mac's pool this much smaller than mac_pool_gib's (32 GiB on a 64 GB Mac at 32K: with its 9.2 GiB of
                   # other weights, a 3.75 GiB KV cache and the prompt's staging copy ~49 GiB of Metal memory, past the M1
@@ -7545,7 +7546,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
     step(6 if draft else 5, "the config")
     # the context: --context, the family's, else on a Mac 64K when every expert fits beside its KV cache, else 32K; at
     # most 16K where the memory is under 16 GB (a Jetson, an 8 GB Mac: the KV cache takes the experts' memory)
-    pool, ctx = None, a.context or fam.get("context") or 32768
+    pool, ctx = None, a.context or (fam.get("card_context") if cards else None) or fam.get("context") or 32768
     w, kvt, draft_gib = (0.0, 0.0), 0, 0.0
     if mac or not (a.context or a.yes):                # (read for the Mac's pool, or for the context question)
         w, kvt = weights_gib(paths), kv_bytes_per_token(paths)

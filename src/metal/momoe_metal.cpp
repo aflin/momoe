@@ -992,6 +992,20 @@ static std::vector<std::string> shard_paths(const char * path, int n) {
     return r;
 }
 
+// a tensor's bytes in whichever of a model's files holds it (a split model's first file may hold none), -1 if none does
+static int64_t shard_tensor_bytes(const std::vector<std::string> & paths, const char * name) {
+    for (const std::string & p : paths) {
+        gguf_init_params gp = {/*no_alloc*/ true, nullptr};
+        gguf_context * g = gguf_init_from_file(p.c_str(), gp);
+        if (!g) continue;
+        const int64_t id = gguf_find_tensor(g, name);
+        const int64_t n = id >= 0 ? (int64_t) gguf_get_tensor_size(g, id) : -1;
+        gguf_free(g);
+        if (n >= 0) return n;
+    }
+    return -1;
+}
+
 // qwen4exp's MTP layer, from its own file (llama.cpp's GGUFs leave it out): the checkpoint's mtp.* tensors as
 // tools/mtp_pack.py writes them (--experts q4_0: a format Metal computes). The norms are stored zero-centred (the
 // checkpoint scales by 1 + w): +1 here, as llama.cpp's converter does for the model's own norms. The fused gate_up
@@ -1328,7 +1342,7 @@ static void make_pool(Engine & e, double frac) {
 
 // --layer-split: which card each layer runs on.  "auto": in proportion to each card's free VRAM (every layer counted
 // alike); else the first layer of each later card ("18", or "16,32" for three cards), as the PC engine reads it
-static void assign_cards(Engine & e) {
+static void assign_cards(Engine & e, int64_t head_bytes) {
 #if defined(MOMOE_CUDA)
     Model & m = e.m;
     if (e.split.empty()) return;
@@ -1349,6 +1363,7 @@ static void assign_cards(Engine & e) {
             cudaSetDevice(d);
             cudaMemGetInfo(&f, &t);
             fr[d] = (double) f;
+            if (d == nc - 1) fr[d] = std::max(0.0, fr[d] - (double) head_bytes);   // (the head goes on the last card)
             all += fr[d];
         }
         double acc = 0;
@@ -1877,10 +1892,12 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     for (int il = 0; il < m.n_layer; ++il) m.layers[il].recurrent = (il + 1) % m.full_attn_interval != 0;
     }
 
-    assign_cards(e);
     // the dense weights: every tensor but the routed experts, the MTP layer and the PLE table, in one Metal buffer
     const int n_split = gguf_find_key(g, "split.count") >= 0 ? gguf_int(g, "split.count") : 1;
     const std::vector<std::string> paths = shard_paths(path, n_split);
+    const int64_t head_bytes = n_split > 1 ? shard_tensor_bytes(paths, "output.weight")
+                             : gguf_find_tensor(g, "output.weight") >= 0 ? (int64_t) gguf_get_tensor_size(g, gguf_find_tensor(g, "output.weight")) : -1;
+    assign_cards(e, std::max<int64_t>(0, head_bytes));
     ggml_init_params ip = {ggml_tensor_overhead() * 4096, nullptr, true};
     ggml_context * cw = ggml_init(ip);
     // --layer-split: a context per card - a layer's weights on its card, the token embedding on the first, the head,
@@ -1897,7 +1914,7 @@ static void load(Engine & e, const char * path, double pool_gib, int slots_arg) 
     // momoe-cuda: the token embeddings stay in RAM (a few rows a token, read on the CPU), as llama.cpp keeps them:
     // their VRAM goes to the expert pool. Only when the head has its own weights (output.weight in this file)
     ggml_context * ccpu = ggml_init(ip);
-    const bool embd_cpu = !kHostMem && gguf_find_tensor(g, "output.weight") >= 0 && !getenv("MOMOE_EMBD_GPU");
+    const bool embd_cpu = !kHostMem && head_bytes >= 0 && !getenv("MOMOE_EMBD_GPU");   // (in any of its files)
     struct ToRead { ggml_tensor * t; int fd; size_t off; bool bf16 = false; };
     // momoe-metal on a GPU without bfloat kernels (macOS before 14: an M1 on Big Sur): BF16 weights (flint's routers)
     // loaded as F32 (exact: BF16 is F32's top half); its scheduler would want the CPU for them, from a Metal buffer
@@ -3443,8 +3460,8 @@ struct Inputs {
     ggml_tensor *kv_idx_swa = nullptr;                       // flint: I64 [T], the ring rows written (p % swa_rows)
     // minimax-m3's sparse attention (one sequence: a position's cell is its position; n_kv whole blocks of msa_blk):
     ggml_tensor *msa_mask = nullptr;                         // F32 [n_kv, T]: 0 where a token may look (causal), -inf
-    ggml_tensor *msa_bias = nullptr;                         // F32 [n_kv / msa_blk, T]: 1e30 on its own msa_local blocks
-    ggml_tensor *msa_cblk = nullptr;                         // I32 [n_kv]: each cell's block
+    ggml_tensor *msa_bias = nullptr;                         // F32 [n_kv / msa_blk, T]: 1e30 on its own msa_local blocks,
+                                                             // -1e30 on the blocks after its own
     ggml_tensor *kv_idx = nullptr;                           // I64 [T]: the positions written (a graph reused token
                                                              // after token: the caches' rows as an input, not offsets)
     // QSA (llama.cpp's llm_graph_input_kpool, one sequence: a position's cell is its position): the blocks completed
@@ -4244,25 +4261,26 @@ static ggml_tensor * mm3_attn_layer(Engine & e, ggml_context * c, ggml_cgraph * 
         ggml_build_forward_expand(gf, ggml_cpy(c, v, ggml_view_3d(c, L.v_cache, hd, nkv, T, L.v_cache->nb[1], row, row * p0)));
         ggml_build_forward_expand(gf, ggml_cpy(c, ggml_reshape_2d(c, ik, di, T), ggml_view_2d(c, L.idx_raw, di, T, irow, irow * p0)));
     }
-    // the blocks: scores [n_kv, nh, T] (F32), causal, the max per block, the own block forced, the best kb
+    // the blocks: scores [n_kv, nh, T] (F32), the max per block, the own block forced and the later ones out (msa_bias:
+    // causal by blocks, the same choice as the cells' causal mask before the max), the best kb
     ggml_tensor * ikc = ggml_view_2d(c, L.idx_raw, di, n_kv, irow, 0);
     ggml_tensor * sc = ggml_mul_mat(c, ikc, ggml_reshape_2d(c, iq, di, (int64_t) nh * T));
     ggml_prec_set_acc(sc, GGML_PREC_F32);
-    sc = ggml_add(c, ggml_reshape_3d(c, sc, n_kv, nh, T), ggml_reshape_3d(c, in.msa_mask, n_kv, 1, T));
+    sc = ggml_reshape_3d(c, sc, n_kv, nh, T);
     ggml_tensor * bs = ggml_pool_2d(c, sc, GGML_OP_POOL_MAX, m.msa_blk, 1, m.msa_blk, 1, 0, 0);       // [nblk, nh, T]
     bs = ggml_add(c, bs, ggml_reshape_3d(c, in.msa_bias, nblk, 1, T));
     ggml_tensor * idx = ggml_top_k(c, bs, (int) kb);                                           // [kb, nh, T]
-    // the block mask: -inf, 0 on the chosen blocks; to cells through each cell's block; with the causal mask
-    ggml_tensor * ninf = ggml_cast(c, ggml_scale_bias(c, ggml_reshape_3d(c, in.msa_bias, nblk, 1, T), 0.0f, -1e30f), GGML_TYPE_F16);
+    // the block mask: -1e30, 0 on the chosen blocks; each block's value repeated over its cells, with the causal mask
+    // (one tensor of [n_kv, T, nh] before the F16 cast: the gather through each cell's block took five, 2.4 GiB of
+    // compute buffer at a 32K context and 256-token chunks)
+    ggml_tensor * ninf = ggml_scale_bias(c, ggml_reshape_3d(c, in.msa_bias, nblk, 1, T), 0.0f, -1e30f);
     ninf = ggml_repeat_4d(c, ninf, nblk, nh, T, 1);
     ggml_tensor * zero = ggml_scale(c, ggml_cast(c, idx, GGML_TYPE_F32), 0.0f);
     ggml_tensor * bm = ggml_set_rows(c, ggml_reshape_3d(c, ninf, 1, nblk, (int64_t) nh * T),
                                      ggml_reshape_3d(c, zero, 1, kb, (int64_t) nh * T), ggml_reshape_2d(c, idx, kb, (int64_t) nh * T));
     bm = ggml_cont(c, ggml_permute(c, ggml_reshape_3d(c, bm, nblk, nh, T), 0, 2, 1, 3));               // [nblk, T, nh]
-    ggml_tensor * bm2 = ggml_cont(c, ggml_transpose(c, ggml_reshape_2d(c, bm, nblk, (int64_t) T * nh)));   // [T nh, nblk]
-    ggml_tensor * bmc = ggml_get_rows(c, bm2, in.msa_cblk);                                    // [T nh, n_kv] F32
-    ggml_tensor * mask4 = ggml_reshape_3d(c, ggml_cont(c, ggml_transpose(c, bmc)), n_kv, T, nh);
-    mask4 = ggml_add(c, mask4, ggml_reshape_3d(c, in.msa_mask, n_kv, T, 1));
+    ggml_tensor * mask4 = ggml_repeat_4d(c, ggml_reshape_4d(c, bm, 1, nblk, T, nh), m.msa_blk, nblk, T, nh);
+    mask4 = ggml_add_inplace(c, ggml_reshape_3d(c, mask4, n_kv, T, nh), ggml_reshape_3d(c, in.msa_mask, n_kv, T, 1));
     mask4 = ggml_cast(c, ggml_reshape_4d(c, mask4, n_kv, T, 1, nh), GGML_TYPE_F16);
     // one flash attention: a KV group per sequence (ne[3]), its gp query heads; q [hd, T, gp, nkv]
     ggml_tensor * qg = ggml_permute(c, ggml_reshape_4d(c, q, hd, gp, nkv, T), 0, 2, 3, 1);
@@ -5671,14 +5689,12 @@ static void build_forward(Engine & e, int T, int p0, int n_kv, Out * out, Built 
         in.kv_idx_swa = ggml_new_tensor_1d(c, GGML_TYPE_I64, T);
         ggml_set_input(in.kv_idx_swa);
     }
-    if (m.mm3) {                                             // its sparse blocks' masks and each cell's block
+    if (m.mm3) {                                             // its sparse blocks' masks
         if (n_kv % m.msa_blk) die("minimax-m3: a context that is not whole blocks of %s positions", std::to_string(m.msa_blk).c_str());
         in.msa_mask = ggml_new_tensor_2d(c, GGML_TYPE_F32, n_kv, T);
         ggml_set_input(in.msa_mask);
         in.msa_bias = ggml_new_tensor_2d(c, GGML_TYPE_F32, n_kv / m.msa_blk, T);
         ggml_set_input(in.msa_bias);
-        in.msa_cblk = ggml_new_tensor_1d(c, GGML_TYPE_I32, n_kv);
-        ggml_set_input(in.msa_cblk);
     }
     if (by_input) {                                          // the rows written: an input (a reused graph)
         in.kv_idx = ggml_new_tensor_1d(c, GGML_TYPE_I64, T);
@@ -6329,6 +6345,19 @@ static int forward_once(Engine & e, const int32_t * toks, int T, int p0, Out * o
 #endif
         if (e.reserve_only) {                                // fit_pool: the compute buffers of the largest graph
             if (!ggml_backend_sched_reserve(sched, gf)) die("cannot reserve the compute buffers: too little VRAM free");
+            if (getenv("MOMOE_SHOW_BUFFERS")) {              // (each backend's compute buffer, the largest tensors)
+                std::vector<ggml_tensor *> big;
+                for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) big.push_back(ggml_graph_node(gf, i));
+                std::sort(big.begin(), big.end(), [](ggml_tensor * a, ggml_tensor * b) { return ggml_nbytes(a) > ggml_nbytes(b); });
+                for (size_t i = 0; i < std::min<size_t>(16, big.size()); ++i)
+                    fprintf(stderr, "momoe-metal:   %s %s %s [%lld %lld %lld %lld] %.1f MiB\n", big[i]->name, ggml_op_desc(big[i]),
+                            ggml_type_name(big[i]->type), (long long) big[i]->ne[0], (long long) big[i]->ne[1],
+                            (long long) big[i]->ne[2], (long long) big[i]->ne[3], ggml_nbytes(big[i]) / 1048576.0);
+            }
+            if (getenv("MOMOE_SHOW_BUFFERS"))
+                for (ggml_backend_t b : e.sched_backends)
+                    fprintf(stderr, "momoe-metal: compute buffer on %s: %.1f MiB (%d tokens, %d cells)\n", ggml_backend_name(b),
+                            ggml_backend_sched_get_buffer_size(sched, b) / 1048576.0, T, n_kv);
             ggml_free(c);
             return 0;
         }
@@ -6363,17 +6392,15 @@ static int forward_once(Engine & e, const int32_t * toks, int T, int p0, Out * o
     if (in.msa_mask) {                                       // minimax-m3 (llama.cpp's llm_graph_input_msa, one sequence)
         const int B = m.msa_blk, nb = n_kv / B;
         std::vector<float> mk((size_t) n_kv * T), bias((size_t) nb * T, 0.0f);
-        std::vector<int32_t> cb(n_kv);
         for (int i = 0; i < T; ++i) {
             const int q = p0 + i, own = q / B;
             for (int j = 0; j < n_kv; ++j) mk[(size_t) i * n_kv + j] = j <= q ? 0.0f : -INFINITY;
+            for (int b = own + 1; b < nb; ++b) bias[(size_t) i * nb + b] = -1e30f;
             for (int l = 0; l < m.msa_local && own - l >= 0; ++l)
                 if (own - l < nb) bias[(size_t) i * nb + own - l] = 1e30f;
         }
-        for (int j = 0; j < n_kv; ++j) cb[j] = j / B;
         ggml_backend_tensor_set(in.msa_mask, mk.data(), 0, mk.size() * sizeof(float));
         ggml_backend_tensor_set(in.msa_bias, bias.data(), 0, bias.size() * sizeof(float));
-        ggml_backend_tensor_set(in.msa_cblk, cb.data(), 0, cb.size() * sizeof(int32_t));
     }
     if (m.ds41) {
         if ((int) e.tok_at.size() < p0) die("the Engram token history has a gap");
@@ -7856,7 +7883,7 @@ int main(int argc, char ** argv) {
         if (e.ds.block > mtp_k) die("--dspark: a drafter block longer than 8 (not done)");
         mtp_k = e.ds.block;
     }
-    if (e.helper && e.m.nemo) e.hybrid = false;
+    if ((e.helper || !e.split.empty()) && e.m.nemo) e.hybrid = false;   // (Nemotron beside a layer split: not measured)
     if (mtp_k > 0 && e.m.nemo) die("--mtp: not yet for Nemotron models");
     if (!kHostMem && pool_gib <= 0 && slots <= 0) fit_pool(e);
     e.pool_asked = pool_gib > 0 || slots > 0;
