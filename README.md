@@ -122,7 +122,7 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
 | Ling-3.0-flash Sante IQ3_XXS | 33.5 | - | - | 27.0* | - |
 | MiMo-V2.6-Flash-MOPD BPW2.5 | 5.4 (from the SSD) | TBD | - | 7.0 (a 25 GiB pool) | - |
 | MiMo-V2.5 UD-IQ2_XXS | 5.9 (from the SSD) | TBD | - | 6-9 (single runs) | - |
-| MiniMax M3.1 Flash UD-IQ2_XXS | 1.4 (two cards, from the SSD) | TBD | - | 2.7 (a 20 GiB pool) | - |
+| MiniMax M3.1 Flash UD-IQ2_XXS | 2.8 (two cards, from the SSD) | TBD | - | 2.7 (a 20 GiB pool) | - |
 | Flint 40B-A2.5B | 89.9 (UD-IQ3_XXS) / 65.7 (UD-Q4_K_XL) | 73.2 (UD-Q4_K_XL) | - | 84.4 (UD-Q4_K_XL) | 42.2 (UD-IQ3_XXS) |
 | Nemotron 3.5 Lightning 30B-A3B | 71.1 (UD-IQ3_XXS) / 38.7 (UD-Q4_K_XL) | 66.9 (UD-Q4_K_XL) | - | 89.9 (UD-Q4_K_XL) | 25.9 (UD-IQ3_XXS) |
 | Gemma 4 26B-A4B | 92.4 (UD-IQ3_XXS) / 75.2 (UD-Q4_K_XL) | 59.3 (UD-Q4_K_XL) | - | 85.2 (UD-Q4_K_XL) | 28.8 (UD-IQ3_XXS) |
@@ -152,10 +152,11 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
   [bench/results/2026-11-03-mimo25](bench/results/2026-11-03-mimo25),
   [bench/results/2026-11-03-mimo26](bench/results/2026-11-03-mimo26).
 - **MiniMax M3.1 Flash** (428B-A23B, a 135 GB file, sparse attention): its 9.2 GB of other weights do not fit one
-  12 GB card, so on the PC setup splits the layers across two (the 4070 Ti and a 3060). There MoMoE writes 1.4 tok/s
-  and llama.cpp, with every expert on the CPU, 2.8-3.1: with a layer split MoMoE does not compute experts on the CPU
-  yet. The M1 Ultra writes 2.7. Its license asks a product built on it to say "Built with MiniMax M3.1-Flash". Checked
-  against llama.cpp on both, the Spark TBD: [bench/results/2026-11-03-minimax31](bench/results/2026-11-03-minimax31).
+  12 GB card, so on the PC setup splits the layers across two (the 4070 Ti and a 3060, a 16K context) and the CPU
+  computes the experts the cards lack: 2.8 tok/s writing, as llama.cpp's 2.8-3.1 with every expert on the CPU. The
+  M1 Ultra writes 2.7. Its DSpark drafter would not pay on either (measured: a check of several tokens costs nearly as
+  much as that many single ones). Its license asks a product built on it to say "Built with MiniMax M3.1-Flash".
+  Checked against llama.cpp on both, the Spark TBD: [bench/results/2026-11-03-minimax31](bench/results/2026-11-03-minimax31).
 - **DeepSeek-V4.1-Flash** (249 GB of files with its n-gram table): on a PC upstream Strata's DeepSeek engine, on the
   Spark and a Mac MoMoE's; checked against each other, the measurements and the memory it needs:
   [docs/DEEPSEEK41.md](docs/DEEPSEEK41.md).
@@ -180,7 +181,7 @@ the PC's Flash-Next wrote 65.5-76.7 here against 57.9 above).
 | Ling-3.0-flash Sante IQ3_XXS | 33.5 | 27.4 (MoE cache 6 GiB; 38 on CPU 26.7) |
 | MiMo-V2.6-Flash-MOPD BPW2.5 | 5.4 | 5.1-5.8 (every expert on CPU; other placements not tried) |
 | MiMo-V2.5 UD-IQ2_XXS | 5.9 | 5.7-6.4 (every expert on CPU; other placements not tried) |
-| MiniMax M3.1 Flash UD-IQ2_XXS (+ RTX 3060) | 1.4 | 2.8-3.1 (every expert on CPU; other placements not tried) |
+| MiniMax M3.1 Flash UD-IQ2_XXS (+ RTX 3060) | 2.9-3.8 | 2.8-3.1 (every expert on CPU; other placements not tried) |
 | Nemotron 3.5 Bolt UD-IQ3_XXS | 29.7 (server 30.0, sampled 30.6) | 26.2 (26.1) |
 | Nemotron 3.5 Lightning UD-IQ3_XXS / UD-Q4_K_XL | 71.1 / 38.7 | 65.3 (24 on CPU) / 40.2 (36) |
 | Gemma 4 26B-A4B UD-IQ3_XXS / UD-Q4_K_XL | 92.4 / 75.2 | 90.5 at 32K context (4 on CPU) / 54.8 (11) |

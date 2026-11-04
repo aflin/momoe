@@ -33,17 +33,38 @@ on the 6,246-token prompt on the PC: MoMoE llama.cpp's way against llama.cpp 0.0
 ## The PC: RTX 4070 Ti 12 GB + RTX 3060 12 GB
 
 Ryzen 9 5950X, 63 GB of RAM, the file on NVMe. One 12 GB card cannot hold it (9.2 GB of other weights, the KV cache
-and the compute buffers), so setup splits the layers across two (`--layer-split auto`: 0-30 on the 4070 Ti, 31-59 on
-the 3060) with 512-token chunks, `MOMOE_POOL_MIN_TOKENS=4` and a 1.5 GiB VRAM margin (cuBLAS's own buffers). The
-pools hold 2% of the experts; the rest are read from the file cache and the SSD as tokens need them.
+and the compute buffers), so setup splits the layers across two (`--layer-split auto`: 0-31 on the 4070 Ti, 32-59 on
+the 3060, which also drives the desktop) with 512-token chunks, `MOMOE_POOL_MIN_TOKENS=4` and a 1.5 GiB VRAM margin
+(cuBLAS's own buffers), and a 16K context: at 32K the KV cache needs 1.9 GiB more than the two cards have left. The
+pools hold 1-2% of the experts.
 
-The engine alone: 1.4-1.7 tok/s writing (77-81% of the experts a token used in a pool), prompts read at 8-12 tok/s.
-**llama.cpp is faster here**: 2.8-3.1 tok/s writing (every expert on the CPU), because MoMoE's CPU-expert path is off
-with a layer split, so every miss is copied to a card. Prompts: MoMoE 12.0 tok/s on the 6,246-token one, llama.cpp
-6.2.
+**The CPU computes the experts the cards lack** (2026-11-04; before, with a layer split, every missing expert was
+copied to a card): the engine's trial measured 400-420 ms a token on the CPU against 830-870 ms with the copies. The
+engine alone, 199 tokens:
 
-The server, setup's config (`--ctx 32768 --chunk 512`): a chat, an OpenAI tool call and a 4K-token prompt; the
-server's benchmark was not run at this speed.
+| Prompt | KL mean / p99, same top token | writing (second half) |
+| --- | --- | ---: |
+| code | 0.0020 / 0.0365, 99.0% | 2.9 tok/s (copies: 1.4) |
+| medical | 0.0021 / 0.0295, 98.0% | 3.8 tok/s (copies: 1.7) |
+| the 6,246-token document | 0.0076 / 0.2169, 98.0% | 3.3 tok/s (copies: 1.4) |
+
+The same agreement with llama.cpp as with the copies (above), so the CPU's arithmetic adds no error of its own.
+llama.cpp on this machine (every expert on the CPU): 2.8-3.1 tok/s writing; prompts: MoMoE 12 tok/s on the
+6,246-token one, llama.cpp 6.2.
+
+The server, setup's config (`--ctx 16384 --chunk 512`): a chat, an OpenAI tool call
+(`get_weather({"city": "Paris", "unit": "C"})`), then its benchmark (`tools/strata_bench.py`, 3 runs, `server-pc/`):
+
+| | median (range) |
+| --- | --- |
+| chat, writing | 2.8 tok/s (2.7-3.1) |
+| chat, first token | 29.2 s (28.2-30.7) |
+| the 4K prompt, reading | 22.7 tok/s (the 16K one: past the 16K context) |
+| agent session, writing | 2.7 tok/s (2.5-3.0) |
+| agent turn, first token | 233.5 s (113.2-242.0; ~3,000 new tokens each) |
+
+Ling-3.0-flash and Ornith-1.5-122B on the same split, with the new default: their trials chose the copies, as
+before (10.4 and 11.9 tok/s writing, 128 tokens); Nemotron keeps the copies beside a split (not measured).
 
 ## The M1 Ultra (64 GB)
 
@@ -63,4 +84,27 @@ The server: a chat and an OpenAI tool call (`get_weather({"city": "Paris", "unit
 | agent session, writing | 2.6 tok/s (2.1-3.0) |
 | agent turn, first token | 99.0 s (49.5-106.3; ~3,000 new tokens each) |
 
-Not done: the Spark (TBD), MiniMax's MTP layer, the CPU computing experts beside a layer split.
+## Drafting (DSpark)
+
+M3.1 Flash has no MTP layer: it comes with a DSpark drafter instead (the original's `dspark/`; Unsloth's
+`dspark-MiniMax-M3.1-Flash-Q8_0.gguf`, 2.1 GB, at the same revision): five dense blocks that read the model's state
+at five of its layers and propose up to 7 tokens, checked by the model in one pass. llama.cpp 7182ef7 and its master
+of 2026-11-04 do not load it (`swigluoai` is not one of the activations their DFlash loader takes). Unsloth's card:
+about 1.5x on code with one drafted token a check, on a GPU that holds the whole model.
+
+Drafting pays only if a check of several tokens costs much less than that many single tokens. Here it does not:
+the experts each token chooses are read or computed for that token, and two tokens share few of them. Teacher-forced
+windows of the code prompt's 199 tokens (MOMOE_TF_WINDOW, every token accepted), ms a window:
+
+| | 1 token | 2 tokens | 4 tokens |
+| --- | ---: | ---: | ---: |
+| PC (two cards, CPU experts) | 402 | 934 | 1,706 |
+| M1 Ultra (a 20 GiB pool) | 340 | 585 | 997 |
+
+On the PC a check of 2 costs more than 2 single tokens: drafting can only lose. On the M1 Ultra one drafted token a
+check gains only if more than ~78% of the drafts are kept (585 ms plus the drafter's own time for 1 + kept tokens,
+against 340 a token); the acceptance Unsloth's 1.5x implies (~50-60%) would give ~2.6 tok/s against 2.9 without,
+and the drafter's 2.1 GB would come out of the pool. Not built for now; worth it on a machine whose memory holds
+the whole model.
+
+Not done: the Spark (TBD), the drafter.
