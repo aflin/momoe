@@ -62,7 +62,7 @@ SHUTDOWN = threading.Event()                      # set by POST /shutdown (momoe
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (THINK_END, THINK_START, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
-                            forced_call, glm_forced, lfm_forced, gemma_forced, minimax_forced, MM_NS, images_of, literal_tags, UnaskedThought, mark_think_literals,
+                            forced_call, glm_forced, lfm_forced, gemma_forced, minimax_forced, MM_NS, MM_THINK, images_of, literal_tags, UnaskedThought, mark_think_literals,
                             openai_to_messages, require_messages, tool_choice_of,
                             unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
@@ -3455,7 +3455,8 @@ class Service:
         self.stop_ids = {ids[0] for ids in (tokenizer.encode(s, parse_special=True)
                                             for s in (IM_END, "<|endoftext|>", "<|user|>", "<|observation|>")
                                             + (("<turn|>", "<eos>", "<|tool_response>") if "<|channel>" in source else ())
-                                            + (("<|role_end|>",) if "<|role_end|>" in source else ()))
+                                            + (("<|role_end|>",) if "<|role_end|>" in source else ())
+                                            + (("[e~[",) if MM_NS in source else ()))   # (MiniMax M3: its turn's end)
                          if len(ids) == 1}
         if not self.stop_ids:   # #4576: a tokenizer with none of them as one token (DeepSeek-V4.1's) ends on its own eos
             eos = (getattr(tokenizer, "special_ids", None) or {}).get("eos")
@@ -3471,7 +3472,8 @@ class Service:
         self.gemma = not self.glm and not self.lfm and "<|tool_call>" in src and "<|channel>" in src
         # MiniMax M3's (]<]minimax[>[<tool_call> <invoke name=..> with namespaced XML arguments, its thinking between
         # <mm:think> and </mm:think>, left to the model): rewritten too (MinimaxRewriter)
-        self.minimax = not self.glm and not self.lfm and not self.gemma and MM_NS + "<tool_call>" in src
+        self.minimax = not self.glm and not self.lfm and not self.gemma and MM_NS in src and MM_THINK in src   # (its template
+        # builds its markers at run time: `ns_token ~ '<tool_call>'`)
         # does the template's generation prompt open the thinking (Qwen, GLM-5, LFM2.5-24B: "<think>")?  One that does
         # not (LFM2.5-8B-A1B, Gemma 4) leaves it to the model, which may answer at once: the parser waits for the
         # reply's start
