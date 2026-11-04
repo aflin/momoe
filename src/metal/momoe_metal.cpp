@@ -7843,11 +7843,13 @@ int main(int argc, char ** argv) {
         }
     }
 #endif
-    // (--direct-io: the CPU's experts read the mapping; nemo only, for now: hybrid_on; --layer-split: the stops)
+    // (--direct-io: the CPU's experts read the mapping; nemo only, for now: hybrid_on.  --layer-split: the CPU's experts
+    // beside both cards, through the mailboxes (mapped portable memory, one address for every card): MiniMax M3.1 Flash
+    // UD-IQ2_XXS on an RTX 4070 Ti + RTX 3060, 2.8 tok/s against 1.4 with the copies, the same KL against llama.cpp)
     // (--helper-tier: with qwen35moe's CPU experts through the stops, the helper card computing the missing experts it
     // holds: Ornith-1.5-122B, RTX 4070 Ti + RTX 3060, 12.1 tok/s against 8.7 with the copies; the helper saves RAM, not
     // time: 18-19 without it.  Nemotron: the copies)
-    e.hybrid = !kHostMem && !g_direct && !getenv("MOMOE_NO_HYBRID") && e.split.empty();
+    e.hybrid = !kHostMem && !g_direct && !getenv("MOMOE_NO_HYBRID");
     load(e, model, pool_gib, slots);
     if (!e.ds.path.empty()) {                                // (before the pool takes what is left)
         load_dspark(e);
@@ -8011,6 +8013,7 @@ int main(int argc, char ** argv) {
         if (FILE * f = fopen(getenv("MOMOE_TF_FILE"), "r")) { int x; while (fscanf(f, "%d%*[, \n]", &x) == 1) fol.push_back(x); fclose(f); }
         if (fol.empty() || fol[0] != next) fprintf(stderr, "TF: the file's first token %d is not the prompt's next %d\n", fol.empty() ? -1 : fol[0], next);
         int bad = 0;
+        const double tf0 = now_s();
         for (size_t i = 0; i + 1 < fol.size(); i += W) {
             const int T = (int) std::min((size_t) W, fol.size() - 1 - i);
             Out o;
@@ -8038,7 +8041,8 @@ int main(int argc, char ** argv) {
                 if (o.next[j] != fol[i + j + 1]) { fprintf(stderr, "TF: position %zu (window at %zu, slot %d): %d, the file %d\n", i + j + 1, i, j, o.next[j], fol[i + j + 1]); ++bad; }
             p += T;
         }
-        fprintf(stderr, "TF: windows of %d over %zu tokens: %d differ\n", W, fol.size() - 1, bad);
+        fprintf(stderr, "TF: windows of %d over %zu tokens: %d differ (%.1f ms a window)\n", W, fol.size() - 1, bad,
+                1000 * (now_s() - tf0) / ((fol.size() - 1 + W - 1) / W));
         fflush(stderr);
         _exit(0);                                            // (the readers' threads are still running)
     }
