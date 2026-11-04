@@ -82,6 +82,7 @@ HF_REVISIONS = {
     "bartowski/Ling-3.0-flash-Sante-GGUF": "d59f495f375857452f47ee56b1b0a37f4491f93c",                 # 2026-10-25
     "unsloth/MiMo-V2.5-GGUF": "f7aff7868d5f79da58b505f84626d7a807393c37",                              # 2026-11-02
     "AesSedai/MiMo-V2.6-Flash-MOPD-GGUF": "b6e95d58c343b59b48a1dcbe98815d19abcae001",                  # 2026-09-29
+    "unsloth/MiniMax-M3.1-Flash-GGUF": "b17b7f5459c0b8f127ea12ee774409b282521d6a",                     # 2026-11-03
     "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF": "5c2410d71524f4f72b023ce8daf7a80528226d5f",   # its mmproj (images)
     "Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF": "e4ae9970325413d582ba2c294122fc5567ec1dd7",
     "unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF": "34841e360524d421c564cc3ed247aa04a865473b",   # 2026-10-16
@@ -697,6 +698,20 @@ MIMO26_FILES = {
         ("BPW2.5/MiMo-V2.6-Flash-MOPD-BPW2.5-00003-of-00003.gguf", 47228677376,
          "b85b2fc09303ad08fb48137da832700f0bcf8e557fb8d09c0504fa1c167eb10b")],
 }
+# MiniMax M3.1 Flash (MiniMax, 428B-A23B; Unsloth's GGUFs): GQA attention with MiniMax Sparse Attention (an indexer picks a
+# token's 16 best blocks of 128 positions), 128 experts (4 a token) + a shared one, swigluoai.  Momoe's ggml engine runs it as
+# a flint variant (src/metal: mm3).  UD-IQ1_M is only 4% smaller (half the gate/up experts at 1 bit): not offered
+MINIMAX31_FILES = {
+    "UD-IQ2_XXS": [
+        ("UD-IQ2_XXS/MiniMax-M3.1-Flash-UD-IQ2_XXS-00001-of-00004.gguf", 8243332,
+         "1a8b46c0e135e72dfc38771f2391fee00e6b5450c968ad7c4798950be9f7e65a"),
+        ("UD-IQ2_XXS/MiniMax-M3.1-Flash-UD-IQ2_XXS-00002-of-00004.gguf", 49926404000,
+         "c6d04777476984e6b616f3a62c21f63e350ff7883dbbb9630fc04e847e4f04d7"),
+        ("UD-IQ2_XXS/MiniMax-M3.1-Flash-UD-IQ2_XXS-00003-of-00004.gguf", 49118488576,
+         "422869dd95af1dca6a91dc2a8d0f11da4e9b12a879cd3922dea241bf8c10b097"),
+        ("UD-IQ2_XXS/MiniMax-M3.1-Flash-UD-IQ2_XXS-00004-of-00004.gguf", 35894753536,
+         "bdb64203901f69cb706867e1b8f299169bb95cda0db7970876e9fe7d76f8275a")],
+}
 GGML_FAMILIES = {
     "bolt": {"title": "Nemotron 3.5 Bolt 74B-A9B", "by": "NVIDIA; Unsloth's GGUFs",
              "about": "Mamba-2 + attention + latent MoE, 9B active; a 32 GB download, ~56 GB of RAM",
@@ -776,6 +791,28 @@ GGML_FAMILIES = {
                    # spread over 2.8 tokens a window); on a 12 GB card it is slower (36.7 -> 28.0): not there
                    "mac_args": ["--mtp", "3"],
                    "license": "MIT: https://huggingface.co/inclusionAI/Ling-3.0-flash-Sante"},
+    "minimax31": {"title": "MiniMax M3.1 Flash 428B-A23B", "by": "MiniMax; Unsloth's GGUFs",
+                  "about": "sparse attention over 128-token blocks, 128 experts + a shared one, 23B active, a model that "
+                           "thinks; a 135 GB download, ~140 GB of memory to hold it",
+                  "hf": hf("unsloth/MiniMax-M3.1-Flash-GGUF"), "tag": "minimax31-", "name": "minimax-m3.1-flash",
+                  "parts": MINIMAX31_FILES,
+                  # ram_gb: the file and the rest of the system in memory; with less, its experts are read from the SSD
+                  "models": {"UD-IQ2_XXS": {"about": "2-bit (Unsloth Dynamic); checked against llama.cpp on two 12 GB cards "
+                                                     "(slow there: 1.4 tok/s, the experts copied in)", "ram_gb": 140}},
+                  "default": "UD-IQ2_XXS",
+                  # its other weights are 9.2 GiB: a 12 GB card cannot start it alone; two share its layers (setup), with
+                  # the pool's floor at 4 tokens' experts (16: 4.5 GiB of its large experts) and 1.5 GiB of VRAM kept for
+                  # cuBLAS (a 512 MiB margin ran a card out of memory at the indexer's first F32 GEMM); 512-token chunks
+                  # (1024's compute buffers did not fit the second card, measured: an RTX 4070 Ti + RTX 3060)
+                  "context": 32768, "min_vram_gb": 24, "chunk": 512,
+                  "card_env": {"MOMOE_POOL_MIN_TOKENS": "4", "MOMOE_VRAM_MARGIN_MIB": "1536"},
+                  # a Mac's pool this much smaller than mac_pool_gib's (32 GiB on a 64 GB Mac at 32K: with its 9.2 GiB of
+                  # other weights, a 3.75 GiB KV cache and the prompt's staging copy ~49 GiB of Metal memory, past the M1
+                  # Ultra's safe ~40): 20 there, which ran it (3.2 tok/s, 84% of the experts it used in the pool)
+                  "mac_margin_gib": 12,
+                  "license": "MiniMax Community License - free for non-commercial use; commercial use needs \"Built with MiniMax "
+                             "M3.1-Flash\" shown with the product and a notice to MiniMax (above $20M a year in revenue, their "
+                             "written permission): https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash/blob/main/LICENSE"},
     "mimo26": {"title": "MiMo-V2.6-Flash-MOPD 310B-A15B", "by": "Xiaomi; AesSedai's GGUFs",
                "about": "MiMo-V2.5's architecture trained further (September 2026), a model that thinks; a 97 GB download, "
                         "~110 GB of RAM to hold it",
@@ -5703,6 +5740,7 @@ SAMPLING_FLINT = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}       # Flint:
 SAMPLING_GEMMA4 = {"temperature": 1.0, "top_p": 0.95, "top_k": 64}      # Gemma 4: its card's (and the file's)
 SAMPLING_LING3 = {"temperature": 0.6, "top_p": 0.95, "top_k": 20}       # Ling-3.0-flash: its card's (Sante's too)
 SAMPLING_MIMO25 = {"temperature": 1.0, "top_p": 0.95}                    # MiMo-V2.5: its card's (and the file's)
+SAMPLING_MINIMAX31 = {"temperature": 1.0, "top_p": 0.95}                 # MiniMax M3.1 Flash: its card's
 SAMPLING_LFM25 = {"temperature": 0.1, "top_k": 50}                       # LFM2.5: the card's (and its repetition
                                                                           # penalty 1.05, which momoe-cuda does not apply)
 SAMPLING_LFM25_8B = {"temperature": 0.2, "top_k": 64}                    # LFM2.5-8B-A1B: its card's (top_k 80 there: the
@@ -5727,6 +5765,8 @@ def recommended_sampling(model_name) -> dict | None:
         return dict(SAMPLING_LING3)
     if name.startswith(("mimo-v2.5", "mimo-v2.6")):     # (V2.6-Flash-MOPD: the same, its card's)
         return dict(SAMPLING_MIMO25)
+    if name.startswith("minimax-m3"):
+        return dict(SAMPLING_MINIMAX31)
     if name.startswith("lfm2.5-8b-"):
         return dict(SAMPLING_LFM25_8B)
     if name.startswith("lfm2.5-"):
@@ -6958,7 +6998,7 @@ def momoe_title(family: str) -> str:
 
 # the families momoe_setup offers, in its menu's order (NVFP4's packs are Strata's own format: its engine only)
 MOMOE_MENU = ("ornith", "qwen36", "qwen36-bartowski", "kat-coder", "qwen", "swift", "coder", "unsloth", "bolt",
-              "ornith122", "glm53", "ling3", "ling3sante", "mimo26", "mimo25", "flint", "lightning", "gemma4", "lfm25", "lfm25-8b",
+              "ornith122", "glm53", "ling3", "ling3sante", "minimax31", "mimo26", "mimo25", "flint", "lightning", "gemma4", "lfm25", "lfm25-8b",
               "deepseek41")
 
 
@@ -7600,6 +7640,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         cfg["engine_ready_s"] = fam["engine_ready_s"]
     if unified and not mac and fam.get("uma_reserve_gib"):   # more memory kept from the pool for the rest of the system
         cfg["env"] = {"MOMOE_UMA_RESERVE_GIB": str(fam["uma_reserve_gib"])}
+    if not mac and not unified and fam.get("card_env"):      # (MiniMax M3.1 Flash: the engine's settings for separate cards)
+        cfg["env"] = {**(cfg.get("env") or {}), **fam["card_env"]}
     if vision:
         cfg["args"].append("--vision")
         cfg["vision"] = vision
