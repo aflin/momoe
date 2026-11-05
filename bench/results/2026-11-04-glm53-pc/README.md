@@ -79,7 +79,8 @@ from 29 GiB on an older engine).
 **Setup's Mac config changed:** its pool there was 33-34 GiB (mac_pool_gib), about 46-48 GiB of Metal memory with the
 rest at 64K, past the ~40 GiB this M1 Ultra is safe with (a 46 GiB DeepSeek run panicked it); `mac_margin_gib` 8
 brings it to the 25-26 GiB measured here, and `mac_draft_min` 0.9 leaves `--mtp` out unless the pool holds nearly
-every expert. The size it installs on a Mac stays UD-IQ3_XXS.
+every expert. The size it installs on a Mac under 100 GB is now UD-IQ2_XXS (the user's choice, on these numbers); the
+Spark, and a Mac that holds UD-IQ3_XXS, keep that.
 
 The server with UD-IQ2_XXS (`--ctx 65536 --pool-gib 26 --nocache`, no drafting): a chat and an OpenAI tool call, then
 its benchmark (`server-m1-ultra/`, 3 runs):

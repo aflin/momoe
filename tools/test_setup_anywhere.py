@@ -315,6 +315,9 @@ class MacDraft(unittest.TestCase):
             cfg_dir.mkdir(parents=True, exist_ok=True)
             fam = setup.GGML_FAMILIES.get(family) or setup.FAMILIES[family]
             q = setup.momoe_size(family, None, mem)
+            if family in setup.SIZE_RULES:                 # (as momoe_setup: the family's rule for this machine)
+                with mock.patch.object(setup.sys, "platform", "darwin"):   # (this class's setups: a Mac)
+                    q = getattr(setup, setup.SIZE_RULES[family])(mem, True, 0.0)
             (cfg_dir / f"{(fam['tag'] + setup.size_of(q)).lower()}.json").write_text(json.dumps({"draft": prior}))
         def ask(q, choices, default, yes):                 # (the drafting question answered; the others: the default)
             if q.startswith("Context") and self.ctx_pick is not None:

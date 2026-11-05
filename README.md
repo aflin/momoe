@@ -154,8 +154,8 @@ tokens of conversation and 55-60 at 100K, with the same share of experts found i
   [bench/results/2026-11-03-mimo26](bench/results/2026-11-03-mimo26).
 - **GLM-5.3-Flash UD-IQ2_XXS** (a 102 GB file) on the PC: its layers split across the two cards, the CPU computing the
   experts they lack: 4.7 tok/s writing in the server (4.5-5.8 on its own; llama.cpp 4.0-5.4), prompts 82-122 tok/s.
-  Setup picks it on separate cards; the Spark and the Macs keep UD-IQ3_XXS. On the M1 Ultra it is 25-30% faster than
-  UD-IQ3_XXS in the same memory (server 5.3 tok/s). Its MTP drafting pays on neither (only where memory holds nearly
+  Setup picks it on separate cards and on Macs under 100 GB (on the M1 Ultra 25-30% faster than UD-IQ3_XXS in the
+  same memory, server 5.3 tok/s); the Spark keeps UD-IQ3_XXS. Its MTP drafting pays on neither (only where memory holds nearly
   every expert, as on the Spark): [bench/results/2026-11-04-glm53-pc](bench/results/2026-11-04-glm53-pc).
 - **MiniMax M3.1 Flash** (428B-A23B, a 135 GB file, sparse attention): its 9.2 GB of other weights do not fit one
   12 GB card, so on the PC setup splits the layers across two (the 4070 Ti and a 3060, a 16K context) and the CPU

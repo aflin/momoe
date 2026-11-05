@@ -747,7 +747,8 @@ GGML_FAMILIES = {
                          "UD-IQ3_XXS": {"about": "3-bit, smaller and faster (Unsloth Dynamic), measured on the DGX Spark",
                                         "ram_gb": 100},
                          # a PC's size (glm53_size): its 5.9 GiB of other weights leave a 12 GB card room for the rest
-                         "UD-IQ2_XXS": {"about": "2-bit (Unsloth Dynamic), smallest; measured on an RTX 4070 Ti + RTX 3060",
+                         "UD-IQ2_XXS": {"about": "2-bit (Unsloth Dynamic), smallest; measured on an RTX 4070 Ti + RTX 3060 "
+                                                 "and the M1 Ultra (64 GB)",
                                         "ram_gb": 100, "auto": False}},
               # the size setup installs: faster on the Spark than UD-IQ4_XS (server, 400-token chats, --mtp 3: 15.0 / 14.6
               # tok/s greedy / sampled against 11.7 / 10.4), its first 48 greedy tokens = llama.cpp's
@@ -6993,9 +6994,13 @@ def flint_size(ram: float, shared: bool, vram_gb: float) -> str:
 def glm53_size(ram: float, shared: bool, vram_gb: float) -> str:
     """GLM-5.3-Flash's size for this machine.  Separate cards: UD-IQ2_XXS (measured: an RTX 4070 Ti + RTX 3060, 63 GB of
     RAM, the CPU computing the experts the cards lack: 4.5-5.8 tok/s writing; the 4070 Ti alone 3.8; llama.cpp 4.0-5.4).
-    A GPU that shares the system's memory (the Spark, a Mac): the size its RAM picks among the others, as before
-    (UD-IQ3_XXS: measured on the Spark and the M1 Ultra; UD-IQ2_XXS not measured there)."""
-    return "UD-IQ2_XXS" if not shared else ggml_size(GGML_FAMILIES["glm53"], None, ram)
+    A Mac whose memory cannot hold it either (under the family's 100 GB): UD-IQ2_XXS too (measured on the M1 Ultra, 64
+    GB, in the same ~38 GiB of Metal memory: 25-30% faster than UD-IQ3_XXS, 4.8 / 6.1 tok/s against 3.7 / 4.9).  The
+    DGX Spark, and a Mac that holds it: the size its RAM picks among the others (UD-IQ3_XXS, measured on the Spark)."""
+    fam = GGML_FAMILIES["glm53"]
+    if not shared or sys.platform == "darwin" and ram < fam["models"]["UD-IQ3_XXS"]["ram_gb"]:
+        return "UD-IQ2_XXS"
+    return ggml_size(fam, None, ram)
 
 
 def lightning_size(ram: float, shared: bool, vram_gb: float) -> str:

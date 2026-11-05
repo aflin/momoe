@@ -21,13 +21,16 @@ class GlmSize(unittest.TestCase):
     def test_the_default_on_the_spark(self):
         self.assertEqual(setup.ggml_size(GLM, None, 121.7), "UD-IQ3_XXS")
 
-    def test_the_smallest_on_a_64_gb_mac(self):
-        # no size fits 64 GB: the smallest file the Mac's rule offers (UD-IQ3_XXS, 121 GB), not the first listed
-        # (UD-IQ4_XS, 157 GB) nor the PC's UD-IQ2_XXS (not measured on a Mac)
-        self.assertEqual(setup.glm53_size(64, True, 0.0), "UD-IQ3_XXS")
+    def test_the_2_bit_file_on_a_64_gb_mac(self):
+        # measured on the M1 Ultra: 25-30% faster than UD-IQ3_XXS in the same Metal memory
+        with mock.patch.object(setup.sys, "platform", "darwin"):
+            self.assertEqual(setup.glm53_size(64, True, 0.0), "UD-IQ2_XXS")
+            self.assertEqual(setup.glm53_size(128, True, 0.0), "UD-IQ3_XXS")   # (a Mac that holds it, as the Spark)
 
     def test_the_spark_unchanged(self):
-        self.assertEqual(setup.glm53_size(121.7, True, 0.0), "UD-IQ3_XXS")
+        with mock.patch.object(setup.sys, "platform", "linux"):
+            self.assertEqual(setup.glm53_size(121.7, True, 0.0), "UD-IQ3_XXS")
+            self.assertEqual(setup.ggml_size(GLM, None, 64), "UD-IQ3_XXS")   # (RAM alone never picks UD-IQ2_XXS)
 
     def test_separate_cards_take_the_2_bit_file(self):
         self.assertEqual(setup.glm53_size(63, False, 12.0), "UD-IQ2_XXS")
