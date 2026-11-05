@@ -1,4 +1,4 @@
-# 2026-11-04: GLM-5.3-Flash UD-IQ2_XXS on the PC
+# 2026-11-04: GLM-5.3-Flash UD-IQ2_XXS on the PC and the M1 Ultra
 
 GLM-5.3-Flash (Z.ai, 320B-A18B; `glm5-next`: KDA + sparse MLA, 45 blocks, 288 experts, 8 a token, one MTP block),
 Unsloth's UD-IQ2_XXS at a38483c8 (101.8 GB in four files): its experts 86.2 GiB, its other weights 5.9 GiB with
@@ -58,4 +58,38 @@ benchmark (`tools/strata_bench.py`, 3 runs, `server-pc/`):
 | agent session, writing | 4.0 tok/s (3.4-4.3) |
 | agent turn, first token | 84.4 s (50.6-97.7; ~3,000 new tokens each) |
 
-Not measured: UD-IQ2_XXS on the Spark and the Macs (setup keeps UD-IQ3_XXS there), llama.cpp with both cards.
+## The M1 Ultra (64 GB)
+
+The same file (and setup's UD-IQ3_XXS beside it, both at a38483c8, checked by SHA-256), `momoe-metal` from this
+merge, the experts it lacks read from the SSD (`--nocache`). Against llama.cpp's tokens (the PC's references, the same
+file), a 26 GiB pool: code KL 0.0038 / p99 0.0901, 99.0%; medical 0.0085 / 0.1160, 98.0%.
+
+**The two sizes at the same Metal memory** (~38 GiB: UD-IQ2_XXS a 26 GiB pool, 31% of its experts; UD-IQ3_XXS 24
+GiB, 24%), 300 tokens greedy, writing (the second half):
+
+| | code | code, `--mtp 3` | medical | medical, `--mtp 3` |
+| --- | ---: | ---: | ---: | ---: |
+| UD-IQ2_XXS | 4.8 | 4.9 | 6.1 | 5.5 |
+| UD-IQ3_XXS | 3.7 | 3.6 | 4.9 | 4.0 |
+
+At 64K (setup's context): UD-IQ2_XXS 5.4 tok/s from 26 GiB, UD-IQ3_XXS 4.6 from 25. The 2-bit file is 25-30% faster
+here; drafting no longer pays with a pool of a quarter of the experts (October's 4.5 tok/s for UD-IQ3_XXS drafted
+from 29 GiB on an older engine).
+
+**Setup's Mac config changed:** its pool there was 33-34 GiB (mac_pool_gib), about 46-48 GiB of Metal memory with the
+rest at 64K, past the ~40 GiB this M1 Ultra is safe with (a 46 GiB DeepSeek run panicked it); `mac_margin_gib` 8
+brings it to the 25-26 GiB measured here, and `mac_draft_min` 0.9 leaves `--mtp` out unless the pool holds nearly
+every expert. The size it installs on a Mac stays UD-IQ3_XXS.
+
+The server with UD-IQ2_XXS (`--ctx 65536 --pool-gib 26 --nocache`, no drafting): a chat and an OpenAI tool call, then
+its benchmark (`server-m1-ultra/`, 3 runs):
+
+| | median (range) |
+| --- | --- |
+| chat, writing | 5.3 tok/s (4.2-5.8) |
+| chat, first token | 5.4 s (5.2-6.1) |
+| the 4K / 16K prompt, reading | 86 / 95 tok/s (repetitive text: few experts) |
+| agent session, writing | 4.3 tok/s (3.8-4.6) |
+| agent turn, first token | 66.4 s (32.6-71.6; ~3,000 new tokens each) |
+
+Not measured: UD-IQ2_XXS on the Spark, llama.cpp with both cards.

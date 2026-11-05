@@ -761,6 +761,13 @@ GGML_FAMILIES = {
               # against 4.5 without, 76% of the drafts kept: a window of 4 cost 786 ms against 222 for one token)
               "context": 65536, "min_vram_gb": 16,
               "card_env": {"MOMOE_POOL_MIN_TOKENS": "4"}, "card_no_draft": True,
+              # a Mac's pool this much smaller than mac_pool_gib's (33-34 GiB on a 64 GB Mac at 64K: with the other
+              # weights, the staging copy, the KV cache and the compute buffers ~46-48 GiB of Metal memory, past the M1
+              # Ultra's safe ~40): 25-26 there (measured on the M1 Ultra 2026-11-04 at 64K: UD-IQ2_XXS 26 GiB 5.4 tok/s,
+              # UD-IQ3_XXS 25 GiB 4.6); and it drafts only from a pool of nearly every expert (the same day, a 24-31%
+              # pool: --mtp 3 4.9 / 5.5 tok/s against 4.8 / 6.1 without on UD-IQ2_XXS, 3.6 / 4.0 against 3.7 / 4.9 on
+              # UD-IQ3_XXS, code / medical; the Spark, whose memory holds them: 13.3 -> 19.7)
+              "mac_margin_gib": 8, "mac_draft_min": 0.9,
               "mmproj": ("mmproj-BF16.gguf", 1164010176, "82b7adb44411dbb298b1c689567804e5ed0790d80f308ed8b5b6b8ac0527d2ac"),
               "license": "MIT: https://huggingface.co/zai-org/GLM-5.3-Flash"},
     "ornith122": {"title": "Ornith-1.5-122B-A10B", "by": "ornith-ai's agentic-coding model; Unsloth's GGUFs",
@@ -7643,7 +7650,7 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         # --draft off (or the answer), or a family whose own drafting does not pay on separate cards: left out
         i = eargs.index("--mtp")
         del eargs[i:i + 2]
-    if mac and pool is not None and "--mtp" in eargs and pool < 0.15 * w[0] and use_draft is None:
+    if mac and pool is not None and "--mtp" in eargs and pool < fam.get("mac_draft_min", 0.15) * w[0] and use_draft is None:
         # a family's own drafting from a pool this small: every failed draft reads more from the SSD (GLM-5.3-Flash on
         # the M4 Air, a 9% pool: 1.4 tok/s without, 1.0-1.1 with --mtp 3 (and with the 9 GiB pool, Metal out of memory)
         i = eargs.index("--mtp")

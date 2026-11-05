@@ -470,13 +470,17 @@ class MacDraft(unittest.TestCase):
 
     def test_glm_drafts_only_from_a_big_enough_pool(self):
         # GLM-5.3-Flash on the M4 Air (a 9 GiB pool, 9% of its experts): 1.4 tok/s without drafting, 1.0-1.1 with; on
-        # the M1 Ultra (29 GiB, 28%) it keeps --mtp 3
+        # the M1 Ultra (2026-11-04, a 24-25% pool) --mtp 3 was slower too (code / medical 3.6 / 4.0 tok/s against
+        # 3.7 / 4.9), and setup's pool there 8 GiB under mac_pool_gib's (Metal memory under ~40 GiB at 64K)
         w = (102.32, 9.77)
         args, _, _ = self.run_setup("glm53", True, mem=32, weights=w, avail=23.0)
         self.assertIn("--pool-gib", args)
         self.assertNotIn("--mtp", args)
         args, _, _ = self.run_setup("glm53", True, mem=64, weights=w, avail=57.0)
-        self.assertGreaterEqual(int(args[args.index("--pool-gib") + 1]), 16)
+        pool = int(args[args.index("--pool-gib") + 1])
+        self.assertEqual(pool, setup.mac_pool_gib(64, *w, 57.0, self.KV * 65536 / 2**30) - 8)
+        self.assertNotIn("--mtp", args)
+        args, _, _ = self.run_setup("glm53", True, mem=64, weights=w, avail=57.0, draft_opt="on")   # (asked for: kept)
         self.assertEqual(args[args.index("--mtp") + 1], "3")
 
     def test_own_mtp_fetches_nothing(self):
