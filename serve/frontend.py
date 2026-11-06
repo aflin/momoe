@@ -697,12 +697,14 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
             elif kind == "thinking":
                 reasoning.append(block.get("thinking", ""))
             elif kind == "tool_use":
-                calls.append({"function": {"name": block.get("name"), "arguments": tool_arguments(block.get("input"))}})
+                calls.append({"function": {"name": block.get("name"), "arguments": tool_arguments(block.get("input"))},
+                              "_call_id": block.get("id")})
             elif kind == "tool_result":
                 # A tool's image (Claude Code's Read of a picture) reaches the encoder like a user's, as the OpenAI
                 # path's tool messages already do; a text-only result is one string, as before.
                 messages.append({"role": "tool", "content": _parts_of(_check_parts(
-                    block.get("content"), f"messages[{i}].content[{j}].content", TEXT_PARTS + IMAGE_PARTS))})
+                    block.get("content"), f"messages[{i}].content[{j}].content", TEXT_PARTS + IMAGE_PARTS)),
+                                 "_call_id": block.get("tool_use_id")})
         if text or calls or reasoning or parts:
             # an image sent beside tool results stays in this turn instead of being dropped
             out = {"role": m["role"], "content": _parts_of(parts) if _has_image(parts) else "".join(text)}
@@ -711,6 +713,8 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
             if calls:
                 out["tool_calls"] = calls
             messages.append(out)
+    # A client may send results in the order its tools finished (Claude Code does for parallel calls)
+    _order_chat_tool_results(messages)
     tools = [{"name": t["name"], "description": t.get("description", ""), "parameters": t.get("input_schema", {})}
              for t in _tool_list(req.get("tools"), None)] or None
     kwargs = {}
@@ -2239,9 +2243,10 @@ class OutputParser:
             delta = self.glm.feed(delta)
         if self.case is not None:
             delta = self.case.feed(delta)
-        return self._feed(delta)
+        return self._feed_delta(delta)
 
-    def _feed(self, delta: str) -> list[Event]:
+    def _feed_delta(self, delta: str) -> list[Event]:
+        """The text after Momoe's filters (GLM's tags, the tool names' case), into the buffer and the parser."""
         self.buf += delta
         held = self._prefixed() if self.schemas else None
         out = self._feed()
@@ -2557,11 +2562,11 @@ class OutputParser:
             if self.case is not None:
                 rest = self.case.feed(rest) + self.case.flush()
             if rest:
-                out += self._feed(rest)
+                out += self._feed_delta(rest)
         elif self.case is not None:
             rest = self.case.flush()
             if rest:
-                out += self._feed(rest)
+                out += self._feed_delta(rest)
         if self.buf and self.state in ("call", "rcall"):
             self._final = True                  # #4701: a call held after its closing tags (could a file's text go on?) is whole now
             out += self.feed("")
