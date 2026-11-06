@@ -954,6 +954,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
       target_link_libraries(ds4_gg_bench PRIVATE strata_kernels_cpu Threads::Threads)
       target_compile_definitions(ds4_gg_bench PRIVATE STRATA_DSV41_TQ_CPU=1)
     endif()
+    # the router on a non-finite gate input (valid, distinct picks; the same picks as the host's top-k when finite) and its
+    # launch times; needs a GPU, no model; built by name
+    add_executable(ds4_route_guard_test EXCLUDE_FROM_ALL tests/dsv41/ds4_route_guard_test.cu src/dsv41/ds4_kernels.cu)
+    target_include_directories(ds4_route_guard_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
+    target_link_libraries(ds4_route_guard_test PRIVATE strata_dsv41_kernels ${_strata_gpu_runtime_target} Threads::Threads)
     if(STRATA_NATIVE_EXPERTS)
       # the trellis experts (device kernels ds4_tq.cu, CPU lane ds4_tq_cpu.cpp) against a double reference; needs a GPU, no model
       # both test .cpp files launch kernels, so they compile as HIP on the AMD backend and as CUDA on the NVIDIA one
@@ -1819,6 +1824,10 @@ if(STRATA_BUILD_TESTS OR STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(coupled_draft_test src/core/coupled_draft_test.cpp)
   target_include_directories(coupled_draft_test PRIVATE include)
   add_test(NAME coupled_draft_test COMMAND coupled_draft_test)
+  # the penalty-history rows of a batch window, per slot (header-only, CPU)
+  add_executable(slot_history_test src/kernels/slot_history_test.cpp)
+  target_include_directories(slot_history_test PRIVATE include)
+  add_test(NAME slot_history_test COMMAND slot_history_test)
   # probabilistic draft acceptance (STRATA_SPEC_PROB): rejection sampling preserves p - chi-square over 2M trials per case (CPU)
   add_executable(spec_prob_test src/core/spec_prob_test.cpp)
   target_include_directories(spec_prob_test PRIVATE include)

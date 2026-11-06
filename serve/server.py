@@ -226,6 +226,21 @@ KEEPALIVE_S = 10.0          # a held-back tool argument leaves the stream quiet:
 # setup) makes them post /v1/v1/messages; these two paths mean the same as the real ones. Nothing else is aliased.
 V1_V1_ALIASES = {"/v1/v1/messages": "/v1/messages", "/v1/v1/messages/count_tokens": "/v1/messages/count_tokens"}
 CTX_SLACK = 8               # `strata --serve` rejects prompt + max_new + 8 > context: keep the same margin here
+
+
+class ContextOverflow(ValueError):
+    """A request that does not fit the context (a 400 on every API). It keeps the numbers, so /v1/messages can also say it the way Anthropic's API
+    does: a client that decides from the wording (Claude Code compacts on "prompt is too long", and shortens max_tokens on "input length and
+    `max_tokens` exceed context limit") then does what it does for Anthropic's own error (#4838)."""
+
+    def __init__(self, text, *, prompt, context, max_new=None):
+        super().__init__(text)
+        self.prompt, self.context, self.max_new = prompt, context, max_new
+
+    def anthropic_text(self) -> str:
+        if self.max_new is None or self.prompt > self.context - CTX_SLACK - 1:     # the prompt alone leaves no room: the largest one that still leaves a token
+            return f"prompt is too long: {self.prompt} tokens > {self.context - CTX_SLACK - 1} maximum; {self}"
+        return f"input length and `max_tokens` exceed context limit: {self.prompt} + {self.max_new} > {self.context - CTX_SLACK}; {self}"
 # The live tok/s is a rate over a window, not a mean since the first token: a mean reads ~1/elapsed at the first
 # token (the Monitor showed five-digit numbers) and then undershoots for the first second of every answer.
 RATE_WINDOW_S = 2.0
@@ -234,6 +249,10 @@ RATE_MIN_SPAN_S = 0.25      # younger than this there is no rate yet: the mean s
 # server (the engine's main thread waits, untimed, for its next command): the engine is ended and the request fails;
 # the next request starts it again.  The config's "engine_silence_s" sets it (0: wait forever, as before).
 ENGINE_SILENCE_S = 300.0
+# #4271: a streaming client that stops reading (a hung process, a network that dropped) leaves the thread that writes to
+# it blocked once the socket buffers are full - and that thread holds the engine's turn.  A write that makes no progress
+# for this long ends the request as a disconnect (the engine is stopped, the turn given back).  0: no limit, as before.
+STREAM_WRITE_TIMEOUT_S = float(os.environ.get("STRATA_STREAM_WRITE_TIMEOUT_S", "60") or 0)
 # Disk sessions: the longest allowance an engine may announce (`SWAIT <phase> <s>`) for one step that blocks in a
 # single call (a file flush, the host->device transfer); the engine's own bound is the same (session_phase_limit_s).
 SESSION_WAIT_MAX_S = 3600
@@ -680,6 +699,7 @@ class ConvCacheLog:
 
     def __init__(self):
         self.key, self.pos = None, 0
+        self.lock = threading.Lock()                    # polls come from several request / monitor threads at once
         self.reset()
 
     def reset(self):
@@ -687,7 +707,12 @@ class ConvCacheLog:
                       "last_tokens": None, "last_at": None}
 
     def poll(self, path, start) -> dict:
-        """The state after the log's new lines; `start` is where the engine's current run began in it."""
+        """The state after the log's new lines; `start` is where the engine's current run began in it.  One poll at a
+        time: a second one moved `pos` between the size check and the seek and raised ValueError (negative seek)."""
+        with self.lock:
+            return self._poll(path, start)
+
+    def _poll(self, path, start) -> dict:
         if not path or start is None:
             return dict(self.state)
         if self.key != (path, start):                   # another start of the engine: its cache starts empty
@@ -862,6 +887,7 @@ class StrataEngine:
                 self.log.close()
             raise
         contain(self.proc)                               # ends with the server, however it ends (Windows)
+        proc = self.proc                                 # THIS start's process: a close() from another thread may set self.proc to None meanwhile (#4792)
         # the READY read has a timeout (#1317): the lines come from a thread, up to READY, so the rest of the stream
         # stays for _pump (one reader at a time)
         ready_q: queue.Queue = queue.Queue()
@@ -892,21 +918,21 @@ class StrataEngine:
         if self.max_context <= 0:
             if timed_out:                               # still loading, or hung: end it, so the turn is not held for good
                 try:
-                    self.proc.kill()
+                    proc.kill()
                 except OSError:
                     pass
             try:                                        # its pipes and our handle on its log (the log stays)
-                self.proc.wait(timeout=5)
-                self.proc.stdin.close()
-                self.proc.stdout.close()
+                proc.wait(timeout=5)
+                proc.stdin.close()
+                proc.stdout.close()
                 if log:
                     self.log.close()
             except (OSError, subprocess.TimeoutExpired):
                 pass
             if not timed_out and _attempt < START_RETRIES and \
-                    transient_start_failure(log, log_start, time.monotonic() - spawned_at, self.proc.returncode):
+                    transient_start_failure(log, log_start, time.monotonic() - spawned_at, proc.returncode):
                 wait_s = 2.0 * (2 ** _attempt)              # 2, 4, 8 s: the previous process's GPU queues go away
-                exit_words = engine_exit_words(self.proc.returncode)
+                exit_words = engine_exit_words(proc.returncode)
                 if start_log_marks(log, log_start):         # the runtime said so itself (hsa_exception ...)
                     print(f"[momoe] the engine stopped while the GPU runtime was starting (most often right after "
                           f"another engine exited, whose GPU queues were still being released"
@@ -924,7 +950,7 @@ class StrataEngine:
                    "the engine exited before it was ready")
             # EngineDied, not bare RuntimeError: a request waiting on this load must end with a 503
             # through the request path's handler - a RuntimeError there left the turn with no answer (#1527)
-            note = "" if timed_out else start_exit_note(self.proc.returncode)
+            note = "" if timed_out else start_exit_note(proc.returncode)
             tail = start_log_tail(log, log_start)
             lines = [x for x in tail.split("\n")[2:] if x.strip()]
             if tail and lines and all(x.strip().startswith("[momoe]") for x in lines):
@@ -1042,6 +1068,10 @@ class StrataEngine:
             if "issue #29" in line:
                 return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
                         "line: " + line.strip() + " - please report it at github.com/Niko1221/Strata/issues.")
+        if (self.last_err or "").startswith("fatal GPU error"):    # #4350: the engine ended itself; the next request starts it again
+            return ("The graphics card reported a fatal error (" + self.last_err[len("fatal GPU error:"):].strip()[:160] + "), so the engine "
+                    "ended. The next request starts it again. If this repeats, please report it at github.com/Niko1221/Strata/issues "
+                    "with the log.")
         proc = self.proc                                 # None while a restart has not started the next one yet
         rc = proc.poll() if proc is not None else None
         if rc is not None and rc >= 0 and self.last_err:  # its own last words on stdout: they say why
@@ -1325,6 +1355,7 @@ class StrataEngine:
                     self._yielded = (int(f[1]), int(f[2]))
             elif line.startswith("ERR"):
                 self._ctl_erred = True                   # #1059: the engine refused it and is idle: no DONE follows
+                self._raise_if_fatal_gpu(line)
                 raise ValueError(line[4:].strip())
             if line.startswith("DONE") and self._ctl_mode == "solo":
                 self._ctl_result = ("done", None)
@@ -1362,6 +1393,17 @@ class StrataEngine:
         if len(f) >= 5 and isinstance(self.last, dict):
             self.last = {**self.last, "finish": f[3], "decode_ms": float(f[4]),
                          "generated": int(f[2]) if f[2].isdigit() else self.last.get("generated")}
+
+    def _raise_if_fatal_gpu(self, line: str) -> None:
+        """#4350: the engine's ERR line "fatal GPU error: ..." means it is ending (its GPU context is gone).  The request in flight fails
+        as an engine death (a 503 the client can send again), not as a bad request (400), and the engine counts as ended, so the next
+        request starts it again at once instead of finding a closed pipe."""
+        text = line[4:].strip()
+        if not text.startswith("fatal GPU error"):
+            return
+        self.last_err = text
+        self.ended = True
+        raise EngineDied("the GPU reported a fatal error and the engine ended: " + text[len("fatal GPU error:"):].strip()[:200])
 
     def _bdone_after_eos(self, slot: int, wait_s: float = 2.0):
         """#1869: a request in a slot whose consumer left at the stop token has its BDONE right behind it (the engine prints it
@@ -1505,7 +1547,14 @@ class StrataEngine:
                     turn = False                        # the lines: not the engine this request was meant for
                 if not turn:
                     with self.slot_cv:
-                        self.slot_cv.wait(timeout=0.5)
+                        # #4738 (PR #4738's approach): the turn was read, and the lock given up, before this wait: a
+                        # notification sent in between is gone.  Read it again under the lock and only wait when this
+                        # request still has to.
+                        eligible = after_epoch is None or self.ctl_epoch > after_epoch or self.waiting <= 1
+                        if eligible and new and ADMIT_SHORT_FIRST > 0:
+                            eligible = self._admit_next() is entry
+                        if not eligible or not self.alive():
+                            self.slot_cv.wait(timeout=0.5)
                 if cancel.is_set():
                     return False
                 if time.monotonic() - beat >= 10.0:     # a heartbeat every 10 s, as the engine's own wait
@@ -1513,9 +1562,13 @@ class StrataEngine:
                     yield None
         finally:
             with self.slot_cv:
+                previous_waiting = self.waiting
                 self.waiting = max(0, self.waiting - 1)
                 if entry in self.wait_lens:
                     self.wait_lens.remove(entry)
+                if (previous_waiting > 1 and self.waiting <= 1) or (new and ADMIT_SHORT_FIRST > 0):
+                    # a waiter that leaves (cancelled, closed) can make another one the next in turn: tell it
+                    self.slot_cv.notify_all()
         with self.slot_cv:
             self.ctl_epoch += 1
             self.slot_cv.notify_all()
@@ -1880,6 +1933,7 @@ class StrataEngine:
 
     slot_groups = 1         # --batch-groups (set when the engine starts)
     SLOT_PREFIX_MIN = 512   # a held prefix shorter than this is not worth unbalancing the pipeline's groups
+    BRANCH_BOUNDARY_MIN = 8192   # the engine's message-boundary checkpoint (STRATA_CACHE_MESSAGE_BOUNDARY) starts at this many tokens
     TURN_ID = 248045        # <|im_start|>: the engine's default --turn-token (its turn checkpoint sits at the last one)
 
     def pick_slot(self, prompt: list[int]) -> int | None:
@@ -1900,6 +1954,20 @@ class StrataEngine:
                 g0 = b - b % gs
                 return any(self.slot_busy[x] for x in range(b + 1, g0 + gs))
             return min(free, key=lambda b: (not fills_hole(b), self.slot_order.index(b)))
+        agreed = {}
+        def agree(b):
+            # how many leading tokens slot b's held stream and the prompt share (slice compares: streams reach 100k tokens)
+            if b not in agreed:
+                h = self.slot_held[b]
+                lo, hi = 0, min(len(h), len(prompt))
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    if h[:mid] == prompt[:mid]:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                agreed[b] = lo
+            return agreed[b]
         def held_prefix(b):
             # what of `prompt` the slot's cache serves: the slot's whole held stream (the prompt and what it decoded)
             # when this prompt continues it, else its turn checkpoint - the engine takes one at the last <|im_start|> of
@@ -1912,8 +1980,28 @@ class StrataEngine:
                 return 0
             if len(h) < len(prompt) and prompt[:len(h)] == h:
                 return len(h)
-            k = len(h) - 1 - h[::-1].index(self.TURN_ID) if self.TURN_ID in h else 0
-            return k if 0 < k < len(prompt) and prompt[:k] == h[:k] else 0
+            if self.TURN_ID not in h:
+                return 0
+            lo = agree(b)
+            last = len(h) - 1 - h[::-1].index(self.TURN_ID)
+            if 0 < last < len(prompt) and last <= lo:
+                return last
+            # a branch: the same history with the last question replaced agrees with the held stream only up to an
+            # EARLIER message boundary, where the engine may hold a checkpoint of this chat
+            # (STRATA_CACHE_MESSAGE_BOUNDARY, prefixes of at least BRANCH_BOUNDARY_MIN tokens).  The engine finds that
+            # source itself but copies it into the slot chosen here, so another chat's slot would be overwritten (#2518).
+            i = min(lo, len(prompt) - 1, last - 1)
+            if i < self.BRANCH_BOUNDARY_MIN:
+                return 0
+            window = h[self.BRANCH_BOUNDARY_MIN:i + 1]
+            if self.TURN_ID not in window:
+                return 0
+            i -= window[::-1].index(self.TURN_ID)
+            # a boundary every other held conversation shares as well (the system prompt and tools of one client) says
+            # nothing about whose it is: the old order (an empty slot, then the least recent one) keeps all chats
+            if not any(agree(c) < i for c in range(self.batch) if c != b and self.slot_held[c]):
+                return 0
+            return i
         best = max(free, key=held_prefix)
         # without --batch-groups a held prefix of any length is taken, as before
         if held_prefix(best) >= (self.SLOT_PREFIX_MIN if self.slot_groups > 1 else 1):
@@ -2034,6 +2122,8 @@ class StrataEngine:
                     return
                 elif line.startswith("ERR"):
                     done = True
+                    self._raise_if_fatal_gpu(line)
+                    self._swallow_trailing_done(self.lines)  # an engine that ended the request on ERR may still print its DONE
                     raise ValueError(line[4:].strip())
         finally:
             if not done:                                  # the consumer stopped early: stop the engine, drain to DONE
@@ -2063,6 +2153,24 @@ class StrataEngine:
                         break
                     if not self.can_stop:
                         heard = time.monotonic()
+
+    @staticmethod
+    def _swallow_trailing_done(lines_q, wait: float = 0.3) -> None:
+        """A request that ends on `ERR ...` is over, but an engine that also prints the request's `DONE` after it (the DeepSeek
+        engine did, after its NaN stop) would hand that DONE to the NEXT request as its own: 0 tokens at once, and every answer
+        after it one request late.  So a short wait for a trailing DONE (or ERR) of the same request, taken off the queue and
+        dropped, before the request is reported failed and the FIFO released.  An engine that prints only the ERR costs the wait."""
+        end = time.monotonic() + wait
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            try:
+                late = lines_q.get(timeout=left)
+            except queue.Empty:
+                return
+            if late is None or late.startswith(("DONE", "ERR")):
+                return
 
     def _activity(self) -> tuple[float, int] | None:
         """#1317: (CPU seconds, I/O bytes) the engine process has used so far, or None when they cannot be read."""
@@ -2329,6 +2437,13 @@ def vision_start_error(line: str, log=None, code: int | None = None, waited: flo
     return msg
 
 
+#: The picture formats Pillow is allowed to open (JPEG, PNG, WebP, GIF, BMP, TIFF, AVIF; a phone's MPO file is opened by
+#: the JPEG entry).  Pillow picks the decoder from the file's first bytes, never from its name or the client's Content-Type,
+#: so without this list a crafted JPEG 2000 (GHSA-78g4-xqwv-q3g8: OpenJPEG heap overflow in Pillow 11.1.0 to 12.3.0) or any
+#: other rarely used decoder was reachable from a picture request (upstream Strata 8181522f, #4220).
+PICTURE_FORMATS = ("JPEG", "PNG", "GIF", "BMP", "WEBP", "TIFF", "AVIF")
+
+
 class Vision:
     """The resident image encoder: `strata-vision` (llama.cpp mtmd + the mmproj file) reads `ENC <image> <out>`
     lines and writes each image's embeddings; results are cached by the image's hash, so a conversation that
@@ -2526,7 +2641,7 @@ class Vision:
         try:
             import io
             from PIL import Image
-            with Image.open(io.BytesIO(data)) as im:
+            with Image.open(io.BytesIO(data), formats=PICTURE_FORMATS) as im:
                 return im.getexif().get(0x0112, 1) not in (None, 0, 1)
         except Exception:  # noqa: BLE001 - any failure leaves the image as it was sent
             return False
@@ -2546,7 +2661,7 @@ class Vision:
             raise ValueError("this image format needs Pillow (python -m pip install pillow); JPEG, PNG, BMP and "
                              "GIF work without it") from None
         try:
-            im = Image.open(io.BytesIO(data))
+            im = Image.open(io.BytesIO(data), formats=PICTURE_FORMATS)
             im.load()
             from PIL import ImageOps
             im = ImageOps.exif_transpose(im)             # the camera's orientation tag, applied (#1229)
@@ -3720,6 +3835,34 @@ class Service:
         except Exception:
             return None
 
+    FATAL_GPU_MAX = 3            # fatal GPU errors of one engine within FATAL_GPU_WINDOW_S: after that it is not started again
+    FATAL_GPU_WINDOW_S = 600.0
+
+    def _note_fatal_gpu_exit(self, code) -> None:
+        """#4350: the engine ends itself after a fatal GPU error (the device context cannot be used again) and says so in its last
+        ERR line.  The next request starts it again, like any engine death, with one plain line here; the request that was in
+        flight already failed with a 503.  Three such deaths within ten minutes mean a restart will not help (a bad card, driver or
+        model state): then the server stops starting it and says so (503), until the ten minutes have passed."""
+        why = getattr(self.engine, "last_err", None) or ""
+        if "fatal GPU error" not in why:
+            return
+        pid = getattr(getattr(self.engine, "proc", None), "pid", None)
+        seen = self.__dict__.setdefault("_fatal_gpu_pids", set())
+        times = self.__dict__.setdefault("_fatal_gpu_times", [])
+        now = time.time()
+        if pid not in seen:                              # one death counts once, however many requests find it dead
+            seen.add(pid)
+            times.append(now)
+        times[:] = [t for t in times if now - t < self.FATAL_GPU_WINDOW_S]
+        print(f"[strata] the GPU reported a fatal error ({why[len('fatal GPU error:'):].strip()[:160]}); the engine ended "
+              f"(exit code {code}) and is started again; the request that was running failed and can be sent again "
+              f"({len(times)} of {self.FATAL_GPU_MAX} allowed in {self.FATAL_GPU_WINDOW_S / 60:g} minutes)", flush=True)
+        if len(times) >= self.FATAL_GPU_MAX:
+            raise EngineDied(f"the GPU reported a fatal error {len(times)} times in {self.FATAL_GPU_WINDOW_S / 60:g} minutes, so "
+                             "the engine is not started again (the last: " + why[:160] + "). Check the graphics driver, the "
+                             "card's temperature and power, and the log; a request after "
+                             f"{self.FATAL_GPU_WINDOW_S / 60:g} minutes tries again")
+
     def ensure_loaded(self):
         """Start the engine if it is not running (unloaded, or it died - issue #27), after the before_load hook and
         the free-VRAM check.  The caller holds self.fifo."""
@@ -3788,6 +3931,7 @@ class Service:
             print("[momoe] loading the model again (it was unloaded) ...", flush=True)
         else:
             code = self.engine.exit_code() if hasattr(self.engine, "exit_code") else None
+            self._note_fatal_gpu_exit(code)
             print(f"[momoe] the engine had stopped (exit code {code}); starting it again "
                   "(a minute or two) ...", flush=True)
         try:
@@ -4393,18 +4537,19 @@ class Service:
                 # A prompt refused for the context is not kept (#567): the client cannot resend it unchanged.  The
                 # other refusals (engine starting, images) keep it: the same prompt comes back and its encode is reused.
                 self.forget_prompt(encoded_ids)
-                raise ValueError("request exceeds the context window: "
-                                 f"prompt ({len(ids)} tokens) leaves no room to answer in the context "
-                                 f"({ctx}); requests are never truncated")
+                raise ContextOverflow("request exceeds the context window: "
+                                      f"prompt ({len(ids)} tokens) leaves no room to answer in the context "
+                                      f"({ctx}); requests are never truncated", prompt=len(ids), context=ctx)
             max_new = room
         elif max_new > room:
             if not self.fit_max_tokens:
                 self.forget_prompt(encoded_ids)
-                raise ValueError("request exceeds the context window: "
-                                 f"prompt ({len(ids)} tokens) + max tokens ({max_new}) exceeds the context "
-                                 f"({ctx}); requests are never truncated. Send a smaller "
-                                 f"max_tokens (at most {max(0, room)} here), or add \"fit_max_tokens\": true to the "
-                                 "model's strata-<model>.json to shorten it to the room left (#545)")
+                raise ContextOverflow("request exceeds the context window: "
+                                      f"prompt ({len(ids)} tokens) + max tokens ({max_new}) exceeds the context "
+                                      f"({ctx}); requests are never truncated. Send a smaller "
+                                      f"max_tokens (at most {max(0, room)} here), or add \"fit_max_tokens\": true to the "
+                                      "model's strata-<model>.json to shorten it to the room left (#545)",
+                                      prompt=len(ids), context=ctx, max_new=max_new)
             print(f"[momoe] max_tokens {max_new} shortened to {max(1, room)}: the prompt ({len(ids)} tokens) leaves that much "
                   f"of the context ({ctx}); \"fit_max_tokens\": false answers 400 instead", flush=True)
             max_new = max(1, room)          # a shorter completion beats a 400 (the default)
@@ -6333,6 +6478,11 @@ def make_handler(svc: Service):
             self.send_header("X-Accel-Buffering", "no")   # nginx and similar proxies pass each event at once
             self._cors()
             self.end_headers()
+            if STREAM_WRITE_TIMEOUT_S > 0:
+                try:
+                    self.connection.settimeout(STREAM_WRITE_TIMEOUT_S)     # (#4271) a stuck write ends as OSError: disconnected
+                except OSError:
+                    pass
 
         def _capture(self, items, api):
             """Retain bounded input/output for the monitor without changing the API response (the items as they
@@ -6647,7 +6797,10 @@ def make_handler(svc: Service):
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431 (#1999: before prepare, which can take long)
-            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req, cancel=cancel)
+            try:
+                ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req, cancel=cancel)
+            except ContextOverflow as e:
+                raise ValueError(e.anthropic_text()) from None       # #4838: Anthropic's own wording first, Strata's sentence after it
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
             events = anthropic_events(svc, req, ids, thinking, tools, max_new, cancel, force=force)
             events = self._capture(events, "anthropic")
@@ -7295,28 +7448,45 @@ def default_model_name(cfg: dict) -> str:
     return cfg.get("model_name") or FAMILY_MODEL_NAMES.get(cfg.get("arch") or "qwen4exp", "qwen3.8-flash-next")
 
 
+def _history_call_names(req) -> list:
+    """The tool names a request's own conversation called, in order, on any of the three routes: Chat Completions (an assistant
+    message's tool_calls), Anthropic (an assistant message's tool_use blocks) and Responses (function_call / custom_tool_call
+    input items, a namespace in front as `namespace.name`)."""
+    names = []
+    for message in req.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        for call in message.get("tool_calls") or []:
+            names.append((call.get("function") or {}).get("name") if isinstance(call, dict) else None)
+        content = message.get("content")
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                names.append(block.get("name"))
+    items = req.get("input")
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict) and item.get("type") in ("function_call", "custom_tool_call"):
+            name = item.get("name")
+            if isinstance(name, str) and name and isinstance(item.get("namespace"), str) and item["namespace"]:
+                name = f"{item['namespace']}.{name}"
+            names.append(name)
+    return names
+
+
 def with_history_tools(tools, req) -> list:
     """#4663: an agent's tool set changes between turns (deferred tools, MCP servers, a compacted history), and the model calls a tool it used
     earlier in this conversation that this turn's `tools` no longer lists.  That call came back as raw text with finish_reason "stop", and the
-    client took it for prose and stopped.  A name the conversation's own assistant messages called is a tool the client has, so it counts as
-    declared (the call comes back as a tool call; the client says what it does with it).  Nothing is added when the request declared no
-    tools at all, or for a name that is already declared."""
+    client took it for prose and stopped.  A name the conversation's own assistant turns called is a tool the client has, so it counts as
+    declared (the call comes back as a tool call; the client says what it does with it) - on Chat Completions, Anthropic and Responses.
+    Nothing is added when the request declared no tools at all, or for a name that is already declared."""
     if not tools or not isinstance(req, dict):
         return tools
     try:
         have = {t.get("name") for t in tools if isinstance(t, dict)}
         extra = []
-        for message in req.get("messages") or []:
-            if not isinstance(message, dict) or message.get("role") != "assistant":
-                continue
-            calls = [(call.get("function") or {}).get("name") for call in message.get("tool_calls") or [] if isinstance(call, dict)]
-            content = message.get("content")      # (MoMoE: the Anthropic API's history - Claude Code - has tool_use blocks instead)
-            if isinstance(content, list):
-                calls += [b.get("name") for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
-            for name in calls:
-                if isinstance(name, str) and name and name not in have:
-                    have.add(name)
-                    extra.append({"name": name, "parameters": {"type": "object", "properties": {}}})
+        for name in _history_call_names(req):
+            if isinstance(name, str) and name and name not in have:
+                have.add(name)
+                extra.append({"name": name, "parameters": {"type": "object", "properties": {}}})
         return [*tools, *extra] if extra else tools
     except Exception:
         return tools
