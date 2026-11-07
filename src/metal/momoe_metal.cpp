@@ -557,7 +557,7 @@ struct CpuExperts {
     int n_uses = 0;
     double busy_s = 0;
     uint64_t experts = 0;
-    double t_launch = 0, prof[5] = {0, 0, 0, 0, 0};          // MOMOE_CPU_PROF: wake, up, to down's format, down, the
+    double t_launch = 0, prof_read = 0, prof[5] = {0, 0, 0, 0, 0};   // (prof_read: MOMOE_CPU_PREREAD's pre-read)          // MOMOE_CPU_PROF: wake, up, to down's format, down, the
     std::atomic<int> started{0};                             // last thread's finish (thread 0's view)
 
     void start(int n) {
@@ -597,6 +597,32 @@ struct CpuExperts {
         double p0 = 0;
         if (pr && started.fetch_add(1) == n_threads - 1) prof[0] += now_s() - t_launch;   // the last one awake
         if (pr && tid == 0) p0 = now_s();
+        static const bool preread = getenv("MOMOE_CPU_PREREAD") != nullptr;
+        if (preread) {                                       // (a test) every missed expert's pages touched first, by all the
+            const size_t CH = (size_t) 256 << 10;            // threads, 256 KiB pieces: the reads in parallel, timed apart
+            const char * part[3] = {gate, up, down};
+            const size_t bytes[3] = {gate_bytes, up_bytes, down_bytes};
+            size_t per = 0;
+            for (int q = 0; q < 3; ++q) per += part[q] ? (bytes[q] + CH - 1) / CH : 0;
+            const int nt = (int) (miss.size() * per);
+            for (int u; (u = next.fetch_add(1)) < nt;) {
+                int k = (int) (u % per);
+                int q = 0;
+                for (; q < 3; ++q) {
+                    if (!part[q]) continue;
+                    const int n = (int) ((bytes[q] + CH - 1) / CH);
+                    if (k < n) break;
+                    k -= n;
+                }
+                const char * b = part[q] + (size_t) miss[u / per].x * bytes[q] + (size_t) k * CH;
+                const size_t len = std::min(CH, bytes[q] - (size_t) k * CH);
+                volatile char sink = 0;
+                for (size_t i = 0; i < len; i += 4096) sink += b[i];
+                (void) sink;
+            }
+            barrier();
+            if (pr && tid == 0) { const double t = now_s(); prof_read += t - p0; p0 = t; }
+        }
         const auto * tu = ggml_get_type_traits_cpu(up_type), * td = ggml_get_type_traits_cpu(down_type);
         const int RB = 32;                                   // rows per work unit
         // up: h = relu(up . act)^2 (Nemotron) or silu(gate . act) * (up . act) (qwen35moe), every (expert, row block)
@@ -8311,8 +8337,8 @@ int main(int argc, char ** argv) {
     if (e.cpu_x.n_threads && getenv("MOMOE_CPU_PROF")) {
         const auto & C = e.cpu_x;
         fprintf(stderr, "momoe-cuda: CPU experts, s in all: all awake %.2f, up %.2f, to down's format %.2f, down %.2f "
-                "(thread 0), launch to done %.2f; %llu experts\n", C.prof[0], C.prof[1], C.prof[2], C.prof[3], C.prof[4],
-                (unsigned long long) C.experts);
+                "(thread 0), launch to done %.2f; %llu experts; the pre-read %.2f\n", C.prof[0], C.prof[1], C.prof[2], C.prof[3], C.prof[4],
+                (unsigned long long) C.experts, C.prof_read);
     }
 #endif
     if (e.cpu_x.n_threads) e.cpu_x.stop();
