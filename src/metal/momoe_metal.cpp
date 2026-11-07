@@ -557,7 +557,7 @@ struct CpuExperts {
     int n_uses = 0;
     double busy_s = 0;
     uint64_t experts = 0;
-    double t_launch = 0, prof_read = 0, prof[5] = {0, 0, 0, 0, 0};   // (prof_read: MOMOE_CPU_PREREAD's pre-read)          // MOMOE_CPU_PROF: wake, up, to down's format, down, the
+    double t_launch = 0, prof_read = 0, prof[5] = {0, 0, 0, 0, 0};   // (prof_read: the pre-read of the missed experts)          // MOMOE_CPU_PROF: wake, up, to down's format, down, the
     std::atomic<int> started{0};                             // last thread's finish (thread 0's view)
 
     void start(int n) {
@@ -597,9 +597,15 @@ struct CpuExperts {
         double p0 = 0;
         if (pr && started.fetch_add(1) == n_threads - 1) prof[0] += now_s() - t_launch;   // the last one awake
         if (pr && tid == 0) p0 = now_s();
-        static const bool preread = getenv("MOMOE_CPU_PREREAD") != nullptr;
-        if (preread) {                                       // (a test) every missed expert's pages touched first, by all the
-            const size_t CH = (size_t) 256 << 10;            // threads, 256 KiB pieces: the reads in parallel, timed apart
+        // every missed expert's pages touched first, by all the threads, 256 KiB pieces: what is not in the page cache read
+        // in parallel, not by page faults inside the dot products one piece at a time (measured on the RTX 4070 Ti
+        // + Ryzen 9 5950X, 63 GB of RAM, the files on NVMe, writing: GLM-5.3 UD-IQ2_XXS on two cards 4.8 -> 6.0-6.6
+        // tok/s, the compute 33 -> 12 s of 199 tokens; MiMo-V2.6 BPW2.5 6.2-6.3 -> 7.0-7.3; MiniMax M3.1 UD-IQ2_XXS 2.9
+        // -> 3.4-3.5; Ling-3.0-flash IQ3_XXS, in RAM, 0.3-0.8 s a run, 37 -> 37-42, its cold start 17 -> 37).
+        // MOMOE_NO_PREREAD=1: the faults, as before
+        static const bool preread = getenv("MOMOE_NO_PREREAD") == nullptr;
+        if (preread) {
+            const size_t CH = (size_t) 256 << 10;
             const char * part[3] = {gate, up, down};
             const size_t bytes[3] = {gate_bytes, up_bytes, down_bytes};
             size_t per = 0;
@@ -711,25 +717,6 @@ struct CpuExperts {
 
 static const int HYB_MAX_T = 16;                             // --hybrid: graphs of up to this many tokens (decode)
 
-// MOMOE_CPU_WILLNEED=1 (a test): before a layer's CPU job, every missed expert's gate, up and down rows in the mapping
-// asked for at once (madvise MADV_WILLNEED: the kernel reads what is not in the page cache in parallel), instead of the
-// workers' page faults reading it one 4 KiB-and-readahead piece at a time while they compute
-static void cpu_willneed(const CpuExperts & C) {
-    static const bool on = getenv("MOMOE_CPU_WILLNEED") != nullptr;
-    if (!on) return;
-    static const size_t pg = (size_t) sysconf(_SC_PAGESIZE);
-    auto ask = [&](const char * base, size_t bytes, int x) {
-        if (!base || !bytes) return;
-        const uintptr_t a = (uintptr_t) (base + (size_t) x * bytes), b = a + bytes;
-        const uintptr_t a0 = a & ~(uintptr_t) (pg - 1);
-        madvise((void *) a0, b - a0, MADV_WILLNEED);
-    };
-    for (const auto & M : C.miss) {
-        ask(C.gate, C.gate_bytes, M.x);
-        ask(C.up, C.up_bytes, M.x);
-        ask(C.down, C.down_bytes, M.x);
-    }
-}
 
 // the CPU's experts: a layer's parts in the mapped file (gate, up, down; their formats and rows)
 static void cpu_parts(const Model & m, const Layer & L, CpuExperts & C) {
@@ -3094,7 +3081,6 @@ static void mb_layer(Engine & e, int il, int T) {
     C.T = T;
     C.n_in = n_in;
     cpu_parts(m, L, C);
-    cpu_willneed(C);
     C.outp = B.out;
     C.launch(B.x);
     C.wait();
