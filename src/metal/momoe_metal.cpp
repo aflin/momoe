@@ -685,6 +685,26 @@ struct CpuExperts {
 
 static const int HYB_MAX_T = 16;                             // --hybrid: graphs of up to this many tokens (decode)
 
+// MOMOE_CPU_WILLNEED=1 (a test): before a layer's CPU job, every missed expert's gate, up and down rows in the mapping
+// asked for at once (madvise MADV_WILLNEED: the kernel reads what is not in the page cache in parallel), instead of the
+// workers' page faults reading it one 4 KiB-and-readahead piece at a time while they compute
+static void cpu_willneed(const CpuExperts & C) {
+    static const bool on = getenv("MOMOE_CPU_WILLNEED") != nullptr;
+    if (!on) return;
+    static const size_t pg = (size_t) sysconf(_SC_PAGESIZE);
+    auto ask = [&](const char * base, size_t bytes, int x) {
+        if (!base || !bytes) return;
+        const uintptr_t a = (uintptr_t) (base + (size_t) x * bytes), b = a + bytes;
+        const uintptr_t a0 = a & ~(uintptr_t) (pg - 1);
+        madvise((void *) a0, b - a0, MADV_WILLNEED);
+    };
+    for (const auto & M : C.miss) {
+        ask(C.gate, C.gate_bytes, M.x);
+        ask(C.up, C.up_bytes, M.x);
+        ask(C.down, C.down_bytes, M.x);
+    }
+}
+
 // the CPU's experts: a layer's parts in the mapped file (gate, up, down; their formats and rows)
 static void cpu_parts(const Model & m, const Layer & L, CpuExperts & C) {
     C.n_ff = (int) L.exp_ne[1][1];
@@ -3048,6 +3068,7 @@ static void mb_layer(Engine & e, int il, int T) {
     C.T = T;
     C.n_in = n_in;
     cpu_parts(m, L, C);
+    cpu_willneed(C);
     C.outp = B.out;
     C.launch(B.x);
     C.wait();
