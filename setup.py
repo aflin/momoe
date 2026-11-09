@@ -1507,7 +1507,14 @@ def cpu_info():
     else:
         try:
             txt = open("/proc/cpuinfo").read()
-            flags = set(re.search(r"^flags\s*:\s*(.*)$", txt, re.M).group(1).split())
+            mflags = re.search(r"^flags\s*:\s*(.*)$", txt, re.M)
+            if mflags is None:
+                # aarch64 lists Features, not the x86 flags line, and no "model name": lscpu names the cores (a DGX Spark:
+                # Cortex-X925 + Cortex-A725). No AVX of any kind; the arm64 engine needs none.
+                cores = re.findall(r"^\s*Model name:\s*(.+)$", out(["lscpu"]), re.M)
+                name = " + ".join(dict.fromkeys(c.strip() for c in cores)) or (platform.processor() or "arm64 CPU")
+                return name, False, False
+            flags = set(mflags.group(1).split())
             avx2 = "avx2" in flags
             avx512 = {"avx512f", "avx512bw", "avx512vl", "avx512_vnni", "avx512vbmi"} <= flags
             m = re.search(r"^model name\s*:\s*(.*)$", txt, re.M)
@@ -1538,6 +1545,11 @@ def _cpuid_floor() -> str:
         return ""
 
 
+def is_arm64() -> bool:
+    """An ARM64 CPU (DGX Spark / GB10, Grace): there is no AVX here."""
+    return platform.machine().lower() in ("aarch64", "arm64")
+
+
 def cpu_floor(avx2: bool) -> str:
     """The experimental older-CPU build this PC needs (#394 #595 #623): "" with AVX2 (the normal engine), "avx" (Sandy /
     Ivy Bridge, AMD Bulldozer), "none" (SSE4.2 + POPCNT: Nehalem, Westmere), or "unsupported".  STRATA_ISA_FLOOR=avx|
@@ -1545,6 +1557,8 @@ def cpu_floor(avx2: bool) -> str:
     forced = os.environ.get("STRATA_ISA_FLOOR", "").strip().lower()
     if forced in ("avx", "none"):
         return forced
+    if is_arm64():
+        return ""
     if avx2:
         return ""
     if WIN:
@@ -8704,7 +8718,7 @@ def build_release() -> int:
     gpu = {"index": 0, "name": "release", "arch": str(archs[-1]), "archs": archs, "vram_gb": 0.0}
     # arm64 (the DGX Spark, GH200, GB200): every family runs on momoe-cuda there (the GPU shares the memory), so Strata's
     # engine and DeepSeek's are left out, and the ggml engine's image encoder is the CUDA one
-    arm = platform.machine().lower() in ("aarch64", "arm64")
+    arm = is_arm64()
     if not arm:
         llama = get_llama_cpp()
         step(1, "the engine (momoe) and its image encoder")
@@ -9121,7 +9135,7 @@ def main() -> int:
     pf = page_file_gb()
     if pf is not None and pf < 4:
         warn(page_file_advice(pf, page_file_setting()))
-    ok(f"CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
+    ok(f"CPU: {cpu} ({'ARM64' if is_arm64() else 'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
     link = None if hip else pcie_link(int(gpu.get("index", 0)))
     if link is not None:
         line, problem = pcie_lines(link)
@@ -9131,7 +9145,13 @@ def main() -> int:
     floor = cpu_floor(avx2)
     if floor == "unsupported":
         fail("this CPU has neither AVX2 nor SSE4.2; Momoe needs at least SSE4.2 (Intel Nehalem, 2008, or newer)")
-    if not avx2:
+    if is_arm64():
+        # (upstream #3622) Strata's engine on ARM64 with a GPU of its own (a GPU that shares the memory, as the DGX Spark's,
+        # runs momoe-cuda instead).  A warning, not a stop.
+        warn("ARM64 CPU: the CPU's share of the experts runs on ggml-cpu's NEON kernels. The Q2_0 and Gyro packs need the "
+             "x86 kernels and do not run on this CPU. Momoe has not run this engine on ARM64 (upstream Strata measured it "
+             "on a DGX Spark)")
+    elif not avx2:
         # #394 #595 #623: the engine is AVX2 by default; an older CPU gets one for its ISA, whose CPU experts run on
         # ggml-cpu's kernels for this CPU.  Experimental: measured only on newer CPUs with the older path forced, and by
         # users on a few Xeons.  A warning, not a stop.
