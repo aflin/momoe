@@ -28,11 +28,13 @@ The source tree at HEAD (only what is committed), with:
 | `engine/` | `momoe` (Strata's engine), `libstrata_kq.so`, `momoe-vision` (its GPU image encoder) | the families on upstream's own path (Flash-Next, Qwen3.6, Ornith, ...) |
 | `engine-dsv41/` | `strata-dsv41` | DeepSeek-V4.1-Flash |
 | `build-cuda/` | `momoe-cuda` | the ggml families (GLM, MiniMax, MiMo, Ling, Gemma, ...) |
-| `build-vision-momoe/bin/` | `momoe-vision` (CPU image encoder) | pictures on the ggml families |
+| `build-vision-momoe/bin/` | `momoe-vision` (CPU image encoder, x86_64) | pictures on the ggml families |
 | `build-vision-momoe-cuda/bin/` | `momoe-vision` (CUDA image encoder, aarch64 only) | pictures where the GPU shares the memory |
 
-On aarch64 every family runs on momoe-cuda (on the DGX Spark the GPU shares the memory), so that
-tar.gz holds `build-cuda/` and the CUDA image encoder only.
+Both builds hold every engine. On aarch64 the ggml image encoder is the CUDA one: a GPU that shares
+the memory (the DGX Spark) runs every family on momoe-cuda. Strata's engine and DeepSeek's are for an
+aarch64 machine whose GPU has its own memory (GH200, a PCIe card). On the GB10, Strata's engine ran
+Ornith-1.5 correctly and DeepSeek's started; neither was run on such a machine.
 
 Each folder's `BUILD.json` is the stamp setup.py writes when it compiles an engine itself, marked
 `"release": true`. setup.py finds the engines built for this source and does not compile them, so a PC

@@ -8716,15 +8716,14 @@ def build_release() -> int:
         return 0
     archs = sorted(int(x) for x in os.environ["MOMOE_RELEASE_ARCHS"].split(";"))
     gpu = {"index": 0, "name": "release", "arch": str(archs[-1]), "archs": archs, "vram_gb": 0.0}
-    # arm64 (the DGX Spark, GH200, GB200): every family runs on momoe-cuda there (the GPU shares the memory), so Strata's
-    # engine and DeepSeek's are left out, and the ggml engine's image encoder is the CUDA one
+    # arm64: a GPU that shares the memory (the DGX Spark) runs every family on momoe-cuda, whose image encoder is then the
+    # CUDA one; Strata's engine is for an arm64 machine whose GPU has its own memory (GH200, a PCIe card)
     arm = is_arm64()
-    if not arm:
-        llama = get_llama_cpp()
-        step(1, "the engine (momoe) and its image encoder")
-        build_engine(gpu, "gpu", True, llama, toolkit=13)
-        step(2, "DeepSeek's engine (strata-dsv41)")
-        build_dsv41_engine(gpu, True, llama)
+    llama = get_llama_cpp()
+    step(1, "the engine (momoe) and its image encoder")
+    build_engine(gpu, "gpu", True, llama, toolkit=13)
+    step(2, "DeepSeek's engine (strata-dsv41)")
+    build_dsv41_engine(gpu, True, llama)
     step(3, "the ggml engine (momoe-cuda)")
     nvcc, _ = find_nvcc()
     cuda_archs = ";".join(map(str, archs))

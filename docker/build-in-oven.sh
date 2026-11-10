@@ -3,8 +3,8 @@
 #
 #   build    setup.py --build-release in oven/<name>/momoe (the committed tree build.sh exported there): the Strata
 #            engine and its image encoder (engine/), DeepSeek's (engine-dsv41/), momoe-cuda (build-cuda/) and its image
-#            encoder (build-vision-momoe/), for every card in MOMOE_RELEASE_ARCHS and any AVX2 CPU; on arm64 momoe-cuda
-#            and its CUDA image encoder (build-vision-momoe-cuda/) only; then RELEASE.json
+#            encoder (build-vision-momoe/; on arm64 the CUDA one, build-vision-momoe-cuda/), for every card in
+#            MOMOE_RELEASE_ARCHS and any AVX2 CPU (arm64: armv8.2-a); then RELEASE.json
 #   package  that tree, without the build folders, -> dist/momoe-<version>-<name>.tar.gz (+ .sha256)
 set -euo pipefail
 
@@ -43,7 +43,7 @@ EOF
     # the source tree without the build folders and downloads; the engines and their BUILD.json stamps go in below
     rsync -a --exclude '/build*/' --exclude '/engine/' --exclude '/engine-dsv41/' --exclude '/third_party/llama.cpp*' \
         "$TREE/" "$pkg/$top/"
-    # each engine with its BUILD.json stamp, where it was built (arm64 has momoe-cuda and the CUDA image encoder only)
+    # each engine with its BUILD.json stamp, where it was built
     for f in engine/BUILD.json engine/momoe engine/momoe-vision engine/libstrata_kq.so \
              engine-dsv41/BUILD.json engine-dsv41/strata-dsv41 build-cuda/BUILD.json build-cuda/momoe-cuda \
              build-vision-momoe/BUILD.json build-vision-momoe/bin/momoe-vision \
