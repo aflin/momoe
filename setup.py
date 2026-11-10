@@ -1545,6 +1545,14 @@ def _cpuid_floor() -> str:
         return ""
 
 
+def mac_major() -> int:
+    """The macOS major version (11 for 11.7.10); 0 when it cannot be read or this is no Mac."""
+    try:
+        return int(platform.mac_ver()[0].split(".")[0])
+    except (ValueError, IndexError):
+        return 0
+
+
 def is_arm64() -> bool:
     """An ARM64 CPU (DGX Spark / GB10, Grace): there is no AVX here."""
     return platform.machine().lower() in ("aarch64", "arm64")
@@ -7358,6 +7366,13 @@ def momoe_vision(a, family: str, fam: dict, folder: Path, model: Path, cuda: tup
             warn(f"--vision: {fam['title']} has no image encoder: text only")
         return None
     if asked in ("no", "none"):
+        return None
+    if mac and 0 < mac_major() < 14:
+        # Metal has no BF16 before macOS 14 (MSL 3.1): the GPU encoder stopped at its first picture (kernel_mul_mm_bf16_f32
+        # missing), and on the CPU one picture took over 300 s (an 8 GB M1, macOS 11.7).  Text only, saying why.
+        msg = (f"Pictures: off on this Mac (macOS {platform.mac_ver()[0]}): they need macOS 14 or newer. Before it the "
+               "Mac's GPU cannot run the image encoder's BF16 math, and on the CPU a picture takes minutes. Text works as usual.")
+        warn(msg) if asked is not None else say("  " + msg)
         return None
     if asked is None:
         say()

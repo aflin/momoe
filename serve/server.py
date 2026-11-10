@@ -2444,6 +2444,29 @@ def vision_start_error(line: str, log=None, code: int | None = None, waited: flo
 PICTURE_FORMATS = ("JPEG", "PNG", "GIF", "BMP", "WEBP", "TIFF", "AVIF")
 
 
+VISION_OFF = ""   # why the config's image encoder is off (it did not start): a picture request is refused with it
+
+
+def start_vision(vcfg: dict, log, env, lazy: bool):
+    """The config's image encoder (Vision), or None when it does not start: the model then starts for text only and a
+    picture request is refused with the reason (VISION_OFF).  It used to end the whole server: on a Mac before macOS 14
+    the GPU encoder stops at its first picture (Metal has no BF16 there), and no model started at all."""
+    global VISION_OFF
+    try:
+        return Vision(vcfg, log=log, env=env, lazy=lazy)
+    except (RuntimeError, OSError) as e:
+        VISION_OFF = str(e) if "did not start" in str(e) else f"the image encoder did not start: {e}"
+        print(f"[momoe] {VISION_OFF}", flush=True)
+        print("[momoe] the model starts for text only; requests with pictures are refused", flush=True)
+        return None
+
+
+def vision_off_reason() -> str:
+    """Why this server reads no pictures, for the requests that have them."""
+    return f"pictures are off: {VISION_OFF}" if VISION_OFF else \
+        "this server was started without the vision encoder (run setup again and choose 'vision'), so it cannot read images"
+
+
 class Vision:
     """The resident image encoder: `strata-vision` (llama.cpp mtmd + the mmproj file) reads `ENC <image> <out>`
     lines and writes each image's embeddings; results are cached by the image's hash, so a conversation that
@@ -4416,7 +4439,8 @@ class Service:
             for n, item in enumerate(content):
                 if not isinstance(item, dict) or item.get("type") != "image":
                     continue
-                why = "this server has no image encoder" if self.vision is None else None
+                why = ("this server has no image encoder" + (f" ({VISION_OFF})" if VISION_OFF else "")) \
+                    if self.vision is None else None
                 if why is None:
                     src = item["source"]
                     try:
@@ -4481,8 +4505,7 @@ class Service:
         images = images_of(messages)
         if images:
             if self.vision is None:
-                raise ValueError("this server was started without the vision encoder (run setup again and choose "
-                                 "'vision'), so it cannot read images")
+                raise ValueError(vision_off_reason())
             marker, pad, start, wrap = self._image_marks()
             # An image URL is downloaded first, outside the FIFO: under it, a slow server held every other request
             # for as long as urlopen waited.
@@ -7622,8 +7645,8 @@ def main() -> int:
                 print('[momoe] the vision section\'s "elastic" needs "vram_elastic": true (the expert cache gives the '
                       "encoder its VRAM): the encoder starts with the model instead", flush=True)
                 vcfg["elastic"] = False
-            vision = Vision(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
-                            env=vision_env(cfg, env), lazy=lazy)
+            vision = start_vision(vcfg, open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
+                                  vision_env(cfg, env), lazy)
         print("model unloaded; the first request loads it ..." if lazy else
               "loading the model (the first start takes a minute or two) ...", flush=True)
         warn_budget_over_ram(engine_args(cfg) if "args" in cfg else [])      # #1080
