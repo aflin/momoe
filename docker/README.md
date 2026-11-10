@@ -96,6 +96,11 @@ macOS compiles their Metal shaders when they start. Each deployment target has i
 and file name (`macos12-arm64`), because CMake keeps a folder's first target. It needs Xcode's command
 line tools, git, rsync and a Python 3.10+; cmake and ninja go into the work folder's venv.
 
+Pictures need macOS 14 or newer: Metal has no BF16 before it, and the image encoder's files are BF16.
+On macOS 11 (savannah) the GPU encoder stopped at its first picture, and the CPU one had not finished a picture
+after 300 s. On older macOS, setup leaves pictures off and says why, and the server starts for text if an
+encoder does not start. Text runs on macOS 11 too: the macos12 tar.gz ran Flint on savannah at 8.5-9 tok/s.
+
 macOS 12 is the floor. Built for 11.0, the image encoder's Metal code (llama.cpp's ggml-metal)
 calls `waitUntilSignaledValue:timeoutMS:`, which is macOS 12+. momoe-metal itself has nothing newer
 than macOS 11. The encoder's ggml BLAS backend (Accelerate's new `cblas_sgemm`, macOS 13.3+) is
