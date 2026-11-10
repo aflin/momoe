@@ -4,6 +4,11 @@
 # Python (with venv) is installed through apt/dnf if it is missing (asks for sudo).
 # NixOS (or STRATA_UV=1) with uv installed: uv makes the project venv; every other Linux uses the standard venv.
 cd "$(dirname "$0")" || exit 1
+# The macOS release (docker/build-macos.sh), unpacked from a browser's download: macOS marks every file as downloaded and
+# would stop the engines when they start (they are not signed with a developer ID).  The folder's own files lose the mark.
+if [ "$(uname -s)" = Darwin ] && [ -f RELEASE.json ]; then
+  xattr -dr com.apple.quarantine . 2>/dev/null || true
+fi
 # Python 3.10+ that can make a venv WITH pip: Debian/Ubuntu ship `venv` without `ensurepip` (that is the separate
 # python3-venv package), and a venv made without it has no pip
 ok_py() { "$1" -c 'import sys, venv, ensurepip; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; }

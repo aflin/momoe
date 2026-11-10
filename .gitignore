@@ -76,3 +76,7 @@ dist-hip/
 
 # tools/task_check.py datasets (downloaded, see its docstring)
 data/task_check/
+
+# docker/: the release oven's build tree (its tar.gz files go to /dist/)
+/oven/
+/.cache/

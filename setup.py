@@ -208,6 +208,14 @@ CUDA13_MIN_ARCH = 75                   # the oldest compute capability CUDA 13 c
 # driver here.
 CUDA12_MIN_DRIVER = 528 if WIN else 525
 ENGINE12_DIR = "engine-cuda12"
+# The Linux release (docker/: a tar.gz with the engines compiled in the oven; RELEASE_FILE names it).  The CUDA 13 runtime
+# they load is this PC's own (ldconfig, or a CUDA 13 toolkit), else NVIDIA's pip packages into .venv (the tar.gz holds no
+# NVIDIA file), else setup says what to install: release_cuda_dirs.  STRATA_RELEASE_BUILD=1: setup's builds are the
+# release's (any AVX2 CPU, every card in MOMOE_RELEASE_ARCHS), run by docker/build-in-oven.sh through --build-release.
+RELEASE_FILE = "RELEASE.json"
+CUDA_WHEELS = ["nvidia-cublas==13.1.1.3", "nvidia-cuda-runtime==13.0.96"]   # the oven's own (cuda-toolkit-13-0)
+CUDA_RUNTIME_LIBS = ("libcudart.so.13", "libcublas.so.13", "libcublasLt.so.13")
+RELEASE_BUILD = os.environ.get("STRATA_RELEASE_BUILD") == "1"
 MIN_ENGINE = (0, 1, 45)                # versions compare all numbers; v0.1.45: Qwen3.6 parallel requests and pictures, fixes #2346 #2372 #2396; v0.1.44.1: CPUs without AVX2 start again (#2324: an illegal instruction before main in the NVFP4 CPU rows), the CUDA 12.0/12.1 toolkits build (#2322), a crashed engine start is named instead of retried as a GPU runtime start, Mac M2 (#2323); v0.1.44: UD-Q4/Q5/Q6_K_XL and Q8_0 Unsloth files in setup (K-quant experts, MMQ prompt library strata_kq), NVFP4 packs, Qwen3.6-35B-A3B, Intel Arc A-series kernels, the pipelined-decode and latency work; v0.1.43.1: the adaptive overlap no longer collapses decode on pinned-host desktops (#1964 #1975), Windows PLE mmap stall (#1984), pinned prompt uploads (#1996), the I/O watchdog allowance; v0.1.43: adaptive-tier copies overlap on CUDA, P100 (sm_60) kernel tables, RDNA4 (gfx1200/gfx1201) defaults (route tail skip, measured PCIe share, 16K prompt chunks, fused IQ3 prompt experts); v0.1.42.1: the GGUF-in-place file tier on Windows unmaps every shard, dual-socket starts judge each NUMA node and STRATA_DROP_CACHE_ON_EXIT, tools/strata_bench.py; v0.1.42: STRATA_ROUTE_TAIL_SKIP=7 default on CUDA (+13-16% decode), the AMD 2-GPU checkpoint fix (H13), Phase 2 fixes and opt-ins; v0.1.41.1 (folded into 0.1.42): the #1576 card order, #1616 stage size, #1595 CPU share, #1630/#1607 Windows HIP chunk cap and commit-limit warning, #1603 parallel-request bookkeeping; v0.1.41: CPU prefill share on by default (NVIDIA, chunks < 1024), --batch-groups auto, the file tier read in batches on Windows, Pascal decode fix, per-arch tables; v0.1.40.3: the #1357 MTP router guard, the #1376 Windows HIP cache floor, #461 runtime DLLs, Intel A750 first-request fix; v0.1.40.2: F4 verify windows, the Linux file tier (#1194), the stager wait (#1057), #1264/#1201/#1139 fixes, opt-in CPU share (#1282), Intel Arc; v0.1.40: --resident-experts on a layer split with the split+resident variant (#848), --kv k8v4 with KV streaming (#711); v0.1.39: the #577 file-tier regression fixed, the OpenAI Responses API (#451, Codex), a reply stuck on one token ended (#606), the head before the arena (#620), effort_position (#458), --vram-reserve hot resize opt-in (#533), PR batch; v0.1.38: prompts faster (one gather per expert group #372, the first chunk's PLE rows beside layer 0 #374, DeltaNet three heads per thread #413), --kv q4_0 prompts on tensor cores (#452), Q5_0 experts on the GPU (#473), IQ4_XS on AVX-2 (#415), unbuffered expert loading on Windows (#357 #362), --peer-device (#531), a 6 GB card starts (#496), PR batch; v0.1.37: a silent engine is restarted (#481), Windows AMD counts the desktop's VRAM (#380 #377 #497), a steadier PCIe probe (#485), fixes #496 #495 #498 #505 #493; v0.1.36: a cancelled prompt logged as read so far (#471), the draft-head hint (#474), UPDATE.bat (#475), --expert-profile-save (#477); v0.1.35: Windows AMD uses its bundled HIP runtime (#468 #461), the low-RAM resident mode on Windows 32 GB (#467), fixes #460 #459 #446 #447 #457 #448 #444; v0.1.34: AMD on Windows (a ready-made HIP engine), an MCP server for AI assistants (tools/strata_mcp.py), a shorter README; v0.1.33: a portable image encoder again (#411 #412), setup recommends instead of forcing (#406 #403 #364 #384), fixes #352 #365 #369 #371 #375 #393 #408 #414; v0.1.32: split prompts faster (#340), AMD router +12%, Unsloth Q4 in setup, faster Q4 prompts, #326/#327/#342/#344 fixes, PR batch; v0.1.31: Unsloth UD-Q4_K_XL (experimental), GGUF-in-place low-RAM mode, Windows GGUF load 2x, server race + tokenizer fixes, AMD intrinsics; v0.1.30: short prompts faster (streaming from 1024 tokens), resident low-RAM variant, multi-GPU session carve, RDNA4; v0.1.29: sampled answers faster (split top-k), #154 correctness fixes; v0.1.28: the expert cache reserves the draft head, a cancelled request no longer fails the next; v0.1.27: RTX 20 (sm_75) in the ready-made engine, the HIP build without CUDA headers; v0.1.26: the draft layer's prompt pass in batches; v0.1.25: faster prompts (grouping off the copy engine, fused hyper-connection kernels), AMD HIP backend, --kv k8v4; v0.1.24: long prompts faster (QSA select on tensor cores); v0.1.23: image requests honor sampling, 8 GB cards start, batched verify window; v0.1.22: faster prompts (tensor-core attention), multi-GPU across images/steering/KV streaming; v0.1.21: multi-GPU layer split (--gpus); v0.1.20: system-prompt checkpoint, PCIe probe, hit rate; v0.1.19: penalties
 # KV bytes per context token and attention layer: 8-bit 1056, rotated 4-bit 576, hybrid K8V4 (8-bit K, 4-bit V) 816
 KV_CELL_BYTES = {"q4_0": 576, "k8v4": 816}
@@ -3617,6 +3625,86 @@ def cuda_lib_dirs(toolkit=13):
     return [str(d) for d in dirs]
 
 
+def release_info() -> dict:
+    """The Linux release's RELEASE.json (docker/build-in-oven.sh writes it): {} in a git checkout."""
+    try:
+        return json.loads((ROOT / RELEASE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def system_cuda13_dirs():
+    """This PC's own CUDA 13 runtime (cudart, cuBLAS): [] when the system's loader finds it (ldconfig), a CUDA 13
+    toolkit's library folder, or None when there is neither."""
+    cache = out(["ldconfig", "-p"]) or out(["/sbin/ldconfig", "-p"])
+    if all(re.search(rf"^\s*{re.escape(n)}\s", cache, re.M) for n in CUDA_RUNTIME_LIBS):
+        return []
+    nvcc, _ = find_nvcc()
+    if nvcc:
+        root = Path(nvcc).resolve().parent.parent
+        for d in (root / "lib64", *sorted(root.glob("targets/*/lib"))):
+            if all((d / n).exists() for n in CUDA_RUNTIME_LIBS):
+                return [str(d)]
+    return None
+
+
+_RELEASE_DIRS = None
+
+
+def release_cuda_dirs(yes=False) -> list:
+    """The library folders the release's engines load the CUDA 13 runtime from (RELEASE_FILE): this PC's own, else
+    NVIDIA's pip packages, else setup stops and says what to install.  Written into the release engines' BUILD.json
+    files, as a compiled engine's toolkit folders are; found once a run."""
+    global _RELEASE_DIRS
+    if _RELEASE_DIRS is not None:
+        return _RELEASE_DIRS
+    old = [g for g in gpus() if 0 < driver_major(g) < MIN_DRIVER]
+    if old:
+        fail(f"the NVIDIA driver {old[0]['driver']} is older than the CUDA 13 engines need ({MIN_DRIVER} or newer)",
+             "install a newer driver (https://www.nvidia.com/drivers), then run setup again")
+    dirs = system_cuda13_dirs()
+    if dirs is not None:
+        ok("CUDA 13 runtime: " + (dirs[0] if dirs else "installed on this PC"))
+    else:
+        say("  The engines load NVIDIA's CUDA 13 runtime (cuBLAS, cudart), which this PC does not have: NVIDIA's pip "
+            "packages go into .venv")
+        try:
+            pip_install(CUDA_WHEELS, "NVIDIA CUDA libraries (cuBLAS, CUDA runtime; ~0.4 GB)")
+        except (Exception, SystemExit) as e:
+            warn(f"could not install them{'' if isinstance(e, SystemExit) else f' ({e})'}")
+        dirs = [d for d in cuda_lib_dirs(13) if all((Path(d) / n).exists() for n in CUDA_RUNTIME_LIBS)]
+        if not dirs:
+            fail("the CUDA 13 runtime (libcudart.so.13, libcublas.so.13) is not on this PC, and NVIDIA's pip packages "
+                 "could not be installed",
+                 "install one of them, then run setup again: NVIDIA's cuda-libraries-13-0 package (Ubuntu / Debian: "
+                 "https://developer.nvidia.com/cuda-downloads; the CUDA 13 toolkit has it too), or "
+                 f"{sys.executable} -m pip install " + " ".join(CUDA_WHEELS))
+        ok(f"CUDA 13 runtime: NVIDIA's pip packages ({dirs[0]})")
+    for stamp in (engine_dir(13) / "BUILD.json", ROOT / "engine-dsv41" / "BUILD.json", ROOT / "build-cuda" / "BUILD.json"):
+        try:
+            meta = json.loads(stamp.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if meta.get("release") and meta.get("cuda_dirs") != dirs:
+            stamp.write_text(json.dumps({**meta, "cuda_dirs": dirs}, indent=1), encoding="utf-8")
+    _RELEASE_DIRS = dirs
+    return dirs
+
+
+def release_ggml_ok(archs=None) -> bool:
+    """The release's ggml engine (RELEASE_FILE: momoe-cuda in build-cuda/, momoe-metal in build-metal/ on a Mac) is of
+    this source and (momoe-cuda) has code for these cards: nothing to compile, and no CUDA toolkit or Xcode needed."""
+    mac = sys.platform == "darwin"
+    bdir = ROOT / ("build-metal" if mac else "build-cuda")
+    try:
+        meta = json.loads((bdir / "BUILD.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool(meta.get("release")) and (bdir / ("momoe-metal" if mac else "momoe-cuda")).exists() and \
+        meta.get("src") == source_hash(GGML_ENGINE_SOURCES) and \
+        (mac or {str(x) for x in archs or ()} <= set(str(meta.get("archs") or "").split(";")))
+
+
 # ------------------------------------------------------------------------------------------------ AMD
 # The RX 7900 XT / XTX (gfx1100) and the RX 9070 series / Radeon AI PRO R9700 (gfx1201) on Linux, through the HIP
 # backend (docs/AMD_HIP.md); the RX 7800 XT / 7700 XT (gfx1101, #254) and the RX 9060 XT (gfx1200, #256) were run by
@@ -4282,6 +4370,14 @@ def engine_env(eng: Path) -> dict:
     dirs = [str(d) for d in hip_lib_dirs(eng)]
     if dirs:
         env["PATH"] = os.pathsep.join(dirs + [env.get("PATH", "")])
+    if not WIN:                                        # the CUDA runtime's folders (the release's: NVIDIA's pip packages)
+        try:
+            cuda = json.loads((eng / "BUILD.json").read_text(encoding="utf-8")).get("cuda_dirs") or []
+        except (OSError, ValueError):
+            cuda = []
+        cuda = [str(d) for d in cuda if Path(d).is_dir()]
+        if cuda:
+            env["LD_LIBRARY_PATH"] = os.pathsep.join(cuda + ([env["LD_LIBRARY_PATH"]] if env.get("LD_LIBRARY_PATH") else []))
     return env
 
 
@@ -5168,6 +5264,8 @@ def build_engine(gpu, vision, yes, llama, toolkit=None, more=False) -> Path:
         (meta.get("isa_floor") or "") == floor and not stale_binary(eng / EXE) and (not more or engine_runs_more(eng))
     vision_ok = not want_vision or ((eng / VEXE).exists() and (not local or meta.get("vision_src") == vsrc))
     if engine_ok and vision_ok:
+        if meta.get("release"):                        # the release's engine: its CUDA runtime, found or installed here
+            release_cuda_dirs(yes)
         ok("engine already built for this PC")
         return eng
     if local:
@@ -5187,7 +5285,7 @@ def build_engine(gpu, vision, yes, llama, toolkit=None, more=False) -> Path:
                      f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}",
                      f"-DCMAKE_CUDA_COMPILER={nvcc}", *toolkit_root_defs(nvcc), f"-DSTRATA_GGML_DIR={llama}",
                      *host_compiler_defs(True), *engine_defs(archs, toolkit),
-                     *isa_floor_defs(floor, bdir, meta)],
+                     *isa_floor_defs(floor, bdir, meta), *(["-DSTRATA_PORTABLE=ON"] if RELEASE_BUILD else [])],
                     vcvars, "build-strata-cuda12.bat" if t12 else "build-strata.bat")
         if stale_binary(bdir / EXE):                      # #2054: the stamp below is written only for a binary of this source
             fail(f"the engine build finished without a new engine ({EXE} is version {binary_engine_version(bdir / EXE)}, "
@@ -5201,7 +5299,7 @@ def build_engine(gpu, vision, yes, llama, toolkit=None, more=False) -> Path:
     if not vision_ok:
         say("  Compiling the image encoder" + (" with CUDA (10-20 minutes, once) ..." if vision == "gpu" else " ..."))
         defs = [f"-DLLAMA_DIR={llama}", f"-DSTRATA_VISION_CUDA={'ON' if vision == 'gpu' else 'OFF'}",
-                "-DSTRATA_PORTABLE=OFF", *host_compiler_defs(vision == "gpu")]   # native, like the engine
+                f"-DSTRATA_PORTABLE={'ON' if RELEASE_BUILD else 'OFF'}", *host_compiler_defs(vision == "gpu")]   # native, like the engine (the release: any AVX2 CPU)
         if vision == "gpu":
             defs += [f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}", f"-DCMAKE_CUDA_COMPILER={nvcc}",
                      *toolkit_root_defs(nvcc)]
@@ -7214,10 +7312,15 @@ def build_momoe_vision(cuda: tuple | None = None) -> Path:
     if exe.exists() and stamp.exists() and json.loads(stamp.read_text(encoding="utf-8")).get("src") == src:
         ok(f"image encoder already built: {exe}")
         return exe
+    if cuda and not cuda[0]:                           # the release's encoder is not for this source: no nvcc to compile it
+        fail("the image encoder has to be compiled with CUDA here, and no CUDA toolkit (nvcc) was found",
+             "install NVIDIA's CUDA toolkit 13 and run setup again, or set it up without pictures (--vision no)")
     llama = get_llama_cpp(VISION_LLAMA_COMMIT, "llama.cpp-vision")
     say("  Compiling the image encoder (" + ("with CUDA, 10-20 minutes" if cuda else "a few minutes") + ", once) ...")
     defs = [f"-DLLAMA_DIR={llama}", f"-DSTRATA_VISION_CUDA={'ON' if cuda else 'OFF'}",
-            f"-DSTRATA_VISION_METAL={'ON' if mac else 'OFF'}", "-DSTRATA_PORTABLE=OFF", *host_compiler_defs(bool(cuda))]
+            f"-DSTRATA_VISION_METAL={'ON' if mac else 'OFF'}", f"-DSTRATA_PORTABLE={'ON' if RELEASE_BUILD else 'OFF'}", *host_compiler_defs(bool(cuda))]
+    if RELEASE_BUILD and mac:                          # the macOS release (docker/build-macos.sh): Accelerate's cblas_sgemm,
+        defs.append("-DGGML_BLAS=OFF")                 # ggml's BLAS backend, is macOS 13.3+; the encoder runs on Metal
     if cuda:
         defs += [f"-DCMAKE_CUDA_ARCHITECTURES={cuda[1]}", f"-DCMAKE_CUDA_COMPILER={cuda[0]}", *toolkit_root_defs(cuda[0])]
     cmake_build(ROOT / "tools" / "vision", bdir, "strata-vision", defs, None, "build-vision-momoe.bat")
@@ -7460,7 +7563,9 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         if getattr(a, opt, None):
             warn(f"--{opt.replace('_', '-')}: not used for {fam['title']} on Momoe's ggml engine")
     own_mtp = bool(fam.get("own_mtp"))
-    if not mac:
+    nvcc, ggml_dirs = None, None
+    prebuilt = release_ggml_ok(None if mac else {g["arch"] for g in found})   # the release's engine: nothing to compile
+    if not mac and not prebuilt:
         nvcc, ver = find_nvcc()
         if not nvcc:
             fail("no CUDA toolkit (nvcc) was found: the engine is compiled here",
@@ -7473,23 +7578,30 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         step(2, "building the engine (momoe-metal)")
         pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES, "Python packages (cmake, the server's)")
         exe = ROOT / "build-metal" / "momoe-metal"
-        run(["sh", str(ROOT / "src" / "metal" / "build.sh")])
-        if not exe.exists():
-            fail("the engine did not build", f"see {ROOT / 'build-metal' / 'cmake.build.log'}")
-        stamp_ggml_build(exe.parent)                   # what update_ggml_engines compares against
-        ok(str(exe))
+        if prebuilt:
+            ok(f"{exe} (the release's)")
+        else:
+            run(["sh", str(ROOT / "src" / "metal" / "build.sh")])
+            if not exe.exists():
+                fail("the engine did not build", f"see {ROOT / 'build-metal' / 'cmake.build.log'}")
+            stamp_ggml_build(exe.parent)               # what update_ggml_engines compares against
+            ok(str(exe))
     else:
         step(2, "building the engine (momoe-cuda: only what changed is compiled; the first build takes 10-20 minutes)")
         pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES, "Python packages (cmake, the server's)")
         exe = ROOT / "build-cuda" / "momoe-cuda"
         archs = ";".join(sorted({g["arch"] for g in found}))
-        env = dict(os.environ, NVCC=nvcc, CUDA_ARCHS=archs,
-                   PATH=str(Path(nvcc).parent) + os.pathsep + os.environ.get("PATH", ""))
-        run(["sh", str(ROOT / "src" / "metal" / "build_cuda.sh")], env=env)
-        if not exe.exists():
-            fail("the engine did not build", f"see {ROOT / 'build-cuda' / 'cmake.build.log'}")
-        stamp_ggml_build(exe.parent, archs)            # what update_ggml_engines compares against (and builds for)
-        ok(f"{exe} (CUDA {ver[0]}.{ver[1]}, sm {archs.replace(';', ', ')})")
+        if prebuilt:
+            ggml_dirs = release_cuda_dirs(a.yes)
+            ok(f"{exe} (the release's, for sm {archs.replace(';', ', ')} and more)")
+        else:
+            env = dict(os.environ, NVCC=nvcc, CUDA_ARCHS=archs,
+                       PATH=str(Path(nvcc).parent) + os.pathsep + os.environ.get("PATH", ""))
+            run(["sh", str(ROOT / "src" / "metal" / "build_cuda.sh")], env=env)
+            if not exe.exists():
+                fail("the engine did not build", f"see {ROOT / 'build-cuda' / 'cmake.build.log'}")
+            stamp_ggml_build(exe.parent, archs)        # what update_ggml_engines compares against (and builds for)
+            ok(f"{exe} (CUDA {ver[0]}.{ver[1]}, sm {archs.replace(';', ', ')})")
 
     tag = fam["tag"] + size_of(q)
     own = getattr(a, "gguf_dir", None)                 # --gguf-dir: GGUF files you already have, never downloaded
@@ -7545,7 +7657,13 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
         run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(paths[0]), "--out", str(pack)],
             quiet=True)
     ok(str(pack / "tokenizer"))
-    vision = momoe_vision(a, family, fam, folder, paths[0], cuda=(nvcc, archs) if unified and not mac else None)
+    # a GPU that shares the system's memory runs the encoder there: compiled here with nvcc, or the release's (built for
+    # the release's architectures, its BUILD.json)
+    vcuda = None
+    if unified and not mac:
+        vcuda = (nvcc, archs) if nvcc else (None, json.loads((ROOT / "build-cuda" / "BUILD.json").read_text(
+            encoding="utf-8"))["archs"]) if prebuilt else None
+    vision = momoe_vision(a, family, fam, folder, paths[0], cuda=vcuda)
     if vision is None and getattr(a, "vision_tokens", None) is not None:
         warn("--vision-tokens: images are off for this model, so it is not used")
 
@@ -7670,6 +7788,8 @@ def momoe_setup(a, data: Path, port: int, family: str | None = None) -> int:
            "port": port, "setup_tag": tag, "fit_max_tokens": True}   # (the model card's sampling: write_setup_config)
     if fam.get("arch"):                                # (DeepSeek: the server's family - its tool calls, end token, effort)
         cfg["arch"] = fam["arch"]
+    if ggml_dirs:                                      # the release's momoe-cuda: NVIDIA's pip packages
+        cfg["lib_dirs"] = ggml_dirs
     if use_draft is not None:                          # an explicit choice: kept for later setup runs (draft_choice)
         cfg["draft"] = "on" if use_draft else "off"
     if fam.get("engine_ready_s"):                      # a model read from 150+ GB of files: its start may take long
@@ -8362,7 +8482,7 @@ def build_dsv41_engine(gpu, yes, llama, toolkit=13) -> tuple[Path, list]:
     archs = sorted({int(x) for x in gpu.get("archs", [gpu["arch"]])} | {int(x) for x in meta.get("archs", [])})
     if (eng / DSV41_EXE).exists() and meta.get("src") == src and set(archs) <= set(meta.get("archs", [])):
         ok("DeepSeek engine already built for this PC")
-        return eng / DSV41_EXE, meta.get("cuda_dirs", [])
+        return eng / DSV41_EXE, release_cuda_dirs(yes) if meta.get("release") else meta.get("cuda_dirs", [])
     nvcc, vcvars = install_build_tools({**gpu, "archs": archs, "toolkit": toolkit}, yes)
     bdir = ROOT / "build-dsv41"
     say("  Compiling DeepSeek's engine for " + ", ".join(f"sm_{x}" for x in archs) + " (10-20 minutes, once) ...")
@@ -8370,7 +8490,7 @@ def build_dsv41_engine(gpu, yes, llama, toolkit=13) -> tuple[Path, list]:
                 ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", "-DSTRATA_BUILD_DSV41=ON",
                  f"-DCMAKE_CUDA_ARCHITECTURES={';'.join(str(x) for x in archs)}", f"-DCMAKE_CUDA_COMPILER={nvcc}",
                  *toolkit_root_defs(nvcc), f"-DSTRATA_GGML_DIR={llama}", *host_compiler_defs(True),
-                 *engine_defs(archs, toolkit)],
+                 *engine_defs(archs, toolkit), *(["-DSTRATA_PORTABLE=ON"] if RELEASE_BUILD else [])],
                 vcvars, "build-dsv41.bat")
     shutil.copy2(bdir / DSV41_EXE, eng / DSV41_EXE)
     bindir = Path(nvcc).parent
@@ -8562,6 +8682,53 @@ def install_dsv41(a, data: Path, family, gpu, hip, cards, port, ram) -> int:
     return start(cfg_path, port)
 
 
+def build_release() -> int:
+    """--build-release (docker/build-in-oven.sh, in the manylinux oven): every engine a Linux PC can need, compiled as
+    setup compiles them on a PC but for every card in MOMOE_RELEASE_ARCHS and any AVX2 CPU (STRATA_RELEASE_BUILD=1).
+    Their BUILD.json files are marked "release": where the tar.gz is unpacked, setup finds them built for this source
+    and looks for their CUDA runtime there (release_cuda_dirs)."""
+    if not RELEASE_BUILD or sys.platform not in ("linux", "darwin"):
+        fail("--build-release is for docker/build-in-oven.sh and docker/build-macos.sh (STRATA_RELEASE_BUILD=1)")
+    if sys.platform == "darwin":                       # an Apple Silicon Mac: momoe-metal and its Metal image encoder
+        step(1, "the ggml engine (momoe-metal)")
+        run(["sh", str(ROOT / "src" / "metal" / "build.sh")], env=dict(os.environ, MOMOE_PORTABLE="1"))
+        stamp_ggml_build(ROOT / "build-metal")
+        step(2, "its image encoder (Metal)")
+        build_momoe_vision(None)
+        stamp = ROOT / "build-metal" / "BUILD.json"
+        stamp.write_text(json.dumps({**json.loads(stamp.read_text(encoding="utf-8")), "release": True}, indent=1),
+                         encoding="utf-8")
+        ok("the release's engines are built")
+        return 0
+    archs = sorted(int(x) for x in os.environ["MOMOE_RELEASE_ARCHS"].split(";"))
+    gpu = {"index": 0, "name": "release", "arch": str(archs[-1]), "archs": archs, "vram_gb": 0.0}
+    # arm64 (the DGX Spark, GH200, GB200): every family runs on momoe-cuda there (the GPU shares the memory), so Strata's
+    # engine and DeepSeek's are left out, and the ggml engine's image encoder is the CUDA one
+    arm = platform.machine().lower() in ("aarch64", "arm64")
+    if not arm:
+        llama = get_llama_cpp()
+        step(1, "the engine (momoe) and its image encoder")
+        build_engine(gpu, "gpu", True, llama, toolkit=13)
+        step(2, "DeepSeek's engine (strata-dsv41)")
+        build_dsv41_engine(gpu, True, llama)
+    step(3, "the ggml engine (momoe-cuda)")
+    nvcc, _ = find_nvcc()
+    cuda_archs = ";".join(map(str, archs))
+    run(["sh", str(ROOT / "src" / "metal" / "build_cuda.sh")],
+        env=dict(os.environ, NVCC=nvcc, CUDA_ARCHS=cuda_archs, MOMOE_PORTABLE="1",
+                 PATH=str(Path(nvcc).parent) + os.pathsep + os.environ.get("PATH", "")))
+    stamp_ggml_build(ROOT / "build-cuda", cuda_archs)
+    step(4, "the ggml engine's image encoder" + (" (CUDA)" if arm else " (CPU)"))
+    build_momoe_vision((nvcc, cuda_archs) if arm else None)
+    for stamp in (engine_dir(13) / "BUILD.json", ROOT / "engine-dsv41" / "BUILD.json", ROOT / "build-cuda" / "BUILD.json"):
+        if not stamp.exists():
+            continue
+        meta = json.loads(stamp.read_text(encoding="utf-8"))
+        stamp.write_text(json.dumps({**meta, "release": True, "cuda_dirs": []}, indent=1), encoding="utf-8")
+    ok("the release's engines are built")
+    return 0
+
+
 def main() -> int:
     # Momoe: a Mac is set up by momoe_setup below (momoe-metal); upstream's metal/setup_mac.py (its Metal engine, Flash-Next)
     # is not called - upstream_mac_setup runs it
@@ -8642,6 +8809,7 @@ def main() -> int:
                     help="update the installed engine, Python packages and model settings as a start would, without "
                          "starting the model (UPDATE.bat / update.sh run it after a git pull)")
     ap.add_argument("--build", action="store_true", help=argparse.SUPPRESS)   # Momoe always compiles its engine
+    ap.add_argument("--build-release", action="store_true", help=argparse.SUPPRESS)   # docker/build-in-oven.sh
     ap.add_argument("--source", choices=SOURCES, default=None,
                     help="where the model files come from: auto (default: Hugging Face), huggingface or modelscope "
                          "(mainland China: the same files, checked against ModelScope's published SHA-256; "
@@ -8691,6 +8859,8 @@ def main() -> int:
                          "sycl = Intel Arc, EXPERIMENTAL: Linux, built from source (docs/INTEL_ARC.md)")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
+    if a.build_release:
+        return build_release()
     if a.images == "qwen-image" or any((a.image_quant, a.image_backend, a.image_native, a.image_gpu_policy)):
         fail("--images: Momoe's setup does not install image generation (Qwen-Image)",
              "an \"images\" section written into the config by hand still works: docs/IMAGES.md")
