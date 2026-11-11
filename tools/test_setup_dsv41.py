@@ -250,6 +250,7 @@ class MacFamily(unittest.TestCase):
         with mock.patch.object(setup.sys, "platform", platform), mock.patch.object(setup, "WIN", False), \
                 mock.patch.object(setup, "gpus", return_value=gpus), mock.patch.object(setup, "gpu_problem", return_value=None), \
                 mock.patch.object(setup, "momoe_setup", side_effect=lambda *x: calls.append("momoe") or 0), \
+                mock.patch.object(setup, "data_folder", return_value=(setup.ROOT, [])), \
                 mock.patch.object(setup, "install_dsv41", side_effect=lambda *x: calls.append("dsv41") or 0), \
                 mock.patch.object(setup, "step", side_effect=SystemExit("Strata's path")), \
                 mock.patch.object(setup.sys, "argv", ["setup.py", "--setup", "--yes", "--no-start", "--family", "deepseek41"]), \
