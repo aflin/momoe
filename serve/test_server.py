@@ -4415,8 +4415,8 @@ class CallingEngine(MockEngine):
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         self.prompts.append(list(ids))
         prompt = self.tok.decode(ids)
-        if prompt.endswith("<function="):
-            text = "search>\n" + self.ARGS
+        if prompt.endswith("<tool_call>\n"):
+            text = "<function=search>\n" + self.ARGS
         elif prompt.endswith("<function=search>\n"):
             text = self.ARGS
         elif prompt.endswith("</think>\n\n"):
@@ -4575,6 +4575,29 @@ class ForcedToolChoice(unittest.TestCase):
         self.assertEqual(msg["strata_rejected_tool_calls"], [{"name": "bash", "reason": "undeclared"}])
         self.assertFalse([c for c in msg["content"] if c["type"] == "tool_use"])
 
+    def test_any_model_name_on_the_anthropic_route_is_the_loaded_model(self):
+        """#5312: Claude Desktop sends the model name `claude-5-5-sonnet` and cannot change it; the route serves the loaded model whatever
+        the request calls it, and answers with that model's name (the Desktop app's own gateway is a separate check in apps/host)."""
+        self.says("Hello there.")
+        for name in ("claude-5-5-sonnet", "claude-opus-4-1", "gpt-4o", "nonsense"):
+            for stream in (False, True):
+                with self.subTest(model=name, stream=stream):
+                    body = {"model": name, "max_tokens": 50, "stream": stream, "messages": [{"role": "user", "content": "hi"}],
+                            "tools": [{"name": "search", "description": "search", "input_schema": {"type": "object", "properties": {}}}]}
+                    req = urllib.request.Request(self.base + "/v1/messages", data=json.dumps(body).encode(),
+                                                 headers={"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=30) as r:
+                        raw = r.read().decode()
+                        self.assertEqual(r.status, 200)
+                    if stream:
+                        events = [json.loads(l[6:]) for l in raw.splitlines() if l.startswith("data: {")]
+                        self.assertEqual("".join(e["delta"]["text"] for e in events if e["type"] == "content_block_delta"), "Hello there.")
+                        self.assertEqual(events[0]["message"]["model"], self.svc.model)
+                    else:
+                        msg = json.loads(raw)
+                        self.assertEqual(msg["model"], self.svc.model)
+                        self.assertEqual(msg["content"][0]["text"], "Hello there.")
+
     def test_a_call_with_a_dropped_function_keyword_is_still_the_call(self):
         """#3441: `<=search>` for `<function=search>`, as a model under a large tool surface writes it."""
         from serve.frontend import CALL_END, CALL_START
@@ -4595,7 +4618,7 @@ class ForcedToolChoice(unittest.TestCase):
                     self.assertEqual((finish, calls), ("tool_calls", [("search", {"q": "2+2"})]))
                     self.assertEqual(reasoning, CallingEngine.THOUGHT)
                     first, second = self.engine.prompts
-                    opening = "<tool_call>\n<function=" + ("search>\n" if choice == self.NAMED else "")
+                    opening = "<tool_call>\n" + ("<function=search>\n" if choice == self.NAMED else "")
                     # where the thinking ended, after the blank line the template puts before a call
                     self.assertEqual(second, first + self.tok.encode(CallingEngine.THOUGHT + "</think>\n\n" + opening))
 
@@ -4604,7 +4627,7 @@ class ForcedToolChoice(unittest.TestCase):
         thought, calling = 'I will search for "2+2"', self.engine.generate
 
         def generate(ids, max_new, sampling, cancel, embeddings=None):
-            if self.tok.decode(ids).endswith(("<function=", "<function=search>\n")):
+            if self.tok.decode(ids).endswith(("<tool_call>\n", "<function=search>\n")):
                 yield from calling(ids, max_new, sampling, cancel)
                 return
             self.engine.prompts.append(list(ids))
@@ -4617,7 +4640,7 @@ class ForcedToolChoice(unittest.TestCase):
                 finish, calls, reasoning = self.call_of(code, b, stream)
                 self.assertEqual((finish, calls, reasoning), ("tool_calls", [("search", {"q": "2+2"})], thought))
                 first, second = self.engine.prompts
-                self.assertEqual(second, first + self.tok.encode(thought + "</think>\n\n<tool_call>\n<function="))
+                self.assertEqual(second, first + self.tok.encode(thought + "</think>\n\n<tool_call>\n"))
 
     def test_without_thinking_the_prompt_ends_with_the_opening(self):
         for choice in ("required", self.NAMED):
@@ -4628,7 +4651,7 @@ class ForcedToolChoice(unittest.TestCase):
                     finish, calls, reasoning = self.call_of(code, b, stream)
                     self.assertEqual((finish, calls, reasoning), ("tool_calls", [("search", {"q": "2+2"})], ""))
                     self.assertEqual(len(self.engine.prompts), 1)
-                    opening = "<tool_call>\n<function=" + ("search>\n" if choice == self.NAMED else "")
+                    opening = "<tool_call>\n" + ("<function=search>\n" if choice == self.NAMED else "")
                     self.assertTrue(self.tok.decode(self.engine.prompts[0]).endswith("</think>\n\n" + opening))
 
     def test_the_budget_wrap_up_opens_the_call(self):
@@ -4638,7 +4661,7 @@ class ForcedToolChoice(unittest.TestCase):
         self.assertEqual((finish, calls), ("tool_calls", [("search", {"q": "2+2"})]))
         self.assertEqual(reasoning, CallingEngine.THOUGHT[:20] + REASONING_WRAP_UP.split("</think>")[0])
         first, second = self.engine.prompts
-        extra = self.tok.encode(REASONING_WRAP_UP + "<tool_call>\n<function=", parse_special=True)
+        extra = self.tok.encode(REASONING_WRAP_UP + "<tool_call>\n", parse_special=True)
         self.assertEqual(second, first + self.tok.encode(CallingEngine.THOUGHT[:20]) + extra)
 
     def test_auto_absent_and_none_leave_the_tools_to_the_model(self):

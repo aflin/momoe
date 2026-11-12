@@ -2864,15 +2864,48 @@ class StallNote:
                 "and run the same command again: the download continues where it stopped")
 
 
+DL_PROBE_WAITS = (1.0, 3.0)                     # seconds before the 2nd and the 3rd range probe
+
+
+def _probe_retryable(exc: BaseException) -> bool:
+    """Is a failed range probe worth one more try?  A hiccup is (a timeout, a reset or dropped connection, a busy server: 429/5xx); no internet
+    is not (no DNS answer, no route, refused): that fails at once, with no wait and no message (offline users, owner 11-01)."""
+    import errno
+    import socket
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in (429, 500, 502, 503, 504)
+    if isinstance(exc, urllib.error.URLError):
+        if not isinstance(exc.reason, BaseException):
+            return False
+        exc = exc.reason
+    if isinstance(exc, (socket.gaierror, ConnectionRefusedError)):
+        return False
+    if isinstance(exc, OSError) and exc.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN):
+        return False
+    return isinstance(exc, (TimeoutError, socket.timeout, ConnectionResetError, ConnectionAbortedError, BrokenPipeError, http.client.HTTPException))
+
+
+def _probe_ranges(src: "_Source", waits=DL_PROBE_WAITS, sleep=time.sleep) -> bool:
+    """The first range request of a parallel download, tried up to len(waits)+1 times when it fails by a hiccup: one failed probe used to make a
+    50-100 GB download a single stream.  False: the server does not do ranges, or the probe failed (the caller then reads one stream)."""
+    for attempt in range(len(waits) + 1):
+        try:
+            src.resolve()
+            return True
+        except _NoRange:
+            return False
+        except (OSError, http.client.HTTPException) as exc:
+            if attempt >= len(waits) or not _probe_retryable(exc):
+                return False
+            sleep(waits[attempt])
+    return False
+
+
 def parallel_download(url: str, part: Path, total: int, label: str, conns: int, name: str) -> bool:
     """Fill `part` (total bytes) over `conns` ranged connections.  True when every byte is there; False when the server
     does not do ranges (the caller reads the file in one stream)."""
     src = _Source(url, total)
-    try:
-        src.resolve()
-    except _NoRange:
-        return False
-    except (OSError, http.client.HTTPException):
+    if not _probe_ranges(src):
         return False                                    # the one-stream path has its own retries and messages
     part.parent.mkdir(parents=True, exist_ok=True)
     _claim_part(part, url, src.etag)                    # a .part from another address or version is dropped here
@@ -5181,12 +5214,52 @@ def install_build_tools(gpu, yes):
     return nvcc, find_vcvars(cuda_v) if WIN else None
 
 
+def cmake_cache_entries(bdir: Path) -> dict:
+    """The entries of a build folder's CMakeCache.txt as {name: value} (the type dropped); {} when it was never configured."""
+    out = {}
+    try:
+        text = (Path(bdir) / "CMakeCache.txt").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        if line and not line.startswith(("#", "//")) and "=" in line:
+            key, value = line.split("=", 1)
+            out[key.split(":", 1)[0].strip()] = value.strip()
+    return out
+
+
+CUDA_CACHE_GLOBS = ("CUDA_*", "CUDAToolkit_*")      # FindCUDAToolkit's cached library paths and toolkit folders
+
+
+def toolkit_change_undefs(bdir: Path, defs) -> list:
+    """#5717: FindCUDAToolkit keeps the library paths of the toolkit a folder was first configured with (CUDA_cudart_LIBRARY
+    and about 60 more); a new -DCUDAToolkit_ROOT does not search them again, so after a CUDA update that removed the old
+    toolkit, ninja stopped on the old libcudart.so.  When the toolkit changed - another CUDAToolkit_ROOT than the cached one,
+    or a cached CUDA path that is gone - the configure drops those entries (-U, before the new -D) and CMake detects the CUDA
+    compiler again; the compiled objects stay, so only what changed is rebuilt.  [] for an unchanged or a new folder."""
+    cache = cmake_cache_entries(bdir)
+    if not cache:
+        return []
+    want = next((str(d).split("=", 1)[1] for d in defs if str(d).startswith("-DCUDAToolkit_ROOT=")), None)
+    had = cache.get("CUDAToolkit_ROOT")
+    moved = bool(want and had) and Path(had) != Path(want)
+    gone = any(not Path(part).exists()
+               for name, value in cache.items() if name.startswith(("CUDA_", "CUDAToolkit_"))
+               for part in value.split(";")
+               if part and not part.endswith("-NOTFOUND") and Path(part).is_absolute())
+    if not (moved or gone):
+        return []
+    for f in (Path(bdir) / "CMakeFiles").glob("*/CMakeCUDACompiler.cmake"):
+        f.unlink(missing_ok=True)
+    return [f"-U{g}" for g in CUDA_CACHE_GLOBS]
+
+
 def cmake_build(src, bdir, target, defs, vcvars, bat_name):
     cmake, ninja = find_tool("cmake"), find_tool("ninja")
     if cmake is None or ninja is None:
         fail("cmake / ninja not found after installing them", "run: .venv python -m pip install cmake ninja")
     conf = [cmake, "-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}", "-S", str(src), "-B", str(bdir),
-            "-DCMAKE_BUILD_TYPE=Release", *defs]
+            *toolkit_change_undefs(bdir, defs), "-DCMAKE_BUILD_TYPE=Release", *defs]
     build = [cmake, "--build", str(bdir), "--target", target, "-j", str(max(2, (os.cpu_count() or 4) // 2))]
     # A failed build is tried once more: CUDA 13.0's ptxas now and then fails to parse a PTX file it just wrote, and
     # the same command then gets past it (issue #45); a second attempt only compiles what is still missing.

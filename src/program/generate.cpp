@@ -111,6 +111,7 @@
 #include "strata/program/pipe_probe.hpp"
 #include "strata/kernels/cvec.hpp"
 #include "strata/core/progress.hpp"
+#include "strata/core/stream_watch.hpp"
 #include "strata/core/device.hpp"
 #include "strata/core/emulate.hpp"
 #ifndef NOMINMAX
@@ -1642,6 +1643,17 @@ void stall_report(std::FILE* f, uint64_t layers_during) {
             std::this_thread::sleep_for(std::chrono::seconds(2));
             std::fprintf(f, "  2 s later:\n");
         }
+        // #5718 follow-up: the streams a host may be blocked on (the prompt path's), asked without blocking - before the
+        // release below, so "finished" here means the GPU was done and the waiting host was not woken
+        strata::core::stream_watch().report(f, [](void* s, int dev, std::string& why) {
+            const strata::core::OnDevice on(dev);
+            const cudaError_t e = cudaStreamQuery((cudaStream_t) s);
+            if (e == cudaSuccess) return strata::core::StreamState::finished;
+            if (e == cudaErrorNotReady) return strata::core::StreamState::working;
+            why = cudaGetErrorString(e);
+            (void) cudaGetLastError();
+            return strata::core::StreamState::failed;
+        });
         if (auto fn = strata::core::diag_pool_fn().load()) fn(f);
         if (auto fn = strata::core::diag_verify_fn().load()) fn(f);
         if (auto fn = strata::core::diag_pipeline_fn().load()) fn(f);
@@ -6628,6 +6640,7 @@ int main(int argc, char** argv) {
     // CUDA error left set by the failed `cudaHostRegister` and read later by `gr_read`'s launch check.  See the
     // note in `pinned.cu`.
     strata::core::FileExpertSource src;
+    bool io_pf_by_default = false;   // the Linux file-tier defaults turned io prefetch on (no STRATA_IO_PREFETCH given)
     {   // the card, and whether this build has code for it (a binary built for other GPUs fails at its first kernel
         // otherwise, after the whole expert arena has loaded) - before the arena starts loading
         int dev = 0;
@@ -6766,6 +6779,7 @@ int main(int argc, char** argv) {
         if (io_pf_default || (io_pf_env != nullptr && std::atoi(io_pf_env) != 0)) {
             const char* th = std::getenv("STRATA_IO_PF_THREADS");
             src.set_io_prefetch(true, th != nullptr ? std::atoi(th) : 0);
+            io_pf_by_default = io_pf_default && src.io_prefetch();
             if (src.io_prefetch() && io_pf_default) {
                 const char* cv = std::getenv("STRATA_COLD_OVERLAP");
                 std::fprintf(stderr, "momoe generate: file tier (Linux defaults, %s): page-cached experts "
@@ -7923,6 +7937,47 @@ int main(int argc, char** argv) {
     drive.d.src = srcp;
     drive.d.n_expert = g.n_expert;
     drive.d.jobs.resize((size_t) K);
+    // P1.8 (PR 4972, re-checked as residency changes): when every routed expert sits in the GPU caches the decode reads nothing
+    // from the file tier, and its Linux defaults (io prefetch, the decode gate) and the routing-aware prefetch only cost time.
+    // Measured on 2x W7900D (gfx1100), IQ3_S experts.bin, a layer split holding 24576 of 24576: decode 57 -> 80 tok/s, the
+    // output byte-identical.  Only what the defaults switched on is touched: STRATA_IO_PREFETCH=1 keeps io prefetch and the
+    // look-ahead as before, STRATA_LOOKAHEAD=1 keeps the look-ahead.  The check runs here, again at every request's start and
+    // after a VRAM resize (a smaller cache, a loan that was not refilled, an adaptive swap), so a later eviction turns them
+    // back on.  STRATA_FILE_TIER_IDLE=0 turns the whole policy off.
+    const bool file_tier_idle_ok = [] { const char* v = std::getenv("STRATA_FILE_TIER_IDLE"); return v == nullptr || std::atoi(v) != 0; }();
+    int64_t gpu_held_now = 0;
+    bool gpu_holds_all = false, io_pf_suspended = false;
+    // a (layer, expert) is held when a live slot of its stage's cache has it (a slot past the live ones was given back)
+    auto count_gpu_held = [&]() -> int64_t {
+        int64_t held = 0;
+        for (int64_t l = 0; l < g.n_layers; ++l) {
+            const int st = multi_gpu ? stage_of(l) : 0;
+            const strata::core::ExpertCache& c = st > 0 ? stages[(size_t) st - 1]->cache : xcache;
+            const int64_t live = c.slots();
+            for (int64_t e = 0; e < g.n_expert; ++e) {
+                const int32_t sl = c.slot_of(l, e);
+                held += sl != strata::core::kNotResident && sl < live;
+            }
+        }
+        return held;
+    };
+    if (srcp == &src && file_tier_idle_ok) {
+        gpu_held_now = count_gpu_held();
+        gpu_holds_all = gpu_held_now == g.n_layers * g.n_expert;
+        if (gpu_holds_all && io_pf_by_default) {
+            src.set_io_prefetch(false, 0);
+            io_pf_suspended = true;
+            const char* sv = std::getenv("STRATA_IO_STATS");
+            src.set_io_stats(sv != nullptr && std::atoi(sv) != 0);
+            std::fprintf(stderr, "strata generate: every expert is in the GPU caches (%lld of %lld): the file tier's Linux defaults "
+                                 "(io prefetch, the decode gate) are off, the decode reads nothing from it (STRATA_IO_PREFETCH=1 keeps them)\n",
+                         (long long) gpu_held_now, (long long) (g.n_layers * g.n_expert));
+        }
+    }
+    const char* la_env = std::getenv("STRATA_LOOKAHEAD");
+    const bool la_asked = (la_env != nullptr && la_env[0] != '\0' && std::atoi(la_env) != 0) ||
+                          [] { const char* v = std::getenv("STRATA_IO_PREFETCH"); return v != nullptr && v[0] != '\0' && std::atoi(v) != 0; }();
+    bool la_started = false;
     // CS-T: routing-aware prefetch of the file tier (the GGUF in place): the next layer's router on this layer's MoE
     // input predicts its experts and their pages are warmed meanwhile.  It only warms pages; STRATA_LOOKAHEAD=0 is
     // the A/B arm, STRATA_LOOKAHEAD_K the experts per token (default 10).
@@ -7934,7 +7989,7 @@ int main(int argc, char** argv) {
     // STRATA_LOOKAHEAD_STATS=1 (measurement only): run the predictor on any tier and score it against the real routing
     const bool la_stats = srcp != nullptr && [] { const char* v = std::getenv("STRATA_LOOKAHEAD_STATS"); return v != nullptr && std::atoi(v) != 0; }();
     if (srcp != nullptr && ((srcp == &src && src.warms()) || fs_ahead || la_stats) &&
-        [] { const char* v = std::getenv("STRATA_LOOKAHEAD"); return v == nullptr || std::atoi(v) != 0; }()) {
+        (la_env == nullptr || std::atoi(la_env) != 0)) {
         std::vector<std::vector<uint16_t>> routers((size_t) g.n_layers);
         bool ok = true;
         for (int64_t l = 0; l < g.n_layers && ok; ++l) {
@@ -7953,8 +8008,13 @@ int main(int argc, char** argv) {
                 lookahead.set_depth(std::atoi(dv));
             else if (srcp == &src && src.io_prefetch())
                 lookahead.set_depth(2);
-            std::fprintf(stderr, "momoe generate: routing-aware prefetch on (the next layer's router%s)\n",
-                         fs_ahead ? ", feeding the Foresight swap space" : ", file tier");
+            la_started = true;
+            if (srcp == &src && gpu_holds_all && !la_asked && !fs_ahead && !la_stats) {   // started, but not attached while nothing is read
+                drive.d.lookahead = nullptr;
+                std::fprintf(stderr, "momoe generate: routing-aware prefetch off (every expert is in the GPU caches; STRATA_LOOKAHEAD=1 runs it)\n");
+            } else
+                std::fprintf(stderr, "momoe generate: routing-aware prefetch on (the next layer's router%s)\n",
+                             fs_ahead ? ", feeding the Foresight swap space" : ", file tier");
         } else {
             (void) cudaGetLastError();
             std::fprintf(stderr, "momoe generate: routing-aware prefetch off (%s)\n",
@@ -7962,6 +8022,45 @@ int main(int argc, char** argv) {
             err.clear();
         }
     }
+    // P1.8: the file tier's idle policy follows the residency.  Called at a quiet point (a request's start, a VRAM resize): nothing
+    // is in flight.  Only what this policy turned off is turned on again.
+    auto refresh_file_tier = [&]() {
+        if (srcp != &src || !file_tier_idle_ok) return;
+        const int64_t total = g.n_layers * g.n_expert;
+        const int64_t held = count_gpu_held();
+        const bool all = held == total;
+        if (all == gpu_holds_all) return;
+        gpu_holds_all = all;
+        bool acted = false;
+        if (all) {
+            if (io_pf_by_default && src.io_prefetch()) {
+                src.set_io_prefetch(false, 0);
+                io_pf_suspended = true;
+                acted = true;
+                const char* sv = std::getenv("STRATA_IO_STATS");
+                src.set_io_stats(sv != nullptr && std::atoi(sv) != 0);
+            }
+            if (la_started && !la_asked && !fs_ahead && !la_stats && drive.d.lookahead != nullptr) { drive.d.lookahead = nullptr; acted = true; }
+            if (acted)
+                std::fprintf(stderr, "strata serve: every expert is in the GPU caches again (%lld of %lld): the file tier's Linux defaults are off\n",
+                             (long long) held, (long long) total);
+        } else {
+            if (io_pf_suspended) {
+                const char* th = std::getenv("STRATA_IO_PF_THREADS");
+                src.set_io_prefetch(true, th != nullptr ? std::atoi(th) : 0);
+                io_pf_suspended = !src.io_prefetch();
+                acted = true;
+            }
+            if (la_started && drive.d.lookahead == nullptr) {
+                drive.d.lookahead = &lookahead;
+                if (!std::getenv("STRATA_IO_PREFETCH_DEPTH") && src.io_prefetch()) lookahead.set_depth(2);
+                acted = true;
+            }
+            if (acted)
+                std::fprintf(stderr, "strata serve: %lld of %lld experts are in the GPU caches now: the file tier's Linux defaults are on again\n",
+                             (long long) held, (long long) total);
+        }
+    };
     // ---- R4.2c: THE HIT PATH.  Every one of these is required for `hits_ready()`, which is all-or-nothing on
     // purpose: a half-configured hit path would compute some experts twice and others not at all, and a token
     // built on that is wrong rather than refused.
@@ -9637,8 +9736,11 @@ int main(int argc, char** argv) {
             return strata::program::split_lend_slots(xc.slots(), xc.bytes(), xc.slot_offsets(),
                                                      (uint64_t) strata::kernels::cpu::expert_layout().max_blob, need);
         };
+        auto on_part_device = [](int dev) { return strata::core::OnDevice(dev); };
         auto part_slots = [&](const PfPart& p, int64_t c) -> int64_t {
-            return cache_slots_for(*p.cache, strata::prefill::Prefill::bytes_needed(g, *p.ses, c, srcp != nullptr));
+            return cache_slots_for(*p.cache, strata::program::split_part_figure(on_part_device, p.dev, [&] {
+                return strata::prefill::Prefill::bytes_needed(g, *p.ses, c, srcp != nullptr);
+            }));
         };
         auto part_bytes = [&](const PfPart& p, int32_t first) -> uint64_t {
             strata::core::ExpertCache& xc = *p.cache;
@@ -9702,7 +9804,9 @@ int main(int argc, char** argv) {
                     const int64_t budget = std::max<int64_t>(0, std::min(p.cache->slots() - 128,
                                                                         kAutoLendPct * p.cache->slots() / 100));
                     const uint64_t avail = part_bytes(p, (int32_t) (p.cache->slots() - budget));
-                    const uint64_t nonring = strata::prefill::Prefill::bytes_needed_no_ring(g, *p.ses, c, srcp != nullptr);
+                    const uint64_t nonring = strata::program::split_part_figure(on_part_device, p.dev, [&] {
+                        return strata::prefill::Prefill::bytes_needed_no_ring(g, *p.ses, c, srcp != nullptr);
+                    });
                     room = std::min(room, (int64_t) ((avail - std::min(avail, nonring)) / (uint64_t) kBlob));
                 }
                 return room;
@@ -10895,9 +10999,10 @@ int main(int argc, char** argv) {
                 // though every parked conversation could give its RAM back - and refusing here throws
                 // away the whole prompt read that produced this snapshot (measured: 270k tokens, 96 s).
                 // Evict the least recently active parked conversations until it fits, or until none are
-                // left.  Each ConversationBuffer is a list of 16 MiB segments, each segment its own
-                // allocation, so an evicted entry is back with the kernel before the next check reads
-                // /proc/meminfo; no waiting is needed.  slots() bounds the loop, and the two lines
+                // left.  #5697: freed memory can stay in the C library's heap, which MemAvailable does not
+                // count (make_room's evictions above, dropped checkpoints): a failed check hands it back first
+                // (release_free_heap), and evict_oldest() hands back each entry it drops, so the next check
+                // reads it from /proc/meminfo.  slots() bounds the loop, and the two lines
                 // below say what it did either way.  The reading is the guard's (MemAvailable, the cgroup
                 // limits above the engine, --memory-limit-mib); `mem` keeps the last one for the refusal line.
                 size_t evicted = 0;
@@ -10907,10 +11012,13 @@ int main(int argc, char** argv) {
                     return strata::core::conversation_memory_admit(
                         mem ? std::optional<uint64_t>(mem->available) : std::nullopt, additional, floor);
                 };
-                while (!admit() && conversations.size() > 0 && evicted < conversations.slots() &&
-                       conversations.evict_oldest())
+                bool fits = admit() || (strata::core::release_free_heap() && admit());
+                while (!fits && conversations.size() > 0 && evicted < conversations.slots() &&
+                       conversations.evict_oldest()) {
                     ++evicted;
-                if (!admit()) {
+                    fits = admit();
+                }
+                if (!fits) {
                     std::fprintf(stderr, "momoe serve: conversation cache: skip parking (physical RAM admission; need %zu MiB plus %lld MiB floor, %s; evicted %zu, %zu still parked)\n",
                                  additional >> 20, (long long) o.conversation_cache_min_free_mib, ram_note(mem).c_str(),
                                  evicted, conversations.size());
@@ -14295,6 +14403,7 @@ int main(int argc, char** argv) {
                 continue;
             }
             const bool geni = line.rfind("GENI ", 0) == 0;
+            if (geni || line.rfind("GEN ", 0) == 0) refresh_file_tier();
             if (!geni && line.rfind("GEN ", 0) != 0) {
                 std::printf("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> <file> <id,id,...>\n");
                 continue;

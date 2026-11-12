@@ -165,6 +165,7 @@ class Routing(unittest.TestCase):
                 mock.patch.object(setup, "gpus", return_value=gpus), \
                 mock.patch.object(setup, "gpu_problem", return_value=None), \
                 mock.patch.object(setup, "momoe_setup", side_effect=lambda *x: calls.append(x) or 0), \
+                mock.patch.object(setup, "data_folder", return_value=(setup.ROOT, [])), \
                 mock.patch.object(setup, "step", side_effect=SystemExit("Strata's path")), \
                 mock.patch.object(setup.sys, "argv", ["setup.py", "--setup", "--yes", "--no-start"] + argv), \
                 mock.patch.dict(os.environ, {"MOMOE_MAC_MEMORY_GIB": "64"}):

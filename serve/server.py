@@ -42,6 +42,7 @@ import re
 import select
 import signal
 import socket
+import socketserver
 import struct
 import shutil
 import subprocess
@@ -2127,11 +2128,15 @@ class StrataEngine:
                     raise ValueError(line[4:].strip())
         finally:
             if not done:                                  # the consumer stopped early: stop the engine, drain to DONE
-                if self.can_stop:
+                # the engine can be ended or restarted on another thread meanwhile: Engine.close() closes stdin (a
+                # write then raises ValueError) before it clears `proc` (None then) - the STOP has nobody to reach, and
+                # the request's own outcome must not be replaced by that error
+                proc = self.proc
+                if self.can_stop and proc is not None:
                     try:
-                        self.proc.stdin.write("STOP\n")
-                        self.proc.stdin.flush()
-                    except OSError:
+                        proc.stdin.write("STOP\n")
+                        proc.stdin.flush()
+                    except (OSError, ValueError):
                         pass
                 # #481: never an untimed wait here - it holds the request FIFO, and an engine that lost step never
                 # answers.  An engine that honours STOP gets the current allowance in all (a STOP during a prompt
@@ -2395,16 +2400,17 @@ _VISION_ARCH_SIGNS = ("device kernel image is invalid", "no kernel image is avai
                       "unsupported gpu architecture", "invalid device function", "unknown gpu architecture")
 
 
-def vision_start_error(line: str, log=None, code: int | None = None, waited: float | None = None) -> str:
+def vision_start_error(line: str, log=None, code: int | None = None, waited: float | None = None, strays=()) -> str:
     """The message when the image encoder answered something other than READY.  #1445: a card in the Exclusive_Process
     compute mode (or one another process holds) refuses the encoder's CUDA context with "busy or unavailable"; that
     cause is named instead of leaving the user the first line of a traceback.  `log` is the encoder's stderr file, whose
     tail is searched too (the CUDA error is printed there).  An encoder that dies before it prints anything (#3645, #3444,
     #3669, #3697) used to give a blank sentence: now the last lines of its stderr, its exit status (`code`) and, for a
-    kernel-image error, the card/architecture hint come with it.  `waited`: it said nothing for that many seconds."""
+    kernel-image error, the card/architecture hint come with it.  `waited`: it said nothing for that many seconds.  `strays`: lines it printed on
+    its output before it ended that were not an answer (a debugger's, a library's); they are searched for the causes below and named in the message."""
     text = line.strip()
     tail = vision_log_tail(log)
-    both = (text + chr(10) + tail).lower()
+    both = (text + chr(10) + chr(10).join(strays) + chr(10) + tail).lower()
     if "busy or unavailable" in both:
         return ("the vision encoder did not start: the GPU refused a second CUDA context (\"CUDA-capable device(s) "
                 "is/are busy or unavailable\"). This is usually the compute mode Exclusive_Process: only one process "
@@ -2429,6 +2435,8 @@ def vision_start_error(line: str, log=None, code: int | None = None, waited: flo
         words = engine_exit_words(code)
         if words:
             extra.append(words)
+    if strays:
+        extra.append("it also printed on its output: " + " | ".join(x[:120] for x in list(strays)[-3:]))
     shown = [x for x in lines[-3:] if x != text]
     if shown:
         extra.append("last lines of its log: " + " | ".join(x[:200] for x in shown))
@@ -2552,15 +2560,16 @@ class Vision:
         self._ensure_dir()
         # cwd is the encoder's directory: the ENC lines name the files relative to it (#480: no space in the line)
         self.proc = popen("the image encoder", args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                          stderr=log or subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1, env=env,
-                          cwd=self.dir)
+                          stderr=log or subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", bufsize=1,
+                          env=env, cwd=self.dir)
         contain(self.proc)
+        strays: list[str] = []
         try:
-            line = self._readline(VISION_READY_S, "the vision encoder did not start")
+            line = self._await_ready(VISION_READY_S, strays)
         except RuntimeError as e:                       # silent for VISION_READY_S: it was ended, and it is not left half-started
             self.proc, self.stopped = None, True
             if VISION_READY_S:
-                raise RuntimeError(vision_start_error("", log, waited=VISION_READY_S)) from None
+                raise RuntimeError(vision_start_error("", log, waited=VISION_READY_S, strays=strays)) from None
             raise RuntimeError(str(e)) from None
         if not line.startswith("READY"):
             proc, self.proc = self.proc, None
@@ -2573,8 +2582,65 @@ class Vision:
                 pass
             if code is None:
                 code = getattr(proc, "returncode", None)
-            raise RuntimeError(vision_start_error(line, log, code))
+            raise RuntimeError(vision_start_error(line, log, code, strays=strays))
         self.stopped = False
+
+    #: how long a reader that has already ended may still hold its output pipe open (a debugger attached to it, a child it started) before the start is
+    #: judged: the pipe's end does not come, the process's end is what counts.
+    READY_GRACE_S = 2.0
+    #: lines kept from a reader's output before its answer (and written to the log): enough to see what it said, not a flood
+    STRAY_KEEP = 20
+
+    def _await_ready(self, timeout: float | None, strays: list) -> str:
+        """The reader's answer to its start: "READY ..." or "ERR ..." (what strata-vision prints on stdout; everything else it says goes to stderr),
+        or "" when it has ended.  Any other line on stdout is a stray line - a debugger a crashing reader started, a library's banner - and is not an
+        answer: it is kept in `strays` (the last STRAY_KEEP), written to the log, and the wait goes on.  A reader that is only printing is never killed.
+        The wait has ONE deadline of `timeout` s (None: for ever); on it the reader is killed and the read raises RuntimeError, as `_readline` does.  A
+        reader whose process has ended while a debugger or a child still holds its pipe open counts as ended after READY_GRACE_S.  The thread that
+        reads stops at the answer, so the encode answers that follow are never taken by it."""
+        proc = self.proc
+        got: queue.Queue = queue.Queue()
+
+        def read():
+            while True:
+                try:
+                    line = proc.stdout.readline()
+                except (OSError, ValueError):           # killed under the read
+                    line = ""
+                got.put(line)
+                if not line or line.startswith(("READY", "ERR")):
+                    return
+
+        threading.Thread(target=read, daemon=True).start()
+        deadline = None if timeout is None else time.monotonic() + timeout
+        ended_at = None
+        said = 0
+        while True:
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                raise RuntimeError(f"the vision encoder did not start: it said nothing for {timeout:.0f} s")
+            try:
+                line = got.get(timeout=0.25 if deadline is None else max(0.01, min(0.25, deadline - now)))
+            except queue.Empty:
+                code = proc.poll() if hasattr(proc, "poll") else None
+                if code is not None:
+                    ended_at = now if ended_at is None else ended_at
+                    if now - ended_at >= self.READY_GRACE_S:
+                        return ""
+                continue
+            if not line or line.startswith(("READY", "ERR")):
+                return line
+            stray = line.strip()
+            if stray:
+                strays.append(stray[:300])
+                del strays[:-self.STRAY_KEEP]
+                said += 1
+                if said <= self.STRAY_KEEP:
+                    print(f"[strata] the image encoder printed on its output, not an answer: {stray[:200]}", flush=True)
 
     def _readline(self, timeout: float, what: str) -> str:
         """One line from the encoder, waiting at most `timeout` s (#1317).  On a timeout the encoder is killed, so the
@@ -6868,6 +6934,12 @@ class Server(ThreadingHTTPServer):
         if ":" in server_address[0]:
             self.address_family = socket.AF_INET6
         super().__init__(server_address, RequestHandlerClass, bind_and_activate)
+
+    def server_bind(self):
+        # http.server's own server_bind also asks socket.getfqdn(host) for a server_name nothing here reads; on a Mac whose reverse lookup
+        # stalls (GitHub's macOS runner: 35 s on the first lookup of every new process) each start waited that long before it listened
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def handle_error(self, request, client_address):
         if not isinstance(sys.exc_info()[1], ConnectionError):   # a client that hangs up needs no stack trace
