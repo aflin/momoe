@@ -232,7 +232,7 @@ class Prepare(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def resolved(self, arch, parts, local=False, mmproj=True, mtp=0):
+    def resolved(self, arch, parts, local=False, mmproj=True, mtp=0, draft=False):
         base = "https://huggingface.co/o/R-GGUF/resolve/c0ffee/"
         rows = [((None if local else base + n), n, 1000 * (i + 1), (None if local else f"{i:064x}"),
                  (Path("/models/R") / n if local else None)) for i, n in enumerate(parts)]
@@ -240,15 +240,16 @@ class Prepare(unittest.TestCase):
                          f"{arch}.nextn_predict_layers": mtp}, "tensors": [], "data_start": 64} for i in range(len(parts))]
         return {"where": "/models/R" if local else "hf:o/R-GGUF", "label": "IQ3_XXS", "parts": rows, "heads": heads,
                 "mmproj": (base + "mmproj-F16.gguf", "mmproj-F16.gguf", 900, "ab" * 32) if mmproj else None,
+                "draft": (base + "R-MTP-draft.gguf", "R-MTP-draft.gguf", 4_000, "cd" * 32, None) if draft else None,
                 "repo": None if local else "o/R-GGUF", "commit": None if local else "c0ffee"}
 
-    def run_prepare(self, r, strata=True):
+    def run_prepare(self, r, strata=True, mtp=False):
         a = types.SimpleNamespace(gguf="x", family=None, model=None, gguf_dir=None)
         with mock.patch.object(setup, "byo_resolve", return_value=r), \
                 mock.patch.object(setup, "byo_strata_path", return_value=strata), \
                 mock.patch.object(setup, "byo_check", return_value={"arch": r["heads"][0]["kv"]["general.architecture"],
                                                                     "name": "R", "expert_bytes": 40e9, "ple": 1,
-                                                                    "mtp": False}):
+                                                                    "mtp": mtp}):
             setup.byo_prepare(a)
         return a
 
@@ -265,6 +266,22 @@ class Prepare(unittest.TestCase):
         self.assertEqual((fam["mmproj"], fam["vision"]), ("mmproj-F16.gguf", True))
         self.assertEqual(setup._byo_record["base"], "unsloth")
         self.assertIsNone(a.gguf_dir)
+
+    def test_the_repositorys_own_draft_head(self):
+        a = self.run_prepare(self.resolved("qwen4exp", ["R-IQ3_XXS.gguf"], draft=True))
+        fam = setup.FAMILIES[setup.BYO]
+        self.assertEqual(fam["mtp_gguf"][1], "R-MTP-draft.gguf")
+        self.assertEqual(fam["sha256"]["R-MTP-draft.gguf"], (4_000, "cd" * 32))
+        self.assertEqual(setup._byo_record["mtp_gguf"], "R-MTP-draft.gguf")
+        a = self.run_prepare(self.resolved("qwen4exp", ["R-IQ3_XXS.gguf"]))
+        self.assertNotIn("mtp_gguf", setup.FAMILIES[setup.BYO])
+
+    def test_flash_next_with_the_head_inside_is_refused(self):
+        with mock.patch.object(setup, "fail", side_effect=SystemExit(2)) as f:
+            with self.assertRaises(SystemExit):
+                self.run_prepare(self.resolved("qwen4exp", ["R-IQ4_XS-MTP.gguf"], draft=True), mtp=True)
+        self.assertIn("MTP draft head inside", f.call_args[0][0])
+        self.assertIn("R-MTP-draft.gguf", f.call_args[0][1])
 
     def test_a_local_file_uses_its_folder(self):
         a = self.run_prepare(self.resolved("qwen4exp", ["R-IQ3_XXS.gguf"], local=True, mmproj=False))
@@ -297,6 +314,84 @@ class Prepare(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 self.run_prepare(self.resolved("qwen4exp", ["R.gguf"]), strata=False)
         self.assertIn("runs on Strata's engine", f.call_args[0][0])
+
+
+class DraftHead(unittest.TestCase):
+    """The repository's own MTP draft head (orcarouter's ...-MTP-draft.gguf): found beside the model, and made into the
+    draft layer unless it is the original's head or not one tools/mtp_from_gguf.py reads."""
+
+    def test_which_files_are_draft_heads(self):
+        files = ["Q-IQ4_XS-MTP-00001-of-00003.gguf", "Q-MTP-draft.gguf", "mmproj-Q-F16.gguf", "Q-IQ3_XXS-00001-of-00002.gguf",
+                 "sub/q-mtp-draft-q8_0.gguf", "README.md"]
+        self.assertEqual(setup.byo_draft_files(files), ["Q-MTP-draft.gguf", "sub/q-mtp-draft-q8_0.gguf"])
+        self.assertNotIn("Q-MTP-draft", setup.byo_sets(files))          # not a model of its own
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, self.d, True)
+        self.pack, self.mtp = self.d / "packs" / "byo-r", self.d / "mtp"
+        (self.d / "models").mkdir()
+        self.mtp.mkdir()
+        (self.mtp / "mtp-manifest.json").write_text("[]")
+        self.fam = {"mtp_gguf": ("https://huggingface.co/o/R/resolve/c/R-MTP-draft.gguf", "R-MTP-draft.gguf", 10, "ab" * 32,
+                                 None)}
+        self.calls = []
+        for p in (mock.patch.object(setup, "say"), mock.patch.object(setup, "warn"),
+                  mock.patch.object(setup, "mtp_corrupt", return_value=False),
+                  mock.patch.object(setup, "download", side_effect=lambda *a, **k: self.calls.append(("download", a[1].name)))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def layer(self, rc=0, same=None):
+        own = self.pack / "mtp-own"
+
+        def run(cmd, **k):
+            tool = Path(str(cmd[1])).name
+            self.calls.append((tool, "--ref" in cmd))
+            if tool == "mtp_from_gguf.py":
+                (own / "tensors").mkdir(parents=True, exist_ok=True)
+                if same is not None:
+                    (own / "mtp-compare.json").write_text(json.dumps({"same": same}))
+            if tool == "mtp_rt.py":
+                (own / "rt").mkdir(parents=True, exist_ok=True)
+                (own / "rt" / "experts.bin").write_bytes(b"x")
+            return types.SimpleNamespace(returncode=rc if tool == "mtp_from_gguf.py" else 0, stdout="")
+        with mock.patch.object(setup, "run", side_effect=run):
+            return setup.byo_draft_layer(self.fam, None, [self.d / "models" / "R-1.gguf"], self.pack, self.mtp, {})
+
+    def test_a_fine_tunes_head_becomes_the_draft_layer(self):
+        rt = self.layer(same=False)
+        self.assertEqual(rt, self.pack / "mtp-own" / "rt")
+        self.assertEqual([c[0] for c in self.calls], ["download", "mtp_from_gguf.py", "mtp_pack.py", "mtp_rt.py"])
+        self.assertTrue(self.calls[1][1])                                # compared with the original's tensors
+        self.assertFalse((self.pack / "mtp-own" / "tensors").exists())   # the 5 GB of tensors are not kept
+        self.calls.clear()
+        self.assertEqual(self.layer(), rt)                               # done: nothing again
+        self.assertEqual(self.calls, [])
+
+    def test_the_original_head_uses_the_original_draft_layer(self):
+        self.assertIsNone(self.layer(same=True))
+        self.assertNotIn("mtp_pack.py", [c[0] for c in self.calls])
+        self.calls.clear()
+        self.assertIsNone(self.layer())                                  # decided: not converted again
+        self.assertEqual(self.calls, [])
+
+    def test_a_head_it_cannot_read_falls_back(self):
+        for rc in (3, 4):
+            self.calls.clear()
+            self.assertIsNone(self.layer(rc=rc))
+            self.assertNotIn("mtp_pack.py", [c[0] for c in self.calls])
+            setup.warn.assert_called()
+
+    def test_without_the_originals_tensors_nothing_is_compared(self):
+        (self.mtp / "mtp-manifest.json").unlink()
+        self.layer()
+        self.assertFalse(self.calls[1][1])
+
+    def test_a_local_draft_head_is_not_downloaded(self):
+        self.fam["mtp_gguf"] = (None, "R-MTP-draft.gguf", 10, None, self.d / "R-MTP-draft.gguf")
+        self.layer()
+        self.assertNotIn("download", [c[0] for c in self.calls])
 
 
 class Kept(unittest.TestCase):

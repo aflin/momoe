@@ -248,10 +248,19 @@ glm5-next, lfm2moe, flint, gemma4, bailingmoe3, mimo2 and minimax-m3.
 - **Downloads** are pinned to the repository's commit and checked against the SHA-256 Hugging Face publishes. A file
   of your own is used where it is, not copied; it has no published hash, so only its size is checked.
 - **How it runs.** It is set up like the nearest listed family: a Flash-Next fine-tune like Unsloth's Flash-Next sizes
-  (Strata's engine, the shared MTP draft layer), a qwen35moe one like Qwen3.6-35B-A3B, the others on Momoe's ggml
-  engine with their family's settings. The chat template comes from the file, so tool calls are read as for its
+  (Strata's engine), a qwen35moe one like Qwen3.6-35B-A3B, the others on Momoe's ggml engine with their family's
+  settings. The chat template comes from the file, so tool calls are read as for its
   family. Without an image encoder in the repository, a Flash-Next or Qwen3.6 fine-tune uses the original's. The
   config's `"byo"` entry says where the model came from.
+- **The MTP draft layer of a Flash-Next fine-tune** comes from the repository's own draft head when it has one (a
+  `...MTP-draft...gguf` beside the model, as llama.cpp's qwen4exp converter writes it with `--mtp`):
+  `tools/mtp_from_gguf.py` reads it back into the checkpoint's tensors, and the draft layer is made from them as from
+  the original checkpoint's, in the pack's `mtp-own` folder. When the original's tensors are already there it compares
+  them first: a head that is the original's within the file's rounding uses the original's draft layer (made from its
+  BF16 tensors), and one too far from it to be a Flash-Next head as the tool reads it falls back to it too. Without a
+  draft head, the original's shared draft layer is used. Files with the head inside (`IQ4_XS-MTP`, for llama.cpp PR
+  #30592) are refused: Strata's engine does not read a trailing layer; the same quantization without `-MTP` and the
+  draft file do the same.
 - **Not yet:** Flash-Next and qwen35moe GGUFs of your own on a Mac or a DGX Spark (their ggml path takes the listed
   files only), DeepSeek-V4.1-Flash (its own multi-file setup), old-style `.gguf.part1of2` files, and `HF_ENDPOINT`
   mirrors.
