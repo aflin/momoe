@@ -9066,6 +9066,13 @@ def byo_check(heads: list, names: list, sizes: list, strata: bool) -> dict:
             "mtp": int(kv0.get(f"{arch}.nextn_predict_layers", 0) or 0) > 0}
 
 
+def byo_draft_files(paths) -> list:
+    """A repository's (or folder's) MTP draft heads: GGUFs named ...MTP-draft... (orcarouter's
+    Qwen3.8-Flash-Next-Uncensored-MTP-draft.gguf, written by llama.cpp's qwen4exp converter with --mtp)."""
+    return sorted(p for p in paths if p.lower().endswith(".gguf") and "mtp" in p.rsplit("/", 1)[-1].lower()
+                  and "draft" in p.rsplit("/", 1)[-1].lower())
+
+
 def byo_slug(text: str) -> str:
     return re.sub(r"[^a-z0-9.]+", "-", text.lower()).strip("-")[:60] or "model"
 
@@ -9108,7 +9115,8 @@ def byo_token_for(repo: str, info: dict, a) -> None:
 
 def byo_resolve(a) -> dict:
     """--gguf: {"where", "label", "parts": [(url or None, name, bytes, sha256 or None, local Path or None)], "mmproj":
-    (url, name, bytes, sha) or None, "repo", "commit", "heads"} - the files, their headers read and checked."""
+    (url, name, bytes, sha) or None, "draft": an MTP draft head beside the model, as a part, or None, "repo", "commit",
+    "heads"} - the files, their headers read and checked."""
     spec = a.gguf.strip()
     m = HF_GGUF.match(spec)
     u = HF_URL.match(spec)
@@ -9126,6 +9134,8 @@ def byo_resolve(a) -> dict:
         mm = sorted(p for p in info["files"] if p.rsplit("/", 1)[-1].lower().startswith("mmproj")
                     and p.lower().endswith(".gguf"))
         mmproj = (base + mm[0], mm[0].rsplit("/", 1)[-1], *info["files"][mm[0]]) if mm else None
+        dr = byo_draft_files(info["files"])
+        draft = (base + dr[0], dr[0].rsplit("/", 1)[-1], *info["files"][dr[0]], None) if dr else None
         where, commit = f"hf:{repo}", info["sha"]
         try:
             heads = [GgufReader(url, size).header() for url, _n, size, _s, _l in parts]
@@ -9163,13 +9173,15 @@ def byo_resolve(a) -> dict:
                  else (files[0].name[:sm.start()] if sm else files[0].stem))
         mm = sorted(p.parent.glob("mmproj*.gguf"))
         mmproj = (None, mm[0].name, mm[0].stat().st_size, None) if mm else None
+        dr = byo_draft_files([str(x) for x in p.parent.glob("*.gguf")])
+        draft = (None, Path(dr[0]).name, Path(dr[0]).stat().st_size, None, Path(dr[0])) if dr else None
         where, repo, commit = str(p), None, None
         try:
             heads = [GgufReader(f).header() for f in files]
         except (OSError, ValueError) as e:
             fail(f"{p.name}: {e}")
-    return {"where": where, "label": label, "parts": parts, "mmproj": mmproj, "repo": repo, "commit": commit,
-            "heads": heads}
+    return {"where": where, "label": label, "parts": parts, "mmproj": mmproj, "draft": draft, "repo": repo,
+            "commit": commit, "heads": heads}
 
 
 def byo_prepare(a, hip: bool = False) -> None:
@@ -9197,6 +9209,15 @@ def byo_prepare(a, hip: bool = False) -> None:
                    license=f"see https://{HF_HOST}/{r['repo']}" if r["repo"] else "see the model's own page")
         if arch == "qwen35moe":
             fam["own_mtp"] = c["mtp"]
+        elif c["mtp"]:                                 # Flash-Next with the head inside (llama.cpp PR #30592's -MTP files)
+            fail(f"{names[0]} has the MTP draft head inside the model (a trailing layer), which Strata's engine does not "
+                 "read", "take the same quantization without -MTP" + (" - setup makes the draft layer from the "
+                 "repository's " + r["draft"][1] + " instead" if r.get("draft") else ""))
+        elif r.get("draft"):                           # the repository's own draft head (a fine-tune's): byo_draft_layer
+            fam["mtp_gguf"] = r["draft"]
+            if r["draft"][3]:
+                fam["sha256"][r["draft"][1]] = (r["draft"][2], r["draft"][3])
+            say(f"  MTP draft head: {r['draft'][1]} ({r['draft'][2] / 1e9:.1f} GB), the repository's own")
         if r["mmproj"]:
             url, mname, msize, msha = r["mmproj"]
             fam.update(mmproj=mname, mmproj_hf=(url[:len(url) - len(mname)] if url else ""), vision=True)
@@ -9240,7 +9261,50 @@ def byo_prepare(a, hip: bool = False) -> None:
         a.gguf_dir = str(r["parts"][0][4].parent)
     global _byo_record
     _byo_record = {"source": r["where"], "label": r["label"], "arch": arch, "base": BYO_BASE[arch],
-                   **({"repo": r["repo"], "commit": r["commit"]} if r["repo"] else {})}
+                   **({"repo": r["repo"], "commit": r["commit"]} if r["repo"] else {}),
+                   **({"mtp_gguf": r["draft"][1]} if strata and r.get("draft") else {})}
+
+
+def byo_draft_layer(fam: dict, a, shards: list, pack: Path, mtp: Path, env: dict) -> Path | None:
+    """--gguf, Flash-Next, with an MTP draft head beside the model (fam["mtp_gguf"]: a `...-MTP-draft.gguf` written by
+    llama.cpp's qwen4exp converter, PR #27836): the head read back into the checkpoint's tensors (tools/mtp_from_gguf.py)
+    and made into the draft layer as the original checkpoint's is, in <pack>/mtp-own/rt.  None: the original's draft
+    layer is used instead - the head is the original's (the same tensors within the file's rounding, so the original's
+    own BF16 tensors are the better source), or the file is not a head this setup reads."""
+    url, name, size, sha, local = fam["mtp_gguf"]
+    own = pack / "mtp-own"
+    rt, cmp = own / "rt", own / "mtp-compare.json"
+    if (rt / "experts.bin").exists() and done(rt / "experts.bin"):
+        return rt
+    if cmp.exists() and json.loads(cmp.read_text(encoding="utf-8")).get("same"):
+        return None                                    # decided on an earlier run
+    src = local or shards[0].parent / name
+    if local is None:
+        download(url, src, "the MTP draft head", pin=(size, sha) if size and sha else None)
+    say(f"  {name}: the repository's own MTP draft head, made into Strata's draft layer"
+        + (" (compared with the original checkpoint's)" if (mtp / "mtp-manifest.json").exists() else ""))
+    ref = mtp if (mtp / "mtp-manifest.json").exists() and not mtp_corrupt(mtp, env) else None
+    r = run([sys.executable, str(ROOT / "tools" / "mtp_from_gguf.py"), "--gguf", str(src), "--out", str(own)]
+            + (["--ref", str(ref)] if ref else []), env=env, check=False, quiet=True)
+    rc = 0 if r is None else r.returncode              # (a test double answers None)
+    if rc != 0:
+        if r is not None and r.stdout:
+            say(r.stdout[-2000:])
+        warn(f"{name} is not an MTP head this setup reads (exit {rc}): the original checkpoint's draft layer is used")
+        shutil.rmtree(own / "tensors", ignore_errors=True)
+        return None
+    if cmp.exists() and json.loads(cmp.read_text(encoding="utf-8")).get("same"):
+        say("  It is the original model's head (the same tensors within its rounding): the original's draft layer, made "
+            "from its BF16 tensors, is used")
+        shutil.rmtree(own / "tensors", ignore_errors=True)
+        return None
+    run([sys.executable, str(ROOT / "tools" / "mtp_pack.py"), "--src", str(own), "--experts", "q2_0",
+         "--out", str(own / "mtp-q2_0.gguf")], env=env)
+    run([sys.executable, str(ROOT / "tools" / "mtp_rt.py"), "--gguf", str(own / "mtp-q2_0.gguf"), "--out", str(rt)],
+        env=env)
+    mark(rt / "experts.bin")
+    shutil.rmtree(own / "tensors", ignore_errors=True)  # 5 GB the draft layer no longer needs (the GGUF stays)
+    return rt
 
 
 def build_release() -> int:
@@ -10265,6 +10329,10 @@ def main() -> int:
         # tokenizer as Flash-Next's, so data/'s subsets apply)
         rt = shards[0]
         ok(f"MTP draft layer: the model file's own ({shards[0].name})")
+    elif fam.get("mtp_gguf") and (own_rt := byo_draft_layer(fam, a, shards, pack, mtp, env)):
+        rt = own_rt                                    # --gguf: the repository's own MTP draft head (a fine-tune's)
+        refresh_draft_vocab(rt, draft_vocab or "cjk")
+        ok(f"MTP draft layer: {rt}")
     else:
         corrupt = (rt / "experts.bin").exists() and mtp_corrupt(mtp, env)
         if corrupt:
