@@ -149,10 +149,10 @@ class Labels(unittest.TestCase):
         self.assertEqual(len(sets["Q8_0"]), 5)
         self.assertEqual(setup.byo_pick(sets, "iq3_xxs", "hf:x/y"), "IQ3_XXS")
 
-    def test_a_draft_model_named_like_a_model_is_called_by_its_name(self):
+    def test_a_draft_model_named_like_a_model_is_not_a_choice(self):
         sets = setup.byo_sets(["g/gemma-4-it-Q8_0.gguf", "g/mtp-gemma-4-it-Q8_0.gguf", "g/gemma-4-it-UD-IQ3_XXS.gguf"])
-        self.assertEqual(sorted(sets), ["UD-IQ3_XXS", "gemma-4-it-Q8_0", "mtp-gemma-4-it-Q8_0"])
-        self.assertEqual(setup.byo_pick(sets, "gemma-4-it-Q8_0", "hf:x/y"), "gemma-4-it-Q8_0")
+        self.assertEqual(sorted(sets), ["Q8_0", "UD-IQ3_XXS"])        # mtp-... is a draft model, not one to install
+        self.assertEqual(setup.byo_pick(sets, "gemma-4-it-Q8_0", "hf:x/y"), "Q8_0")   # its whole name works too
 
     def test_no_choice_among_several_lists_them(self):
         with mock.patch.object(setup, "fail", side_effect=SystemExit(2)) as f:
@@ -317,14 +317,21 @@ class Prepare(unittest.TestCase):
 
 
 class DraftHead(unittest.TestCase):
-    """The repository's own MTP draft head (orcarouter's ...-MTP-draft.gguf): found beside the model, and made into the
+    """The repository's own MTP draft head (a ...-MTP-draft.gguf, or mtp-<model>-Q8_0.gguf): found beside the model, and made into the
     draft layer unless it is the original's head or not one tools/mtp_from_gguf.py reads."""
 
     def test_which_files_are_draft_heads(self):
         files = ["Q-IQ4_XS-MTP-00001-of-00003.gguf", "Q-MTP-draft.gguf", "mmproj-Q-F16.gguf", "Q-IQ3_XXS-00001-of-00002.gguf",
                  "sub/q-mtp-draft-q8_0.gguf", "README.md"]
-        self.assertEqual(setup.byo_draft_files(files), ["Q-MTP-draft.gguf", "sub/q-mtp-draft-q8_0.gguf"])
+        self.assertEqual(setup.byo_draft_files(files), ["sub/q-mtp-draft-q8_0.gguf", "Q-MTP-draft.gguf"])   # Q8_0 first
         self.assertNotIn("Q-MTP-draft", setup.byo_sets(files))          # not a model of its own
+
+    def test_draft_heads_named_like_models(self):
+        # bartowski's and ggml-org's Flash-Next repositories: mtp-<model>-<quant>.gguf beside the model's own sizes
+        files = ["Q-Q8_0-00001-of-00002.gguf", "Q-Q8_0-00002-of-00002.gguf", "Q-Q4_0.gguf", "mtp-Q-Q4_0.gguf",
+                 "mtp-Q-Q8_0.gguf", "mtp-Q-bf16.gguf", "dflash-Q-Q8_0.gguf", "Q-imatrix.gguf"]
+        self.assertEqual(sorted(setup.byo_sets(files)), ["Q4_0", "Q8_0"])
+        self.assertEqual(setup.byo_draft_files(files), ["mtp-Q-Q8_0.gguf", "mtp-Q-Q4_0.gguf", "mtp-Q-bf16.gguf"])
 
     def setUp(self):
         self.d = Path(tempfile.mkdtemp())

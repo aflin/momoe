@@ -8921,8 +8921,8 @@ def byo_sets(paths) -> dict:
     for p in sorted(paths):
         name = p.rsplit("/", 1)[-1]
         low = name.lower()
-        if not low.endswith(".gguf") or low.startswith("mmproj") or "draft" in low:
-            continue
+        if not low.endswith(".gguf") or low.startswith(("mmproj", "mtp-", "dflash-")) or "draft" in low or "imatrix" in low:
+            continue                                   # (draft models: bartowski's and ggml-org's mtp-<model>-Q8_0.gguf)
         m = SHARD_NAME.search(name)
         stem = p[:len(p) - len(name)] + (name[:m.start()] if m else name[:-5])
         stems.setdefault(stem, []).append(p)
@@ -9067,10 +9067,14 @@ def byo_check(heads: list, names: list, sizes: list, strata: bool) -> dict:
 
 
 def byo_draft_files(paths) -> list:
-    """A repository's (or folder's) MTP draft heads: GGUFs named ...MTP-draft... (orcarouter's
-    Qwen3.8-Flash-Next-Uncensored-MTP-draft.gguf, written by llama.cpp's qwen4exp converter with --mtp)."""
-    return sorted(p for p in paths if p.lower().endswith(".gguf") and "mtp" in p.rsplit("/", 1)[-1].lower()
-                  and "draft" in p.rsplit("/", 1)[-1].lower())
+    """A repository's (or folder's) MTP draft heads, as llama.cpp's qwen4exp converter writes them with --mtp: GGUFs
+    named ...MTP-draft... or mtp-<model>-<quant>.gguf (bartowski's and ggml-org's).  With several (one per
+    quantization), Q8_0 first: the format the head was checked in (tools/mtp_from_gguf.py)."""
+    def name(p):
+        return p.rsplit("/", 1)[-1].lower()
+    heads = [p for p in paths if name(p).endswith(".gguf") and (name(p).startswith("mtp-")
+                                                                or "mtp" in name(p) and "draft" in name(p))]
+    return sorted(heads, key=lambda p: ("q8_0" not in name(p), p))
 
 
 def byo_slug(text: str) -> str:
