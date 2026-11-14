@@ -281,8 +281,8 @@ uploader's quantization of a listed model. Name the Hugging Face repository and 
 have:
 
 ```sh
-momoe setup --gguf hf:owner/repo:IQ3_XXS               # a quantization from a Hugging Face repository
-momoe setup --gguf hf:owner/repo                       # lists the repository's quantizations
+momoe setup --gguf hf:bartowski/Qwen3.8-Flash-Next-GGUF:IQ3_XXS   # bartowski's quantization of Flash-Next
+momoe setup --gguf hf:bartowski/Qwen3.8-Flash-Next-GGUF           # lists the repository's quantizations
 momoe setup --gguf /data/models/Model-IQ3_XXS-00001-of-00002.gguf
 ```
 
@@ -290,8 +290,8 @@ momoe setup --gguf /data/models/Model-IQ3_XXS-00001-of-00002.gguf
   engines run, a part is missing, or (on Strata's engine) the experts are in a format it has no kernels for.
 - A gated repository (its page asks you to accept terms) needs a Hugging Face read token: `HF_TOKEN`, `hf auth login`
   or `--hf-token-file`; without one, setup asks for it. The token is sent to huggingface.co only.
-- A Flash-Next fine-tune with an MTP draft file beside it (`...-MTP-draft.gguf`) drafts with its own head; without
-  one, it uses the original's. Files with the head built in (`-MTP` quantizations) are refused: take the same
+- A Flash-Next fine-tune with an MTP draft file beside it (`...-MTP-draft.gguf` or `mtp-<model>-Q8_0.gguf`) drafts
+  with its own head; without one, or when the head is the original's, it uses the original's draft layer. Files with the head built in (`-MTP` quantizations) are refused: take the same
   quantization without `-MTP`.
 - It runs with the settings of the nearest listed family, and a fine-tune with no image encoder of its own uses the
   original's.

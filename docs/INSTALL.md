@@ -234,7 +234,7 @@ With `--yes` setup takes the recommended answer to every question.
 glm5-next, lfm2moe, flint, gemma4, bailingmoe3, mimo2 and minimax-m3.
 
 ```
-./setup.sh --gguf hf:owner/repo:IQ3_XXS                                         from Hugging Face
+./setup.sh --gguf hf:bartowski/Qwen3.8-Flash-Next-GGUF:IQ3_XXS                  from Hugging Face
 ./setup.sh --gguf https://huggingface.co/owner/repo                             lists the repository's models
 ./setup.sh --gguf /data/models/Model-IQ3_XXS-00001-of-00002.gguf               a file you have (first part)
 ```
@@ -253,7 +253,7 @@ glm5-next, lfm2moe, flint, gemma4, bailingmoe3, mimo2 and minimax-m3.
   family. Without an image encoder in the repository, a Flash-Next or Qwen3.6 fine-tune uses the original's. The
   config's `"byo"` entry says where the model came from.
 - **The MTP draft layer of a Flash-Next fine-tune** comes from the repository's own draft head when it has one (a
-  `...MTP-draft...gguf` beside the model, as llama.cpp's qwen4exp converter writes it with `--mtp`):
+  `...MTP-draft...gguf` or `mtp-<model>-<quant>.gguf` beside the model (Q8_0 first), as llama.cpp's qwen4exp converter writes it with `--mtp`):
   `tools/mtp_from_gguf.py` reads it back into the checkpoint's tensors, and the draft layer is made from them as from
   the original checkpoint's, in the pack's `mtp-own` folder. When the original's tensors are already there it compares
   them first: a head that is the original's within the file's rounding uses the original's draft layer (made from its
