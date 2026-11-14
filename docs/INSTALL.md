@@ -234,7 +234,7 @@ With `--yes` setup takes the recommended answer to every question.
 glm5-next, lfm2moe, flint, gemma4, bailingmoe3, mimo2 and minimax-m3.
 
 ```
-./setup.sh --gguf hf:orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF:IQ3_XXS     from Hugging Face
+./setup.sh --gguf hf:owner/repo:IQ3_XXS                                         from Hugging Face
 ./setup.sh --gguf https://huggingface.co/owner/repo                             lists the repository's models
 ./setup.sh --gguf /data/models/Model-IQ3_XXS-00001-of-00002.gguf               a file you have (first part)
 ```

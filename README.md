@@ -95,10 +95,6 @@ The machines:
 | **M4 Air** | MacBook Air M4, 32 GB ("as an 8 GB Mac": setup's 8 GB config with 10 GiB locked away) |
 | **Mac mini** | Mac mini M1, 8 GB, macOS 11 |
 
-A GGUF that is not in setup's list runs too, when its architecture is one the engines run (a fine-tune, another
-uploader's quantization): `./setup.sh --gguf hf:owner/repo:QUANT`, or `--gguf` and a file you have. Setup reads its
-headers before downloading anything; a gated repository needs a Hugging Face token. [How](docs/INSTALL.md#your-own-gguf).
-
 ### Which model runs where
 
 Writing speed in tokens per second, with setup's config on each machine; "-" means not tried. \* = drafting with the
@@ -277,6 +273,32 @@ sudo ln -s "$PWD/momoe" /usr/local/bin/momoe    # optional: run momoe from any f
 Setup asks for a name for the model's config (for example `ornith-8gb`) and starts the server in the background.
 `./setup.sh --check` lists what fits your PC. The Qwen3.6-family files are described in
 [docs/QWEN36.md](docs/QWEN36.md) and [docs/QWEN35MOE_GGUFS.md](docs/QWEN35MOE_GGUFS.md).
+
+### A model that is not in the list
+
+Setup also installs a GGUF it does not list, when its architecture is one the engines run: a fine-tune, or another
+uploader's quantization of a listed model. Name the Hugging Face repository and the quantization, or give a file you
+have:
+
+```sh
+momoe setup --gguf hf:owner/repo:IQ3_XXS               # a quantization from a Hugging Face repository
+momoe setup --gguf hf:owner/repo                       # lists the repository's quantizations
+momoe setup --gguf /data/models/Model-IQ3_XXS-00001-of-00002.gguf
+```
+
+- Setup reads each file's header before downloading anything. It stops early if the architecture is not one the
+  engines run, a part is missing, or (on Strata's engine) the experts are in a format it has no kernels for.
+- A gated repository (its page asks you to accept terms) needs a Hugging Face read token: `HF_TOKEN`, `hf auth login`
+  or `--hf-token-file`; without one, setup asks for it. The token is sent to huggingface.co only.
+- A Flash-Next fine-tune with an MTP draft file beside it (`...-MTP-draft.gguf`) drafts with its own head; without
+  one, it uses the original's. Files with the head built in (`-MTP` quantizations) are refused: take the same
+  quantization without `-MTP`.
+- It runs with the settings of the nearest listed family, and a fine-tune with no image encoder of its own uses the
+  original's.
+
+Architectures: Qwen3.8-Flash-Next (qwen4exp) and the Qwen3.6-35B-A3B family (qwen35moe) on a PC with its own NVIDIA
+or AMD card; nemotron_h_moe, glm5-next, lfm2moe, flint, gemma4, bailingmoe3, mimo2 and minimax-m3 everywhere. Details:
+[docs/INSTALL.md](docs/INSTALL.md#your-own-gguf).
 
 ## Use
 
