@@ -227,6 +227,42 @@ With `--yes` setup takes the recommended answer to every question.
 
 ## Tuning for your PC
 
+### Your own GGUF
+
+`--gguf` installs a GGUF that is not in setup's list, when its architecture is one Momoe's engines run: qwen4exp
+(Qwen3.8-Flash-Next and its fine-tunes), qwen35moe (Qwen3.6-35B-A3B, Ornith, KAT-Coder and theirs), nemotron_h_moe,
+glm5-next, lfm2moe, flint, gemma4, bailingmoe3, mimo2 and minimax-m3.
+
+```
+./setup.sh --gguf hf:orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF:IQ3_XXS     from Hugging Face
+./setup.sh --gguf https://huggingface.co/owner/repo                             lists the repository's models
+./setup.sh --gguf /data/models/Model-IQ3_XXS-00001-of-00002.gguf               a file you have (first part)
+```
+
+- **What setup checks first.** It reads each file's header (from the file, or the first megabytes over the network:
+  nothing is downloaded yet): the architecture, that the parts of a split model are there and belong together
+  (`NAME-00001-of-0000N.gguf`; the engine opens the first and finds the rest), and, for Strata's engine, that every
+  layer's experts are in a format it has kernels for. A file that cannot run stops here, with what is missing.
+- **The name after the colon** is the quantization at the end of the file names (`IQ3_XXS`, `UD-Q4_K_XL`,
+  `IQ4_XS-MTP`), or a model's whole name; without it, setup lists what the repository has.
+- **Downloads** are pinned to the repository's commit and checked against the SHA-256 Hugging Face publishes. A file
+  of your own is used where it is, not copied; it has no published hash, so only its size is checked.
+- **How it runs.** It is set up like the nearest listed family: a Flash-Next fine-tune like Unsloth's Flash-Next sizes
+  (Strata's engine, the shared MTP draft layer), a qwen35moe one like Qwen3.6-35B-A3B, the others on Momoe's ggml
+  engine with their family's settings. The chat template comes from the file, so tool calls are read as for its
+  family. Without an image encoder in the repository, a Flash-Next or Qwen3.6 fine-tune uses the original's. The
+  config's `"byo"` entry says where the model came from.
+- **Not yet:** Flash-Next and qwen35moe GGUFs of your own on a Mac or a DGX Spark (their ggml path takes the listed
+  files only), DeepSeek-V4.1-Flash (its own multi-file setup), old-style `.gguf.part1of2` files, and `HF_ENDPOINT`
+  mirrors.
+
+**A gated repository** (its page asks you to accept terms) downloads only for an account that accepted them, with that
+account's read token (https://huggingface.co/settings/tokens). Setup looks for one in `--hf-token-file FILE`,
+`HF_TOKEN`, and the token file the Hugging Face tools keep (`hf auth login`: `~/.cache/huggingface/token`, or under
+`HF_HOME`); with none, it asks for one (not shown as you type) and keeps it there only if you say so. The token goes
+to huggingface.co only - not to the storage hosts a download is sent on to - and is never written into a config or
+a log. A token Hugging Face refuses, or an account without access, is said before anything is downloaded.
+
 MoMoE has no `--calibrate` (Strata's tuning run). The engine settings it measured can be set in the config's `args`
 by hand: [which ones](DETAILS.md#double-click-start-herebat).
 
@@ -237,6 +273,7 @@ START-HERE.bat --setup                          install another model, or change
 SETUP.bat                                       the same (double-click it)
 START-HERE.bat --model IQ2_XS --context 32768 --vision yes --yes     no questions
 START-HERE.bat --gguf-dir D:\models\IQ2_XS       use GGUF files you already have
+./setup.sh --gguf hf:owner/repo:QUANT            a GGUF that is not in the list (Your own GGUF, above)
 START-HERE.bat --inspect D:\models\some.gguf     what a GGUF really holds and whether Strata runs it (no download)
 START-HERE.bat --data-dir E:\Strata-data         keep the model files somewhere else
 START-HERE.bat --port 8081                      another port

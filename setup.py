@@ -2115,7 +2115,14 @@ def tag_config(tag: str):
 
 
 def config_family(cfg_path: Path) -> str:
-    """The family a config was set up for, from its tag (the original model's has no prefix)."""
+    """The family a config was set up for, from its tag (the original model's has no prefix); a model of your own
+    (--gguf) counts as the family it was set up like (its "byo" record)."""
+    try:
+        base = (json.loads(Path(cfg_path).read_text(encoding="utf-8-sig")).get("byo") or {}).get("base")
+    except (OSError, ValueError, AttributeError):
+        base = None
+    if base in FAMILIES:
+        return base
     tag = config_tag(cfg_path)
     return next((f for f, d in FAMILIES.items() if d["tag"] and tag.startswith(d["tag"])), "qwen")
 
@@ -2458,8 +2465,11 @@ DL_RUN = 4                      # pieces one request asks for (4 x 32 MiB): a ne
 
 
 def _urlopen(req, timeout=None):
-    """Every download's request (upstream routes it through Strata Control's network policy, which Momoe does not have)."""
-    return urllib.request.urlopen(req, timeout=timeout)
+    """Every download's request (upstream routes it through Strata Control's network policy, which Momoe does not have).
+    One to huggingface.co carries the Hugging Face token when setup has one (--gguf: a gated repository), and a
+    redirect to another host does not (hf_auth)."""
+    req, opener = hf_auth(req)
+    return opener.open(req, timeout=timeout) if opener else urllib.request.urlopen(req, timeout=timeout)
 DL_MIN_PARALLEL = 256 << 20     # smaller files are one stream
 DL_CHUNK_TRIES = 5              # tries per request (1, 2, 4, 8 s apart) before the round is given up and run again
 DL_ROUNDS = 30                  # rounds (10 s apart) before the download is given up, like the 30 tries of one stream
@@ -3189,7 +3199,7 @@ def download(url, dst: Path, what=None, pin=None):
     for attempt in range(5):
         try:
             req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "strata-setup"})
-            total = int(urllib.request.urlopen(req, timeout=60).headers.get("Content-Length", 0))
+            total = int(_urlopen(req, timeout=60).headers.get("Content-Length", 0))
             break
         except urllib.error.HTTPError as e:
             if e.code == 404 and hf_unpinned(url) != url:  # #214: the pinned revision is gone from the repository
@@ -3369,6 +3379,8 @@ def verify_sha256(s: Path, size: int, sha: str, own: bool = False, repair=None, 
     if m.exists() and any(f"sha256 {x}" in m.read_text(encoding="utf-8", errors="replace") for x in (sha, *also)):
         return
     have = s.stat().st_size if s.exists() else -1
+    if sha is None and own and have == size:           # --gguf: a file of the person's own, with no published SHA-256
+        return
     if have != size:
         if own:                                        # --gguf-dir: the person's own file is never deleted by setup
             fail(f"{s.name} is {have:,} bytes; the published file is {size:,}",
@@ -5993,6 +6005,8 @@ def write_setup_config(cfg_path: Path, cfg: dict, source: Path | None = None) ->
     to it: the keys setup does not write are carried over (carry_over), and the earlier file is kept as
     strata-<model>.json.bak when it changes.  `source`: an earlier install's config to carry the keys over from when
     this folder has none yet (a copy set up like the last one).  A line says what was kept, one what was not."""
+    if _byo_record is not None:                        # --gguf: the model's source, and the family it is set up as
+        cfg = {**cfg, "byo": _byo_record}
     old_path = cfg_path if cfg_path.is_file() else source
     old = None
     if old_path is not None and old_path.is_file():
@@ -8784,6 +8798,451 @@ def install_dsv41(a, data: Path, family, gpu, hip, cards, port, ram) -> int:
     return start(cfg_path, port)
 
 
+# ------------------------------------------------------------------------------------------------ bring your own GGUF
+# --gguf SPEC: a GGUF that is not in setup's list - one the person has (a file, or the first part of a split model:
+# NAME-00001-of-0000N.gguf) or one on Hugging Face (hf:owner/repo:QUANT, or the repository's address).  Its headers are
+# read first (from the file, or the first megabytes of each part over HTTP, before anything is downloaded): the
+# architecture must be one Momoe's engines run, the parts must belong together, and for Strata's engine every layer's
+# experts must be in formats it has GPU kernels for.  Then a family and a size are made for it from the nearest one in
+# the list (BYO_BASE), and the install goes on as for a listed model: the download (each part checked against the
+# SHA-256 Hugging Face publishes), the preparation, the config.  A gated repository needs a Hugging Face token: HF_TOKEN,
+# the token file `hf auth login` writes, --hf-token-file, or one typed in when setup asks.  The token goes to
+# huggingface.co only (never to the storage hosts its downloads are sent on to) and is never written into a config.
+BYO = "byo"                                            # the family key the made family gets (one per setup run)
+BYO_ARCHS = ("qwen4exp", "qwen35moe", "nemotron_h_moe", "glm5-next", "lfm2moe", "flint", "gemma4", "bailingmoe3",
+             "mimo2", "minimax-m3")                    # the engines' architectures (momoe_metal.cpp) less deepseek41
+BYO_BASE = {"qwen4exp": "unsloth", "qwen35moe": "qwen36",   # Strata's engine (FAMILIES)
+            "nemotron_h_moe": "lightning", "glm5-next": "glm53", "lfm2moe": "lfm25", "flint": "flint", "gemma4": "gemma4",
+            "bailingmoe3": "ling3", "mimo2": "mimo26", "minimax-m3": "minimax31"}   # Momoe's ggml engine (GGML_FAMILIES)
+# The expert formats Strata's engine has GPU kernels for (ggml type numbers), as src/kernels/cuda/iq_kernels.cu lists
+# them (STRATA_GU_FMTS, STRATA_D_FMTS; tools/test_setup_byo.py checks the two lists still match): gate/up, down
+BYO_GU_TYPES = {16, 17, 18, 21, 22, 23, 29, 42, 12, 13, 14, 6, 2, 3, 8, 11, 10, 20, 39, 30, 40, 144, 145, 147, 148, 149}
+BYO_D_TYPES = {20, 23, 42, 7, 6, 2, 3, 8, 14, 12, 13, 18, 11, 21, 22, 17, 10, 30, 40, 144, 146, 147, 148, 149}
+GGML_TYPE_NAMES = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 6: "Q5_0", 7: "Q5_1", 8: "Q8_0", 9: "Q8_1", 10: "Q2_K",
+                   11: "Q3_K", 12: "Q4_K", 13: "Q5_K", 14: "Q6_K", 15: "Q8_K", 16: "IQ2_XXS", 17: "IQ2_XS", 18: "IQ3_XXS",
+                   19: "IQ1_S", 20: "IQ4_NL", 21: "IQ3_S", 22: "IQ2_S", 23: "IQ4_XS", 29: "IQ1_M", 30: "BF16", 34: "TQ1_0",
+                   35: "TQ2_0", 39: "MXFP4", 40: "NVFP4", 42: "Q2_0"}
+HF_HOST = "huggingface.co"
+BYO_LABEL = re.compile(r"(?<![A-Za-z0-9])(?:UD-)?(?:I?Q\d+(?:_[A-Za-z0-9]+)*|BF16|F16|F32|MXFP4(?:_MOE)?)(?:-[A-Za-z][A-Za-z0-9_]*)*$",
+                       re.I)
+HF_GGUF = re.compile(r"^hf:([\w.-]+/[\w.-]+)(?:@([\w./-]+))?(?::(.+))?$")
+HF_URL = re.compile(r"^https?://huggingface\.co/([\w.-]+/[\w.-]+)(?:/(?:resolve|blob|tree)/([\w.-]+)(?:/(.*))?)?/?$")
+_hf_token = None                                       # the token this run uses (hf_token), None: none
+_byo_record = None                                     # --gguf: where the model came from, kept in its config ("byo")
+
+
+class _DropAuthElsewhere(urllib.request.HTTPRedirectHandler):
+    """A redirect to another host (Hugging Face sends a download on to its storage hosts with a signed link) goes
+    without the Authorization header: the token is for huggingface.co only.  urllib would carry it along."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl).hostname != urllib.parse.urlsplit(req.full_url).hostname:
+            new.remove_header("Authorization")
+        return new
+
+
+_hf_opener = urllib.request.build_opener(_DropAuthElsewhere)
+
+
+def hf_auth(req):
+    """`req` with the Hugging Face token when it goes to huggingface.co and there is one; (request, opener)."""
+    if _hf_token and isinstance(req, urllib.request.Request) and urllib.parse.urlsplit(req.full_url).hostname == HF_HOST:
+        req.add_header("Authorization", f"Bearer {_hf_token}")
+        return req, _hf_opener
+    return req, None
+
+
+def hf_token_sources(token_file: str | None = None) -> list:
+    """Where a token is looked for, in order: --hf-token-file, HF_TOKEN (and the older HUGGING_FACE_HUB_TOKEN), the
+    file HF_TOKEN_PATH names, and the token file of the Hugging Face tools ($HF_HOME/token, ~/.cache/huggingface/token)."""
+    out = []
+    if token_file:
+        out.append(("file", Path(token_file).expanduser()))
+    for v in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        if os.environ.get(v, "").strip():
+            out.append(("env", v))
+    if os.environ.get("HF_TOKEN_PATH"):
+        out.append(("file", Path(os.environ["HF_TOKEN_PATH"]).expanduser()))
+    home = Path(os.environ["HF_HOME"]).expanduser() if os.environ.get("HF_HOME") else Path.home() / ".cache" / "huggingface"
+    out.append(("file", home / "token"))
+    return out
+
+
+def hf_token(token_file: str | None = None) -> str | None:
+    """The first token found in hf_token_sources; None when there is none."""
+    for kind, where in hf_token_sources(token_file):
+        if kind == "env":
+            return os.environ[where].strip()
+        try:
+            t = where.read_text(encoding="utf-8").strip()
+        except OSError:
+            if kind == "file" and token_file and where == Path(token_file).expanduser():
+                fail(f"--hf-token-file {token_file}: it cannot be read")
+            continue
+        if t:
+            return t
+    return None
+
+
+def hf_get_json(url: str):
+    """A Hugging Face API answer (with the token when there is one); urllib's HTTPError on a refusal."""
+    req, opener = hf_auth(urllib.request.Request(url, headers={"User-Agent": "strata-setup"}))
+    with (opener.open(req, timeout=60) if opener else urllib.request.urlopen(req, timeout=60)) as r:
+        return json.loads(r.read())
+
+
+def hf_repo(repo: str, rev: str | None = None) -> dict:
+    """The repository at a revision: {"sha": commit, "gated": False | "auto" | "manual", "files": {path: (bytes,
+    sha256 or None)}}.  A repository that is not there, or private without a token that sees it, stops setup."""
+    url = f"https://{HF_HOST}/api/models/{repo}" + (f"/revision/{urllib.parse.quote(rev, safe='')}" if rev else "") + \
+        "?blobs=true"
+    try:
+        d = hf_get_json(url)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 404):
+            fail(f"Hugging Face has no repository {repo}" + (f" at {rev}" if rev else "") + " that this setup can see",
+                 "check the name; a private repository needs a token that has access (HF_TOKEN, or `hf auth login`)")
+        fail(f"Hugging Face answered {e.code} for {repo}", "try again later")
+    except (OSError, ValueError) as e:
+        fail(f"could not read {repo}'s file list from Hugging Face ({e})", "check the internet connection and try again")
+    files = {}
+    for s in d.get("siblings") or []:
+        lfs = s.get("lfs") or {}
+        files[s["rfilename"]] = (int(s.get("size") or lfs.get("size") or 0), lfs.get("sha256"))
+    return {"sha": d.get("sha"), "gated": d.get("gated") or False, "files": files}
+
+
+def byo_sets(paths) -> dict:
+    """The GGUF models among a repository's files, by the label a person types: {label: [path of part 1, ...]}.  A split
+    model's parts are one entry; the image encoder (mmproj) and a separate draft model are not models.  The label is
+    quantization at the end of the name and what follows it (Qwen3.8-Flash-Next-Uncensored-IQ3_XXS -> IQ3_XXS,
+    ...-IQ4_XS-MTP -> IQ4_XS-MTP, gemma-4-...-UD-IQ3_XXS -> UD-IQ3_XXS), else the whole name; byo_pick takes either."""
+    stems = {}
+    for p in sorted(paths):
+        name = p.rsplit("/", 1)[-1]
+        low = name.lower()
+        if not low.endswith(".gguf") or low.startswith("mmproj") or "draft" in low:
+            continue
+        m = SHARD_NAME.search(name)
+        stem = p[:len(p) - len(name)] + (name[:m.start()] if m else name[:-5])
+        stems.setdefault(stem, []).append(p)
+    out = {}
+    for stem, ps in stems.items():
+        name = stem.rsplit("/", 1)[-1]
+        q = BYO_LABEL.search(name)
+        out.setdefault(q.group(0) if q else name, []).append((name, sorted(ps)))
+    labels = {}
+    for label, models in out.items():                  # two models with the same label (a draft model's mtp-...-Q8_0
+        for name, ps in models:                        # beside the model's Q8_0) are called by their whole names
+            labels[label if len(models) == 1 else name] = ps
+    return labels
+
+
+def byo_pick(sets: dict, quant: str | None, where: str) -> str:
+    """The label of `quant` among `sets` (case does not matter); with none given and one model there, that one.  Else
+    setup stops and lists the choices with their sizes (or asks, on a terminal)."""
+    if quant:
+        hit = [k for k in sets if k.upper() == quant.upper()] or \
+            [k for k, ps in sets.items() if ps[0].rsplit("/", 1)[-1].upper().startswith(quant.upper() + "-0000")
+             or ps[0].rsplit("/", 1)[-1].upper() == quant.upper() + ".GGUF"]
+        if hit:
+            return hit[0]
+        fail(f"{where} has no {quant}", "it has: " + ", ".join(sets))
+    if len(sets) == 1:
+        return next(iter(sets))
+    if not sets:
+        fail(f"{where} has no GGUF model")
+    fail(f"{where} has {len(sets)} models: name one", "for example --gguf " + (where if where.startswith("hf:") else where)
+         + ":" + next(iter(sets)) + "   (choices: " + ", ".join(sets) + ")")
+
+
+class GgufReader:
+    """Reads a GGUF's header - its keys and its tensor table - from the start of a file, a piece at a time, so only
+    what the header takes is read: a local file, or a file on Hugging Face through Range requests (the token goes
+    with them, as with the download)."""
+
+    def __init__(self, src, size: int | None = None):
+        self.src, self.size, self.buf = src, size, b""
+
+    def _more(self, need: int):
+        want = max(need, len(self.buf) * 2, 1 << 20)
+        if isinstance(self.src, Path):
+            with open(self.src, "rb") as f:
+                self.buf = f.read(want)
+        else:
+            req = urllib.request.Request(self.src, headers={"User-Agent": "strata-setup", "Range": f"bytes=0-{want - 1}"})
+            req, opener = hf_auth(req)
+            with (opener.open(req, timeout=60) if opener else _urlopen(req, timeout=60)) as r:
+                self.buf = r.read()
+        if len(self.buf) < need:
+            raise ValueError("the file ends inside its header")
+
+    def take(self, pos: int, n: int) -> bytes:
+        if pos + n > len(self.buf):
+            self._more(pos + n)
+        return self.buf[pos:pos + n]
+
+    def header(self) -> dict:
+        """{"version", "kv": {key: value (an array's length for an array)}, "tensors": [(name, type, n elements,
+        offset)], "data_start"}; ValueError for a file that is not a GGUF."""
+        if self.take(0, 4) != b"GGUF":
+            raise ValueError("not a GGUF file")
+        version, n_t, n_kv = struct.unpack("<IQQ", self.take(4, 20))
+        pos, kv = 24, {}
+        fmt = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d"}
+
+        def string(p):
+            n = struct.unpack("<Q", self.take(p, 8))[0]
+            return self.take(p + 8, n).decode("utf-8", "replace"), p + 8 + n
+
+        def value(t, p):
+            if t == 8:
+                return string(p)
+            if t == 9:
+                at, n = struct.unpack("<IQ", self.take(p, 12))
+                p += 12
+                if at in fmt:                          # a numeric array: skipped whole
+                    return n, p + n * struct.calcsize(fmt[at])
+                for _ in range(n):                     # strings or nested arrays: walked
+                    _, p = value(at, p)
+                return n, p
+            if t not in fmt:
+                raise ValueError(f"unknown GGUF value type {t}")
+            return struct.unpack(fmt[t], self.take(p, struct.calcsize(fmt[t])))[0], p + struct.calcsize(fmt[t])
+
+        for _ in range(n_kv):
+            key, pos = string(pos)
+            t = struct.unpack("<I", self.take(pos, 4))[0]
+            kv[key], pos = value(t, pos + 4)
+        tensors = []
+        for _ in range(n_t):
+            name, pos = string(pos)
+            nd = struct.unpack("<I", self.take(pos, 4))[0]
+            dims = struct.unpack(f"<{nd}Q", self.take(pos + 4, 8 * nd))
+            t, off = struct.unpack("<IQ", self.take(pos + 4 + 8 * nd, 12))
+            pos += 16 + 8 * nd
+            tensors.append((name, t, math.prod(dims), off))
+        align = int(kv.get("general.alignment", 32))
+        return {"version": version, "kv": kv, "tensors": tensors, "data_start": (pos + align - 1) // align * align}
+
+
+def byo_check(heads: list, names: list, sizes: list, strata: bool) -> dict:
+    """The parts' headers, checked: one architecture Momoe runs, the parts of one split model in order, and (`strata`:
+    Strata's engine) every layer's experts in formats it has kernels for.  Returns {"arch", "name", "expert_bytes",
+    "ple" (the part with Flash-Next's per-layer table, its index), "mtp" (the file has its own MTP layers)}."""
+    kv0 = heads[0]["kv"]
+    arch = kv0.get("general.architecture")
+    if arch not in BYO_ARCHS:
+        fail(f"{names[0]} is a {arch or 'unknown'} model: Momoe's engines run " + ", ".join(BYO_ARCHS)
+             + (" (DeepSeek-V4.1-Flash: --family deepseek41)" if arch == "deepseek41" else ""))
+    n = int(kv0.get("split.count", 1))
+    if n != len(heads):
+        fail(f"{names[0]} says the model has {n} parts; {len(heads)} were found")
+    for i, h in enumerate(heads):
+        if int(h["kv"].get("split.no", 0)) != i or int(h["kv"].get("split.count", 1)) != n:
+            fail(f"{names[i]} is not part {i + 1} of {n} of this model (split.no {h['kv'].get('split.no')}, "
+                 f"split.count {h['kv'].get('split.count')})")
+    experts, bad, ple = 0, {}, None
+    for i, h in enumerate(heads):
+        order = sorted(h["tensors"], key=lambda t: t[3])
+        end = (sizes[i] or 0) - h["data_start"]
+        for k, (name, t, n_el, off) in enumerate(order):
+            if name == "per_layer_token_embd.weight":
+                ple = i
+            if ".ffn_" not in name or "_exps." not in name:
+                continue
+            nxt = order[k + 1][3] if k + 1 < len(order) else end
+            experts += max(nxt - off, 0)
+            role = name.split(".ffn_", 1)[1].split("_exps", 1)[0]
+            ok = t in (BYO_D_TYPES if role == "down" else BYO_GU_TYPES)
+            if strata and not ok:
+                bad.setdefault((role, GGML_TYPE_NAMES.get(t, str(t))), []).append(name.split(".")[1])
+    if bad:
+        lines = [f"{role} {tname} (layers {', '.join(sorted(set(l), key=int)[:6])}{' ...' if len(set(l)) > 6 else ''})"
+                 for (role, tname), l in bad.items()]
+        fail(f"{names[0]}: Strata's engine has no GPU kernels for these experts: " + "; ".join(lines),
+             "another quantization of the same model may run (most IQ2-IQ4 and Q2_K-Q8_0 files do)")
+    return {"arch": arch, "name": kv0.get("general.name") or names[0], "expert_bytes": experts, "ple": ple,
+            "mtp": int(kv0.get(f"{arch}.nextn_predict_layers", 0) or 0) > 0}
+
+
+def byo_slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9.]+", "-", text.lower()).strip("-")[:60] or "model"
+
+
+def byo_strata_path(arch: str, hip: bool) -> bool:
+    """Whether this machine runs `arch` on Strata's engine (a PC with its own NVIDIA or AMD card) rather than on Momoe's
+    ggml engine (a Mac, a GPU that shares the memory, and the ggml architectures everywhere)."""
+    if arch not in ("qwen4exp", "qwen35moe") or sys.platform == "darwin":
+        return False
+    return hip or not any(g.get("unified") and gpu_problem(g) is None for g in gpus())
+
+
+def byo_token_for(repo: str, info: dict, a) -> None:
+    """A gated repository: the token for it (hf_token), or one typed in, or setup stops and says how to get one."""
+    global _hf_token
+    _hf_token = hf_token(getattr(a, "hf_token_file", None))
+    if not info["gated"] or _hf_token:
+        return
+    page = f"https://{HF_HOST}/{repo}"
+    say(f"  {repo} is gated: its files download only for an account that accepted its terms, with that account's token.")
+    if a.yes or not sys.stdin.isatty():
+        fail(f"{repo} needs a Hugging Face token, and none was found",
+             f"accept the terms at {page} (logged in), make a read token at https://{HF_HOST}/settings/tokens, then "
+             "set HF_TOKEN, run `hf auth login`, or name a file with --hf-token-file; and run setup again")
+    say(f"  Accept its terms at {page} (logged in), then make a read token at https://{HF_HOST}/settings/tokens.")
+    import getpass
+    t = getpass.getpass("  Paste the token (it is not shown): ").strip()
+    if not t:
+        fail("no token was given")
+    _hf_token = t
+    dest = hf_token_sources()[-1][1]
+    if ask(f"  Keep it in {dest} (where the Hugging Face tools look for it too)?", ["y", "n"], "n", a.yes) == "y":
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(t + "\n", encoding="utf-8")
+        try:
+            dest.chmod(0o600)
+        except OSError:
+            pass
+
+
+def byo_resolve(a) -> dict:
+    """--gguf: {"where", "label", "parts": [(url or None, name, bytes, sha256 or None, local Path or None)], "mmproj":
+    (url, name, bytes, sha) or None, "repo", "commit", "heads"} - the files, their headers read and checked."""
+    spec = a.gguf.strip()
+    m = HF_GGUF.match(spec)
+    u = HF_URL.match(spec)
+    if m or u:
+        repo, rev, rest = (m.group(1), m.group(2), m.group(3)) if m else (u.group(1), u.group(2), u.group(3))
+        info = hf_repo(repo, rev)
+        byo_token_for(repo, info, a)
+        sets = byo_sets(info["files"])
+        if u and rest and rest.lower().endswith(".gguf"):           # a file's own address: its model
+            label = next((k for k, ps in sets.items() if rest in ps), None) or byo_pick(sets, None, f"hf:{repo}")
+        else:
+            label = byo_pick(sets, rest if m else None, f"hf:{repo}")
+        base = f"https://{HF_HOST}/{repo}/resolve/{info['sha']}/"
+        parts = [(base + p, p.rsplit("/", 1)[-1], *info["files"][p], None) for p in sets[label]]
+        mm = sorted(p for p in info["files"] if p.rsplit("/", 1)[-1].lower().startswith("mmproj")
+                    and p.lower().endswith(".gguf"))
+        mmproj = (base + mm[0], mm[0].rsplit("/", 1)[-1], *info["files"][mm[0]]) if mm else None
+        where, commit = f"hf:{repo}", info["sha"]
+        try:
+            heads = [GgufReader(url, size).header() for url, _n, size, _s, _l in parts]
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                fail(f"Hugging Face did not accept the token for {parts[0][1]} (401): it is wrong or no longer valid"
+                     if _hf_token else f"{parts[0][1]} needs a Hugging Face token (401)",
+                     f"make a read token at https://{HF_HOST}/settings/tokens and set HF_TOKEN (or `hf auth login`, or "
+                     "--hf-token-file), then run setup again")
+            if e.code == 403:
+                fail(f"Hugging Face refused {parts[0][1]} (403): the token's account has no access to {repo}",
+                     f"accept its terms at https://{HF_HOST}/{repo} with that account (some authors approve each "
+                     "request by hand), then run setup again")
+            fail(f"could not read {parts[0][1]}'s header ({e.code})", "try again later")
+        except (OSError, ValueError) as e:
+            fail(f"could not read {parts[0][1]}'s header ({e})", "check the internet connection and try again")
+    else:
+        p = Path(spec).expanduser().resolve()
+        if p.is_dir():
+            sets = byo_sets([str(x) for x in p.glob("*.gguf")])
+            label = byo_pick(sets, None, str(p))
+            p = Path(sets[label][0])
+        if not p.is_file():
+            fail(f"--gguf {spec}: no such file", "give a .gguf file (the first part of a split model), or hf:owner/repo:QUANT")
+        sm = SHARD_NAME.search(p.name)
+        if sm and sm.group(1) != "00001":
+            fail(f"{p.name} is part {int(sm.group(1))} of a split model", "give its first part (-00001-of-...)")
+        n = int(sm.group(2)) if sm else 1
+        files = [p.with_name("%s-%05d-of-%05d.gguf" % (p.name[:sm.start()], i, n)) for i in range(1, n + 1)] if sm else [p]
+        missing = [f.name for f in files if not f.is_file()]
+        if missing:
+            fail(f"{p.name} is part 1 of {n}; missing beside it: " + ", ".join(missing))
+        parts = [(None, f.name, f.stat().st_size, None, f) for f in files]
+        label = (GGUF_QUANT.search(files[0].name).group(1) if GGUF_QUANT.search(files[0].name)
+                 else (files[0].name[:sm.start()] if sm else files[0].stem))
+        mm = sorted(p.parent.glob("mmproj*.gguf"))
+        mmproj = (None, mm[0].name, mm[0].stat().st_size, None) if mm else None
+        where, repo, commit = str(p), None, None
+        try:
+            heads = [GgufReader(f).header() for f in files]
+        except (OSError, ValueError) as e:
+            fail(f"{p.name}: {e}")
+    return {"where": where, "label": label, "parts": parts, "mmproj": mmproj, "repo": repo, "commit": commit,
+            "heads": heads}
+
+
+def byo_prepare(a, hip: bool = False) -> None:
+    """--gguf: the model's files resolved and checked, a family and a size made for it, and a.family / a.model (and
+    a.gguf_dir for files the person has) set, so the install goes on as for a listed model."""
+    if a.family or a.model:
+        fail("--gguf names the model itself: leave out --family and --model")
+    r = byo_resolve(a)
+    names, sizes = [p[1] for p in r["parts"]], [p[2] for p in r["parts"]]
+    arch = r["heads"][0]["kv"].get("general.architecture")
+    strata = byo_strata_path(arch, hip)
+    c = byo_check(r["heads"], names, sizes, strata)
+    title = r["repo"].split("/")[-1] if r["repo"] else str(c["name"])
+    slug = byo_slug(title)
+    total = sum(sizes)
+    say(f"  {title} {r['label']}: {c['arch']}, {len(names)} file{'s' if len(names) > 1 else ''}, {total / 1e9:.1f} GB "
+        f"({c['expert_bytes'] / 1e9:.1f} GB of experts), from {r['where']}" + (f" at {r['commit'][:12]}" if r["commit"] else ""))
+    local = r["parts"][0][4] is not None
+    hf_base = r["parts"][0][0][:len(r["parts"][0][0]) - len(names[0])] if not local else ""
+    if strata:
+        base = FAMILIES[BYO_BASE[arch]]
+        fam = {k: v for k, v in base.items() if k not in ("sha256", "license", "experimental", "two_gpus_opt_in")}
+        fam.update(title=title, by=r["where"], about="your own GGUF (--gguf)", hf=hf_base, tag=f"byo-{slug}-",
+                   name=slug, sha256={n: (s, p[3]) for n, s, p in zip(names, sizes, r["parts"])},
+                   license=f"see https://{HF_HOST}/{r['repo']}" if r["repo"] else "see the model's own page")
+        if arch == "qwen35moe":
+            fam["own_mtp"] = c["mtp"]
+        if r["mmproj"]:
+            url, mname, msize, msha = r["mmproj"]
+            fam.update(mmproj=mname, mmproj_hf=(url[:len(url) - len(mname)] if url else ""), vision=True)
+            fam["sha256"][mname] = (msize, msha)
+        elif base.get("mmproj"):                       # none in the repository: the base model's, as pinned (a fine-tune
+            fam["sha256"][base["mmproj"]] = (base.get("sha256") or {}).get(base["mmproj"]) or (None, None)   # keeps its
+        else:                                                                                       # picture reader)
+            fam.update(mmproj=None, vision=False)
+        m = SHARD_NAME.search(names[0])
+        key = f"{title} {r['label']}"                   # (a MODELS key no listed size has; setup's lines name it)
+        MODELS[key] = {"size": r["label"], "about": "your own GGUF", "download_gb": round(total / 1e9, 1),
+                       "arena_gb": round(c["expert_bytes"] / 1e9, 1), "families": [BYO], "more": True,
+                       "file": (names[0][:m.start()].replace("{", "{{").replace("}", "}}") + "-{i:05d}-of-%05d.gguf" % len(names))
+                       if m else names[0].replace("{", "{{").replace("}", "}}"), "shards": len(names),
+                       "vision": bool(r["mmproj"])}
+        if arch == "qwen4exp":                         # Flash-Next: read in place within a RAM budget, as Unsloth's sizes
+            MODELS[key].update(ram_gb=48, budget=True)
+        else:                                          # the 35B-A3B family: every expert in RAM beside the card's
+            MODELS[key].update(ram_gb=math.ceil(c["expert_bytes"] / 1e9) + LOW_RAM_HEADROOM_GB,
+                               engine=list(QWEN36_ENGINE) if "QWEN36_ENGINE" in globals() else [0, 1, 44, 1])
+        FAMILIES[BYO] = fam
+        a.family, a.model = BYO, key
+    else:
+        if arch in ("qwen4exp", "qwen35moe"):
+            fail(f"{title}: your own {arch} GGUF runs on Strata's engine, on a PC with its own NVIDIA or AMD card; "
+                 "Momoe's ggml engine (a Mac, the DGX Spark) takes it from the list only for now")
+        base = GGML_FAMILIES[BYO_BASE[arch]]
+        fam = {k: v for k, v in base.items() if k not in ("sha256", "parts", "models", "default", "license", "mmproj")}
+        q = r["label"]
+        fam.update(title=title, by=r["where"], about="your own GGUF (--gguf)", hf=hf_base, tag=f"byo-{slug}-",
+                   name=slug, default=q,
+                   parts={q: [(p[0][len(hf_base):] if p[0] else p[1], p[2], p[3]) for p in r["parts"]]},
+                   models={q: {"about": "your own GGUF", "ram_gb": math.ceil(total / 1e9) + 4}},
+                   license=f"see https://{HF_HOST}/{r['repo']}" if r["repo"] else "see the model's own page")
+        if r["mmproj"]:
+            url, mname, msize, msha = r["mmproj"]
+            fam["mmproj"] = [(url[len(hf_base):] if url else mname), msize, msha]
+        GGML_FAMILIES[BYO] = fam
+        a.family, a.model = BYO, q
+    if local:
+        a.gguf_dir = str(r["parts"][0][4].parent)
+    global _byo_record
+    _byo_record = {"source": r["where"], "label": r["label"], "arch": arch, "base": BYO_BASE[arch],
+                   **({"repo": r["repo"], "commit": r["commit"]} if r["repo"] else {})}
+
+
 def build_release() -> int:
     """--build-release (docker/build-in-oven.sh, in the manylinux oven): every engine a Linux PC can need, compiled as
     setup compiles them on a PC but for every card in MOMOE_RELEASE_ARCHS and any AVX2 CPU (STRATA_RELEASE_BUILD=1).
@@ -8896,6 +9355,13 @@ def main() -> int:
     ap.add_argument("--data-dir", help="where the model files go (~20-120 GB): default this folder (models/, packs/, "
                                        "mtp/); a folder given here is remembered for every Momoe folder on this PC")
     ap.add_argument("--models-dir", help="where the GGUF files go (default: <data folder>/models)")
+    ap.add_argument("--gguf", metavar="FILE|hf:OWNER/REPO:QUANT",
+                    help="a GGUF that is not in setup's list: a file you have (the first part of a split model), or one "
+                         "on Hugging Face (hf:owner/repo:QUANT, or the repository's address); its architecture must be "
+                         "one Momoe's engines run")
+    ap.add_argument("--hf-token-file", metavar="FILE",
+                    help="a file with a Hugging Face token, for a gated or private repository (else HF_TOKEN or the "
+                         "token `hf auth login` keeps)")
     ap.add_argument("--gguf-dir", help="use GGUF files you already have (a folder with every shard: "
                                        "<name>-00001-of-0000N.gguf ... -0000N-of-0000N.gguf)")
     ap.add_argument("--yes", action="store_true", help="accept the recommended answers")
@@ -8996,6 +9462,8 @@ def main() -> int:
     roots = [data, *elsewhere]
     if a.models_dir is None:
         a.models_dir = str(data / "models")
+    if getattr(a, "gguf", None):                       # your own GGUF: read, checked, then installed as a listed one
+        byo_prepare(a, hip=a.backend == "hip")
 
 
     # ---- 0. already installed: just start it

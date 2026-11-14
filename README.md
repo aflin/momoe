@@ -95,6 +95,10 @@ The machines:
 | **M4 Air** | MacBook Air M4, 32 GB ("as an 8 GB Mac": setup's 8 GB config with 10 GiB locked away) |
 | **Mac mini** | Mac mini M1, 8 GB, macOS 11 |
 
+A GGUF that is not in setup's list runs too, when its architecture is one the engines run (a fine-tune, another
+uploader's quantization): `./setup.sh --gguf hf:owner/repo:QUANT`, or `--gguf` and a file you have. Setup reads its
+headers before downloading anything; a gated repository needs a Hugging Face token. [How](docs/INSTALL.md#your-own-gguf).
+
 ### Which model runs where
 
 Writing speed in tokens per second, with setup's config on each machine; "-" means not tried. \* = drafting with the
