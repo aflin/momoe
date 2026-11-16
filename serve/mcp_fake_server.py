@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import socketserver
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -108,10 +109,21 @@ def stdio():
             answer(msg)
 
 
-def http_server(port: int = 0) -> ThreadingHTTPServer:
+class _NoLookupServer(ThreadingHTTPServer):
+    """http.server's server_bind also asks socket.getfqdn for the address, which stalled 35 s in every new process on GitHub's macOS runner."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+def http_server(port: int = 0, unknown_session: str = "400") -> ThreadingHTTPServer:
     """Streamable HTTP at /mcp: JSON answers, except tools/call, which answers as an event stream (a progress
-    notification first); a session id from initialize is required afterwards."""
-    sessions = set()
+    notification first); a session id from initialize is required afterwards.  `httpd.restart()` forgets every
+    session, as a restarted server does.  `unknown_session` is how a request with a session id it does not know is
+    answered: "400" (an empty 400), "404" (the spec's answer), "jsonrpc-400" / "jsonrpc-200" (a JSON-RPC error
+    -32600 "Unknown session id ...; client should reinitialize" in a 400 or a 200, as some servers send it)."""
+    sessions, issued = set(), [0]
 
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"
@@ -119,11 +131,26 @@ def http_server(port: int = 0) -> ThreadingHTTPServer:
         def log_message(self, *a):
             pass
 
+        def _unknown(self, msg):
+            sid = self.headers.get("Mcp-Session-Id")
+            if unknown_session in ("400", "404") or not sid:
+                self.send_response(404 if unknown_session == "404" and sid else 400)
+                self.end_headers()
+                return
+            body = json.dumps({"jsonrpc": "2.0", "id": msg.get("id"), "error": {
+                "code": -32600, "message": f"Unknown session id '{sid}' for '{msg.get('method')}'; client should "
+                                           "reinitialize"}}).encode()
+            self.send_response(400 if unknown_session == "jsonrpc-400" else 200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_POST(self):
             msg = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
             if msg.get("method") != "initialize" and self.headers.get("Mcp-Session-Id") not in sessions:
-                self.send_response(400)
-                self.end_headers()
+                log({"unknown_session": msg.get("method"), "tool": (msg.get("params") or {}).get("name")})
+                self._unknown(msg)
                 return
             r = handle(msg)
             if r is None:
@@ -143,8 +170,11 @@ def http_server(port: int = 0) -> ThreadingHTTPServer:
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             if msg.get("method") == "initialize":
-                sid = f"s-{len(sessions) + 1}"
-                sessions.add(sid)
+                issued[0] += 1                       # never reused, also after restart()
+                sid = f"s-{issued[0]}"
+                if not httpd.forget_sessions:        # a broken server: forgets each session at once
+                    sessions.add(sid)
+                log({"initialize": sid})
                 self.send_header("Mcp-Session-Id", sid)
             self.end_headers()
             self.wfile.write(body)
@@ -154,7 +184,9 @@ def http_server(port: int = 0) -> ThreadingHTTPServer:
             self.send_response(200)
             self.end_headers()
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), H)
+    httpd = _NoLookupServer(("127.0.0.1", port), H)
+    httpd.restart = sessions.clear
+    httpd.forget_sessions = False
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd
 
