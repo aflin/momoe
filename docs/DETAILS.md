@@ -140,6 +140,11 @@ Wikipedia corpus (46,211 ids, `tools/draft_vocab.py --corpus`): 23.6% of French 
 English/code subset, 0.7% are outside this one. Drafts accepted in French answers 0.51 -> 0.60 (IQ3_XXS, RTX 5070,
 8 prompts x 2 passes; English 0.61 -> 0.63 and code 0.77 -> 0.78, no loss), and 141 -> 158 tok/s in French on an
 RTX 5090 (IQ3_S, the reporter's measurement).
+`--draft-vocab latin` (upstream 0.2.14) takes the English/code subset plus the tokens of German, Spanish, French
+and Polish text (62,102 ids, a draft head of about 203 MiB on IQ3_S). Upstream measured on an RTX PRO 5000 (IQ3_S),
+default subset -> latin, tokens/s: German 211.7 -> 233.6, Spanish 220.1 -> 244.5, French 221.9 -> 249.1, Polish
+188.4 -> 203.2, English 265.2 -> 266.0; Chinese 238.4 -> 199.2 and Japanese 222.2 -> 194.4 (the default keeps
+them); output tokens identical in every arm.
 `tools/draft_vocab.py` builds and inspects subsets. When the start stops with "the draft head does not fit" (a
 12 GB card with a long context, #474), the engine says how much the head needs, how much VRAM is free and which
 smaller subset fits, and the server's start error repeats it; setup suggests `--draft-vocab en` on cards under

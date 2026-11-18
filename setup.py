@@ -1213,10 +1213,96 @@ def _memory_status():
 def ram_gb():
     if WIN:
         return _memory_status().ullTotalPhys / 2**30
-    for line in open("/proc/meminfo"):
-        if line.startswith("MemTotal"):
-            return int(line.split()[1]) * 1024 / 2**30
-    return 0.0
+    if sys.platform == "darwin":
+        try:
+            value = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True,
+                                   text=True, errors="replace", timeout=3, check=True).stdout.strip()
+            return int(value) / 2**30
+        except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return 0.0
+    total = 0.0
+    try:
+        with open("/proc/meminfo") as stream:
+            for line in stream:
+                if line.startswith("MemTotal"):
+                    total = int(line.split()[1]) * 1024 / 2**30
+                    break
+    except (OSError, ValueError):
+        pass
+    if total <= 0.0:
+        return 0.0
+    # In a container /proc/meminfo is the host's: the container's own limit is the RAM the engine gets.
+    limit = _cgroup_memory_limit()
+    if limit is not None and limit / 2**30 < total:
+        return limit / 2**30
+    return total
+
+
+def _cgroup_levels(root, group):
+    """The cgroup directories from the mount `root` down to `group` ("/a/b"), cut at the first one that is not there
+    (a container without its own cgroup namespace sees its host path, but only its own subtree under the mount)."""
+    levels = [root]
+    at = root
+    for part in [p for p in group.split("/") if p]:
+        if part in (".", ".."):
+            return []
+        at = os.path.join(at, part)
+        if not os.path.isdir(at):
+            break
+        levels.append(at)
+    return levels if os.path.isdir(root) else []
+
+
+def _cgroup_number(path, v1=False):
+    """A cgroup limit file: its number of bytes, or None for "max", an absent or unreadable file, or v1's "unlimited"."""
+    try:
+        with open(path) as stream:
+            text = stream.read().strip()
+    except OSError:
+        return None
+    if not text.isdigit():
+        return None
+    value = int(text)
+    if v1 and value >= 1 << 62:
+        return None
+    return value
+
+
+def _cgroup_memory_limit(self_cgroup="/proc/self/cgroup", root="/sys/fs/cgroup"):
+    """The smallest memory limit (bytes) on this process's cgroup and its ancestors, as the engine's memory guard reads
+    it: cgroup v2 memory.max and memory.high, or cgroup v1 memory.limit_in_bytes when there is no v2 memory controller.
+    None when no level sets a limit or the files cannot be read."""
+    try:
+        with open(self_cgroup) as stream:
+            lines = stream.read().splitlines()
+    except OSError:
+        lines = ["0::/"]
+    v2_group = v1_group = None
+    for line in lines:
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        if parts[0] == "0" and parts[1] == "":
+            v2_group = parts[2]
+        elif "memory" in parts[1].split(","):
+            v1_group = parts[2]
+    limits = []
+    v2_files = False
+    if v2_group is not None:
+        for level in _cgroup_levels(root, v2_group):
+            if not os.path.exists(os.path.join(level, "memory.current")):
+                continue
+            v2_files = True
+            for name in ("memory.max", "memory.high"):
+                value = _cgroup_number(os.path.join(level, name))
+                if value is not None:
+                    limits.append(value)
+    if not v2_files and v1_group is not None:
+        for level in _cgroup_levels(os.path.join(root, "memory"), v1_group):
+            value = _cgroup_number(os.path.join(level, "memory.limit_in_bytes"), v1=True)
+            if value is not None:
+                limits.append(value)
+    return min(limits) if limits else None
 
 
 _MM_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
@@ -5431,7 +5517,7 @@ def build_engine(gpu, vision, yes, llama, toolkit=None, more=False) -> Path:
 DATA_ITEMS = ("models", "packs", "mtp")
 
 
-LOW_RAM_HEADROOM_GB = 10   # RAM beside the experts: the OS, the engine's other buffers, the server
+LOW_RAM_HEADROOM_GB = 10   # RAM beside the experts (GiB, as ram_gb() counts): the OS, the engine's other buffers, the server
 RESIDENT_ENGINE = (0, 1, 30)   # the first engine with --resident-experts (the low-RAM mode's resident variant)
 RESIDENT_SPLIT_ENGINE = (0, 1, 40)   # #642: the first engine that runs it on a layer split
 
@@ -5446,7 +5532,13 @@ def resident_split() -> bool:
 def low_ram_needed(model, ram) -> bool:
     """The model's experts do not fit this PC's RAM with room left for the rest: they are then mapped from the pack's
     experts.bin instead of copied into RAM (the low-RAM mode)."""
-    return ram < MODELS[model]["arena_gb"] + LOW_RAM_HEADROOM_GB
+    return ram_short_of_arena(ram, MODELS[model]["arena_gb"])
+
+
+def ram_short_of_arena(ram_gib, arena_gb, headroom_gib=LOW_RAM_HEADROOM_GB) -> bool:
+    """True when `ram_gib` (GiB, as ram_gb() returns it) is less than an expert arena of `arena_gb` (GB of 10^9
+    bytes, as MODELS gives it) plus the headroom (GiB): both sides counted in GiB."""
+    return ram_gib < arena_gb * 1e9 / 2**30 + headroom_gib
 
 
 #: The draft layer (MTP) takes about 1 GB of graphics memory: its 786 MiB of files plus the draft head's ~218 MiB
@@ -6582,7 +6674,7 @@ OLD_DRAFT_VOCABS = {"369151522226a5edaa5f12cfd1e2ae7db8f4fbdbd222f3dcf327dced959
 
 
 DRAFT_VOCABS = {"cjk": "draft_vocab.bin", "en": "draft_vocab_en.bin", "cyrillic": "draft_vocab_cyrillic.bin",
-                "fr": "draft_vocab_fr.bin"}
+                "fr": "draft_vocab_fr.bin", "latin": "draft_vocab_latin.bin"}
 
 
 def saved_draft_vocab(cfg_path: Path) -> str | None:
@@ -6620,7 +6712,7 @@ def vision_tokens(asked: int | None, vision: str, earlier: Path | None) -> int:
     return asked
 
 
-DRAFT_VOCAB_MIB = {"cjk": 348, "cyrillic": 193, "fr": 151, "en": 133}   # the draft head's VRAM per subset (IQ3_S: the largest)
+DRAFT_VOCAB_MIB = {"cjk": 348, "cyrillic": 193, "fr": 151, "en": 133, "latin": 203}   # the draft head's VRAM per subset (IQ3_S: the largest)
 SMALL_DRAFT_VRAM_GB = 14   # #474: below this the default subset's head can be what does not fit
 
 
@@ -6865,7 +6957,8 @@ def refresh_draft_vocab(rt: Path, choice: str = "cjk") -> None:
     """The draft layer's token subset in the MTP folder: `cjk` (data/draft_vocab.bin, since 0.1.27, #137), `en`
     (data/draft_vocab_en.bin, the English/code subset before it: ~110 MiB less VRAM, English answers 1-2% faster) or
     `cyrillic` (data/draft_vocab_cyrillic.bin: English/code and the whole Cyrillic script, for Ukrainian, Russian,
-    Bulgarian, Serbian... answers) or `fr` (data/draft_vocab_fr.bin: English/code and the tokens of French text, #597).
+    Bulgarian, Serbian... answers) or `fr` (data/draft_vocab_fr.bin: English/code and the tokens of French text, #597) or `latin` (data/draft_vocab_latin.bin: English/code and
+    the tokens of German, Spanish, French and Polish text).
     Copied when missing or when a shipped subset other than the chosen one is there; a subset made by hand is kept."""
     new, dst = ROOT / "data" / DRAFT_VOCABS.get(choice, "draft_vocab.bin"), rt / "draft_vocab.bin"
     if not new.exists() or not rt.is_dir():
@@ -6878,7 +6971,8 @@ def refresh_draft_vocab(rt: Path, choice: str = "cjk") -> None:
             return
         ok("draft layer: the token subset " + {"cjk": "with Chinese, Japanese and Korean",
                                                "cyrillic": "with the Cyrillic script",
-                                               "fr": "for French"}.get(choice,
+                                               "fr": "for French",
+                                               "latin": "with the Latin-script languages"}.get(choice,
                                                                                           "for English and code (less VRAM)"))
     shutil.copyfile(new, dst)
 
@@ -9463,8 +9557,10 @@ def main() -> int:
     ap.add_argument("--draft-vocab", choices=list(DRAFT_VOCABS),
                     help="the draft layer's tokens: cjk = with Chinese, Japanese and Korean (default), en = English "
                          "and code only (~110 MiB less VRAM, English answers 1-2%% faster), cyrillic = English, code "
-                         "and the Cyrillic script (Ukrainian, Russian... answers decode ~30%% faster), fr = English, "
-                         "code and French (French answers: 18%% more drafts accepted)")
+                         "and the Cyrillic script (Russian: 26%% more tokens a second), fr = English, "
+                         "code and French (French answers: 18%% more drafts accepted), latin = English, code and "
+                         "the Latin-script languages (German, Spanish, French, Polish: 8-12%% more tokens a "
+                         "second)")
     ap.add_argument("--low-ram", choices=["auto", "on", "off", "resident", "mmap"], default="auto",
                     help="read the model's experts from one file in its folder instead of copying them all into RAM "
                          "(for a PC with a big GPU and little RAM); auto: when the experts would not fit the RAM. In "
