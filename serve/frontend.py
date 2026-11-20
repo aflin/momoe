@@ -539,10 +539,33 @@ def _tool_list(value, wrapper: str | None) -> list[dict]:
     return _stable_tool_order(tools, lambda t: (t.get(wrapper, t) if wrapper and t.get("type") == wrapper else t)["name"])
 
 
-def tool_arguments(raw) -> dict:
-    """A call's arguments from a client's history -> the mapping the template renders (both APIs).  A JSON object
-    (as text or already parsed) is used as it is; empty is {}; anything else (cut-off or malformed JSON, a list, a
-    number) is kept as text under "arguments" instead of refusing the whole conversation (#510)."""
+def declared_parameters(tools, name):
+    """The parameter names a request declares for the tool `name` (the OpenAI, Anthropic and Responses tool shapes, a
+    Responses namespace included): a set, empty when the tool declares none; None when the request does not declare it."""
+    for t in tools if isinstance(tools, list) else ():
+        if not isinstance(t, dict):
+            continue
+        fn = t["function"] if isinstance(t.get("function"), dict) else t
+        if isinstance(t.get("tools"), list):                          # a namespace of tools
+            found = declared_parameters(t["tools"], name)
+            if found is not None:
+                return found
+        if isinstance(name, str) and name and (fn.get("name") == name or (isinstance(fn.get("name"), str) and name.endswith("." + fn["name"]))):
+            schema = fn.get("parameters") or fn.get("input_schema")
+            props = schema.get("properties") if isinstance(schema, dict) else None
+            return set(props) if isinstance(props, dict) else set()
+    return None
+
+
+def tool_arguments(raw, declared=None) -> dict:
+    """A call's arguments from a client's history -> the mapping the template renders (all three APIs).  A JSON object
+    (as text or already parsed) is used as it is; empty is {}.  Text that starts like an object but is not valid JSON, a
+    call max_tokens cut short, gives the members it still holds (cut_arguments): the model sees the call it wrote, with
+    its parameters, not a parameter called "arguments" it would then write itself (soak 11-17: after a dozen cut calls in
+    a history the model wrote {"arguments": "<json>"} calls).  `declared` = the tool's parameter names
+    (declared_parameters), None when unknown: a tool that really has a parameter "arguments" keeps the old form.
+    Anything else (a list, a number, prose) is kept as text under "arguments" instead of refusing the whole
+    conversation (#510)."""
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return {}
     if isinstance(raw, dict):
@@ -551,6 +574,10 @@ def tool_arguments(raw) -> dict:
         try:
             value = json.loads(raw)
         except ValueError:
+            if declared is None or "arguments" not in declared:
+                cut = cut_arguments(raw)
+                if cut is not None:
+                    return cut
             return {"arguments": raw}
         return value if isinstance(value, dict) else {"arguments": raw}
     return {"arguments": json.dumps(raw, ensure_ascii=False)}
@@ -613,7 +640,8 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
                 fn = c.get("function", c)
                 if not isinstance(fn, dict):
                     raise ValueError("tool_calls must be a list of objects (each with a \"function\" object)")
-                calls.append({"function": {"name": fn.get("name"), "arguments": tool_arguments(fn.get("arguments"))},
+                calls.append({"function": {"name": fn.get("name"),
+                                           "arguments": tool_arguments(fn.get("arguments"), declared_parameters(req.get("tools"), fn.get("name")))},
                               "_call_id": c.get("id")})
             out["tool_calls"] = calls
         messages.append(out)
@@ -697,7 +725,8 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
             elif kind == "thinking":
                 reasoning.append(block.get("thinking", ""))
             elif kind == "tool_use":
-                calls.append({"function": {"name": block.get("name"), "arguments": tool_arguments(block.get("input"))},
+                calls.append({"function": {"name": block.get("name"),
+                                           "arguments": tool_arguments(block.get("input"), declared_parameters(req.get("tools"), block.get("name")))},
                               "_call_id": block.get("id")})
             elif kind == "tool_result":
                 # A tool's image (Claude Code's Read of a picture) reaches the encoder like a user's, as the OpenAI
@@ -1009,6 +1038,8 @@ class _Lenient:
 
     def __init__(self, text: str):
         self.s, self.i = text, 0
+        self.cut_ok = False        # cut_arguments: a string the text ends inside is returned as far as it goes (and `cut` says so)
+        self.cut = False
 
     def peek(self) -> str:
         s, n = self.s, len(self.s)
@@ -1028,6 +1059,10 @@ class _Lenient:
             if c == "\\":
                 self.i += 1
                 e = s[self.i:self.i + 1]
+                if self.cut_ok and (not e or (e == "u" and len(s) - self.i - 1 < 4 and re.fullmatch(r"[0-9a-fA-F]*", s[self.i + 1:]))):
+                    self.i = len(s)                 # cut inside an escape: the half escape is not text
+                    self.cut = True
+                    return "".join(out)
                 if e == "u" and re.fullmatch(r"[0-9a-fA-F]{4}", s[self.i + 1:self.i + 5]):
                     out.append(chr(int(s[self.i + 1:self.i + 5], 16)))
                     self.i += 5
@@ -1038,6 +1073,9 @@ class _Lenient:
             else:
                 out.append(c)
             self.i += 1
+        if self.cut_ok:
+            self.cut = True
+            return "".join(out)
         raise ValueError("string not closed")
 
     def value(self, depth: int = 0):
@@ -1111,6 +1149,75 @@ def lenient_json(text: str):
     return v
 
 
+def cut_arguments(text: str):
+    """The members a call's JSON-object arguments got before the output ended inside them (a client replays what it was
+    sent, and max_tokens cuts a call short), as a dict: every complete `"key": value` pair, and a string value the text
+    ends inside as far as it goes.  A value that is cut short and is not a string (a number, an array, an object) and a
+    cut key are left out.  {} when nothing is recoverable (`{`, `{"pa`); None when the text is not an object cut short
+    (it does not start with `{` and then a key or the end: `{cut`, prose, a list).
+    It reads with _Lenient, so the slips that class forgives (single quotes, a trailing comma) are forgiven here too."""
+    t = text.strip()
+    if not t.startswith("{") or len(t) > LENIENT_MAX:
+        return None
+    r = _Lenient(t)
+    r.cut_ok = True
+    r.i = 1
+    first = r.peek()
+    if first and first not in ('"', "'"):
+        return None                             # `{cut`, `{malformed_json`: not a JSON object cut short, kept as text (#510)
+    out: dict = {}
+    while True:
+        c = r.peek()
+        if not c or c == "}":
+            break
+        if c == ",":
+            r.i += 1
+            continue
+        if c not in ('"', "'"):
+            break
+        try:
+            key = r.string()
+            if r.cut or r.peek() != ":":
+                break
+            r.i += 1
+            value = r.value()
+        except (ValueError, RecursionError):
+            break
+        if r.cut:
+            if isinstance(value, str):
+                out[key] = value
+            break
+        if r.i >= len(t) and not isinstance(value, str):
+            break                               # a number or word the text ends in: it may be cut
+        out[key] = value
+    return out
+
+
+def declared_type(prop, depth: int = 0):
+    """#2371: a parameter's declared JSON type(s) for coerce_value: its "type", or the union of its anyOf / oneOf
+    branches' types (["boolean", "null"] for {"anyOf": [{"type": "boolean"}, {"type": "null"}]}, a nested branch
+    included).  None when a branch names no type (a $ref, an open schema): the value is then read as with no schema.
+    Callers used to read the top-level "type" only, so a boolean declared through anyOf / oneOf stayed the text "True"."""
+    if not isinstance(prop, dict) or depth > 8:
+        return None
+    t = prop.get("type")
+    if t is not None:
+        return t
+    for key in ("anyOf", "oneOf"):
+        branches = prop.get(key)
+        if isinstance(branches, list) and branches:
+            out = []
+            for b in branches:
+                bt = declared_type(b, depth + 1)
+                if bt is None:
+                    return None
+                for x in bt if isinstance(bt, list) else [bt]:
+                    if x not in out:
+                        out.append(x)
+            return out[0] if len(out) == 1 else out
+    return None
+
+
 def coerce_value(value: str, declared, notes: list | None = None):
     """A non-string parameter's text -> its value by the tool's declared type: JSON when it parses; else an array or an
     object read with lenient_json (a note says so in `notes`); else the text itself, as before.  An array or object that
@@ -1162,7 +1269,7 @@ def parse_tool_call(body: str, schema: dict | None = None, notes: list | None = 
             value = value[1:]
         if value.endswith("\n"):
             value = value[:-1]
-        args[pname] = coerce_value(value, (props.get(pname) or {}).get("type"), notes)
+        args[pname] = coerce_value(value, declared_type(props.get(pname)), notes)
     return ToolCall(name=name, arguments=args)
 
 
@@ -1814,7 +1921,7 @@ class OutputParser:
     def clean(self) -> bool:
         """Nothing is held back: a clean point to stop the thinking at (a parser that rewrites the model's text, as
         serve/dsml.py's does, also counts what it holds)."""
-        return not self.buf and not self._held
+        return not self.buf and not self._held and not self._scan_parts   # #4686: a call body moved out
 
     def _ok_at(self, p: int) -> bool:
         """self.buf[p] would open a call: at the start of a line, outside a code fence and inline code."""
@@ -2033,6 +2140,8 @@ class OutputParser:
 
     def _reset_scan(self):
         self._call_end_checked = 0   # closing-tag search progress for the current wrapped call
+        self._function_end_checked = 0
+        self._scan_parts = []        # consumed call body, kept in chunks until the final call needs the whole text
         self.sp = 0                  # how much of self.buf (the call body) the scanner has consumed
         self.ss = "name"             # name -> between -> str|raw -> ... -> function_done -> done
         self.scall = None            # the ToolCall being streamed (its id is reused by the final event)
@@ -2042,19 +2151,65 @@ class OutputParser:
         self.spname = None
         self.svstart = 0
 
+    def _restore_scan_body(self) -> None:
+        """Put compacted call text back before a structural walk or the final parse."""
+        if not self._scan_parts:
+            return
+        prefix = "".join(self._scan_parts)
+        shift = len(prefix)
+        self.buf = prefix + self.buf
+        self.sp += shift
+        if self.ss == "str" and self.sval_started:
+            self.svstart += shift
+        if self._call_end_checked >= 0:
+            self._call_end_checked += shift
+        if self._function_end_checked >= 0:
+            self._function_end_checked += shift
+        self._scan_parts.clear()
+
+    def _compact_scan_body(self) -> None:
+        """Move streamed, consumed call text out of the string that grows on every token."""
+        if self.sp < 4096:
+            return
+        cut = self.sp
+        self._scan_parts.append(self.buf[:cut])
+        self.buf = self.buf[cut:]
+        self.sp = 0
+        if self.ss == "str" and self.sval_started:
+            self.svstart -= cut
+        if self._call_end_checked >= 0:
+            self._call_end_checked = max(0, self._call_end_checked - cut)
+        if self._function_end_checked >= 0:
+            self._function_end_checked = max(0, self._function_end_checked - cut)
+
+    def _function_end(self) -> int:
+        """Run the full function walk only when newly appended text contains a possible closer."""
+        start = max(0, self._function_end_checked - len(FUNC_END) + 1)
+        if self.buf.find(FUNC_END, start) < 0:
+            self._function_end_checked = len(self.buf)
+            return -1
+        self._restore_scan_body()
+        end = function_end(self.buf)
+        self._function_end_checked = -1 if end >= 0 else len(self.buf)
+        return end
+
     def _wrapped_call_end(self) -> int:
         # Without a closing tag the structural walk cannot finish. Search only
         # newly appended text plus enough overlap for a tag split across feeds.
         # A literal closing tag inside a value needs structural disambiguation:
-        # once any candidate appears, keep the original full walk for this call.
-        # Recovery can rewrite the buffer, so it always uses the full walk.
-        if not self.recover and self._call_end_checked >= 0:
+        # once a candidate appears, restore compacted text for the structural walk. If it was a literal tag in a
+        # value, wait for another newly appended candidate instead of walking the unchanged body for every token.
+        if self._call_end_checked >= 0:
             start = max(0, self._call_end_checked - len(CALL_END) + 1)
             if self.buf.find(CALL_END, start) < 0:
                 self._call_end_checked = len(self.buf)
                 return -1
-            self._call_end_checked = -1
-        return call_end(self.buf, self._final)
+        self._restore_scan_body()
+        end = call_end(self.buf, self._final)
+        # #4701: a complete closing sequence may be waiting for lookahead or finish(), not another closing tag.
+        pending = end < 0 and not self._final and call_end(self.buf, final=True) >= 0
+        self._call_end_checked = -1 if end >= 0 or pending else len(self.buf)
+        return end
 
     def _scan(self) -> list[Event]:
         """Advance the streaming view of the call body in self.buf (see stream_tools)."""
@@ -2077,7 +2232,7 @@ class OutputParser:
                     return out
                 self.scall = ToolCall(name=name, arguments={})
                 props = ((self.schemas.get(name) or {}).get("parameters") or {}).get("properties") or {}
-                self.sdeclared = {k: (v or {}).get("type") for k, v in props.items()}
+                self.sdeclared = {k: declared_type(v) for k, v in props.items()}
                 out.append(Event("tool_start", call=self.scall))
                 args("{")
                 self.sp += b + 1
@@ -2525,7 +2680,7 @@ class OutputParser:
             else:
                 drop = None
                 if self.bare:                       # no wrapper: the call ends at its </function>; a stray
-                    i = function_end(self.buf)      # </tool_call> after it is the wrapper's closer, dropped
+                    i = self._function_end()        # </tool_call> after it is the wrapper's closer, dropped
                     if i >= 0:
                         after = self.buf[i:].lstrip()
                         if after.startswith(CALL_END):
@@ -2537,7 +2692,7 @@ class OutputParser:
                     if i >= 0:
                         drop = len(CALL_END)
                     # Only a following call opener confirms an omitted wrapper closer.
-                    f = function_end(self.buf)
+                    f = self._function_end()
                     nxt = self.buf[f:].lstrip() if f >= 0 else ""
                     if re.match(r"<tool_call>\s*<function=\s*[^<>\s]+\s*>", nxt):
                         i, drop = f, 0
@@ -2558,6 +2713,8 @@ class OutputParser:
                     else:
                         out += self._scan()
                 if i < 0 or drop is None:
+                    if self.stream_tools:
+                        self._compact_scan_body()
                     return out
                 body = self.buf[:i]
                 self.buf = self.buf[i + drop:]
@@ -2582,11 +2739,14 @@ class OutputParser:
             rest = self.case.flush()
             if rest:
                 out += self._feed_delta(rest)
+        self._restore_scan_body()               # #4686: the call body moved out while it streamed comes back first
         if self._held:
             self.buf, self._held = self.buf + self._held, ""
         if self.buf and self.state in ("call", "rcall"):
             self._final = True                  # #4701: a call held after its closing tags (could a file's text go on?) is whole now
             out += self.feed("")
+        # The final feed may compact a still-incomplete streamed call again.
+        self._restore_scan_body()
         if self.state == "rcall" and reason in (None, "stop"):
             # #4427: a call in the reasoning whose `</function>` is the end of the output (the `</tool_call>` left out)
             # is as whole as one in the answer: it waits for the turn's end like the others
