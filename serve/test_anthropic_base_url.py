@@ -161,12 +161,7 @@ class ErrorEnvelope(unittest.TestCase):
             status, request_id, body = self.post("/v1/messages", chat)
         self.assertEqual(status, 413)
         self.assert_envelope(request_id, body, "request_too_large")
-        # the code that says why it was refused stays
-        with mock.patch.object(self.svc, "reserve_inference", return_value=False):
-            status, request_id, body = self.post("/v1/messages", chat)
-        self.assertEqual(status, 429)
-        self.assert_envelope(request_id, body, "rate_limit_error")
-        self.assertEqual(body["error"]["code"], "admission_full")
+        # (upstream's 429 admission_full case is left out: MoMoE's server has no inference admission limit)
 
     def test_a_503_is_not_called_overloaded(self):
         # 503 has no row on the page, and Claude Code treats "overloaded_error" in a message as an overload

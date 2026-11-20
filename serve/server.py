@@ -357,6 +357,12 @@ class EngineDied(RuntimeError):
     """The engine process ended in the middle of a request (issue #27: on Linux, the out-of-memory killer)."""
 
 
+def died_note(e: Exception) -> str:
+    """What an API error says about an EngineDied: the cause, and that the next request restarts the engine - only where
+    it really is ended (an exception with restarts = False is raised while the engine is left running)."""
+    return f"{e}; the next request restarts it" if getattr(e, "restarts", True) else str(e)
+
+
 class EngineStarting(RuntimeError):
     """The engine is (re)starting and has not said READY yet (#344): no context size to plan a request with - a 503,
     not a 400 about the prompt."""
@@ -1439,7 +1445,7 @@ class StrataEngine:
                 return line
         return None
 
-    def _release_slot_when_done(self, slot: int, stream: list[int] | None = None):
+    def _release_slot_when_done(self, slot: int, stream: list[int] | None = None, born=None):
         """A slot whose consumer left (a stop token, a stop string, a disconnect): BSTOP it and free it once the engine
         says BDONE (in the background).  `stream`: the prompt and every token of it so far - with the tokens still to
         come before BDONE, all but the last are what the slot holds then (the next turn of its conversation)."""
@@ -1451,7 +1457,7 @@ class StrataEngine:
             pass
         q, busy, held = self.slot_q[slot], self.slot_busy, self.slot_held   # this process's: restart() replaces them
         releasing, claims = self.slot_releasing, self.slot_claims
-        if self.gen != born:     # #5657: a restart came in since the check above (its number moves before its objects
+        if born is not None and self.gen != born:     # #5657: a restart came in since the check above (its number moves before its objects
             return               # do): these sets may be the NEW engine's, whose request holds this slot number now
         with self.slot_cv:
             # Transfer the claim before the waiter can free the slot. A queued BDONE may let the next request
@@ -1944,7 +1950,7 @@ class StrataEngine:
                 elif phase == "slot":
                     self.slot_held[slot] = []
                     stream = list(prompt) + out[gen0:] if gen0 is not None and len(out) > gen0 else None
-                    self._release_slot_when_done(slot, stream)    # freed at its BDONE (#5657: it owns the claim now)
+                    self._release_slot_when_done(slot, stream, born)    # freed at its BDONE (#5657: it owns the claim now)
                 else:
                     with self.slot_cv:
                         self.slot_busy[slot] = False
