@@ -7647,6 +7647,8 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
         prompt_end = pool_tally(e.pool);
         int generated = 0, accepted = 0, offered = 0;
         const char * finish = "cancel";
+        static const bool stop_bound = [] { const char * v = getenv("STRATA_SERVE_STOP_BOUND"); return !v || strcmp(v, "0") != 0; }();
+        static const bool stop_skip = [] { const char * v = getenv("STRATA_SERVE_STOP_SKIP"); return !v || strcmp(v, "0") != 0; }();
         if (!cancelled) {
             live.assign(prompt.begin(), prompt.end());
             if (m.has_mtp) last_h.assign(H.end() - ne, H.end());
@@ -7724,6 +7726,27 @@ static int serve_loop(Engine & e, int mtp_k, float spec_min_p) {
                         ++n;
                     }
                     accepted += n;
+                    // A window that finished after the server's STOP is dropped whole: the server throws away every token
+                    // after its STOP, so committing the window would leave the state past what the client was sent, and
+                    // the next turn of the conversation (whose prompt ends where the client's reply did) could not
+                    // continue from it - the delta net cannot be cut back - and would read the reply again from the
+                    // prompt's checkpoint.  Upstream Strata 33648fef1; STRATA_SERVE_STOP_SKIP=0 turns it off.
+                    // (Not for DeepSeek's own rollback, and a one-token window has no saved state to go back to.)
+                    if (stop_skip && sv.stop && T > 1 && !m.ds41) {
+                        restore_state(e, e.saved);
+                        finish = "cancel";
+                        break;
+                    }
+                    // The rows committed are only those whose outputs this request emits (#4677, upstream Strata
+                    // 243fdb213): up to the first end token among them, and no more than max_new allows.  Before, every
+                    // accepted row was committed, so a reply that ended inside the window left drafted tokens in the
+                    // state after it.  STRATA_SERVE_STOP_BOUND=0 turns it off.
+                    if (stop_bound) {
+                        const int left = max_new - generated;    // tokens this request may still emit (>= 1 here)
+                        int k = 0;
+                        while (k < n && k + 1 < left && std::find(eos.begin(), eos.end(), nx[k]) == eos.end()) ++k;
+                        n = k;
+                    }
                     if (n + 1 < T && m.ds41) ds_rollback(e, p, n);
                     else if (n + 1 < T) {
                         restore_state(e, e.saved);
