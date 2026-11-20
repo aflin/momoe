@@ -4516,6 +4516,18 @@ class CallingEngine(MockEngine):
             yield t
 
 
+class ClosestDeclared(unittest.TestCase):
+    """#5904 / #5933: the hint in strata_rejected_tool_calls (upstream 198cb95c9's unit cases)."""
+
+    def test_closest_declared(self):
+        from serve.server import closest_declared
+        self.assertEqual(closest_declared("read_file", ["read", "write"]), "read")
+        self.assertEqual(closest_declared("ReadFile", ["read_file", "write"]), "read_file")
+        self.assertIsNone(closest_declared("file", ["read_file", "write_file"]))      # two candidates: no guess
+        self.assertIsNone(closest_declared("gashfunction_calls", ["grep", "read"]))
+        self.assertIsNone(closest_declared("x", []))
+
+
 class ForcedToolChoice(unittest.TestCase):
     """tool_choice "required" or a named function: the server writes the call's opening - after the thinking, or at
     the end of the prompt without thinking - so the model can only go on with a call."""
